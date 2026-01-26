@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 takwerx
+Copyright (c) 2025 [Your Name/Organization]
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +19,15 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+This project includes or references the following third-party software:
+
+MediaMTX (https://github.com/bluenviron/mediamtx)
+- Licensed under the MIT License
+- Copyright (c) 2020 aler9
+
+Caddy (https://github.com/caddyserver/caddy)
+- Licensed under the Apache License 2.0
+- Copyright 2015 Matthew Holt and The Caddy Authors
