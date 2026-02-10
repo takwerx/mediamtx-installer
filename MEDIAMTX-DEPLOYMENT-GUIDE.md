@@ -101,9 +101,9 @@ cd mediamtx-installer
 
 **Make scripts executable:**
 ```bash
-chmod +x ubuntu-22.04/Ubuntu_22_04_MediaMTX_install.sh
+chmod +x ubuntu-22.04/Ubuntu_22.04_MediaMTX_install.sh
 chmod +x config-editor/Install_MediaMTX_Config_Editor.sh
-chmod +x ubuntu-22.04/Ubuntu_22_04_Install_MediaMTX_Caddy.sh
+chmod +x ubuntu-22.04/Ubuntu_22.04_Install_MediaMTX_Caddy.sh
 ```
 
 ---
@@ -111,7 +111,7 @@ chmod +x ubuntu-22.04/Ubuntu_22_04_Install_MediaMTX_Caddy.sh
 ### Step 1: Install MediaMTX
 
 ```bash
-sudo ./ubuntu-22.04/Ubuntu_22_04_MediaMTX_install.sh
+sudo ./ubuntu-22.04/Ubuntu_22.04_MediaMTX_install.sh
 ```
 
 **During install:**
@@ -179,7 +179,7 @@ sudo ./config-editor/Install_MediaMTX_Config_Editor.sh
 - MediaMTX and Web Editor installed and working
 
 ```bash
-sudo ./ubuntu-22.04/Ubuntu_22_04_Install_MediaMTX_Caddy.sh
+sudo ./ubuntu-22.04/Ubuntu_22.04_Install_MediaMTX_Caddy.sh
 ```
 
 **During setup:**

@@ -20,13 +20,13 @@ git clone https://github.com/takwerx/mediamtx-installer.git
 cd mediamtx-installer
 
 # 2. Install MediaMTX
-sudo ./ubuntu-22.04/Ubuntu_22_04_MediaMTX_install.sh
+sudo ./ubuntu-22.04/Ubuntu_22.04_MediaMTX_install.sh
 
 # 3. Install Web Configuration Editor
 sudo ./config-editor/Install_MediaMTX_Config_Editor.sh
 
 # 4. (Optional) Add HTTPS and RTSPS certificates
-sudo ./ubuntu-22.04/Ubuntu_22_04_Install_MediaMTX_Caddy.sh
+sudo ./ubuntu-22.04/Ubuntu_22.04_Install_MediaMTX_Caddy.sh
 ```
 
 **That's it!** MediaMTX is streaming at `rtsp://YOUR-IP:8554`
@@ -87,8 +87,8 @@ sudo ./ubuntu-22.04/Ubuntu_22_04_Install_MediaMTX_Caddy.sh
 ```
 mediamtx-installer/
 ├── ubuntu-22.04/
-│   ├── Ubuntu_22_04_MediaMTX_install.sh          # MediaMTX installation
-│   └── Ubuntu_22_04_Install_MediaMTX_Caddy.sh    # SSL/Let's Encrypt setup
+│   ├── Ubuntu_22.04_MediaMTX_install.sh          # MediaMTX installation
+│   └── Ubuntu_22.04_Install_MediaMTX_Caddy.sh    # SSL/Let's Encrypt setup
 ├── config-editor/
 │   ├── Install_MediaMTX_Config_Editor.sh          # Web editor installer (universal)
 │   └── mediamtx_config_editor.py                  # Web editor application
@@ -106,7 +106,7 @@ mediamtx-installer/
 Installs MediaMTX, FFmpeg, deploys custom YAML configuration, configures firewall.
 
 ```bash
-sudo ./ubuntu-22.04/Ubuntu_22_04_MediaMTX_install.sh
+sudo ./ubuntu-22.04/Ubuntu_22.04_MediaMTX_install.sh
 ```
 
 **What it does:**
@@ -144,7 +144,7 @@ sudo ./config-editor/Install_MediaMTX_Config_Editor.sh
 Adds HTTPS for web editor and certificate paths for RTSPS/HLS encryption.
 
 ```bash
-sudo ./ubuntu-22.04/Ubuntu_22_04_Install_MediaMTX_Caddy.sh
+sudo ./ubuntu-22.04/Ubuntu_22.04_Install_MediaMTX_Caddy.sh
 ```
 
 **What it does:**
