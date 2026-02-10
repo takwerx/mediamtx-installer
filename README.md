@@ -1,300 +1,185 @@
 # MediaMTX Automated Installer
 
-**Automated installation scripts for MediaMTX streaming server with Caddy reverse proxy and web-based configuration editor.**
+**Automated installation scripts for MediaMTX streaming server with Caddy HTTPS, RTSPS/HLS encryption, and web-based configuration editor.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![MediaMTX](https://img.shields.io/badge/MediaMTX-Auto--Download-blue)](https://github.com/bluenviron/mediamtx)
-[![OS Support](https://img.shields.io/badge/OS-Rocky%209%20%7C%20Ubuntu%2022.04-green)]()
+[![OS Support](https://img.shields.io/badge/OS-Ubuntu%2022.04-green)]()
 
 ## ✨ Features
 
 - 🚀 **Auto-downloads latest MediaMTX** from GitHub - no manual downloads needed!
+- 📦 **Ships with production YAML** - proven custom configuration, not the default
 - 🔒 **Automatic HTTPS** with Caddy and Let's Encrypt (no certbot cronjobs!)
-- 🎨 **Web-based YAML editor** - manage configuration through browser interface
-- 🎬 **FFmpeg pre-installed** for HLS streaming and transcoding
-- 📦 **Multi-OS support** - Rocky Linux 9 and Ubuntu 22.04
+- 🔐 **RTSPS/HLS encryption** - Caddy certificates auto-configured for MediaMTX
+- 🎨 **Web-based configuration editor** - manage users, encryption, recording, and more
+- 🎬 **FFmpeg pre-installed** for HLS streaming and live/ path transcoding
 - ⚡ **Zero manual downloads** - completely automated installation
-- 🔧 **Version-agnostic** - always installs the latest MediaMTX release
+- 🛡️ **Unattended-upgrade detection** - waits for system updates before installing
 
 ## 📋 What is MediaMTX?
 
-[MediaMTX](https://github.com/bluenviron/mediamtx) is a ready-to-use, zero-dependency real-time media server and media proxy that allows you to publish, read, proxy, record and playback video and audio streams. It supports multiple protocols including RTSP, RTMP, HLS, WebRTC, and SRT.
+[MediaMTX](https://github.com/bluenviron/mediamtx) is a ready-to-use, zero-dependency real-time media server that supports RTSP, RTMP, HLS, WebRTC, and SRT protocols.
 
 **Perfect for:**
-- Live video streaming
+- Live drone video streaming (DJI → ATAK/TAK)
 - Security camera systems (RTSP)
-- OBS Studio streaming (RTMP)
-- Browser-based playback (HLS/WebRTC)
+- Emergency services video distribution
+- Browser-based playback (HLS)
 - Low-latency applications (SRT)
 
 ## 🎯 Quick Start
 
 ### Prerequisites
-- Fresh VPS with Rocky Linux 9 or Ubuntu 22.04
+- Fresh VPS with Ubuntu 22.04
 - Root access
-- (Optional) Domain name for HTTPS
+- (Optional) Domain name for HTTPS/RTSPS
 
-### Rocky Linux 9
-
-```bash
-# Download the installer
-wget https://raw.githubusercontent.com/YOUR-USERNAME/mediamtx-installer/main/rocky-9/Rocky_9_MediaMTX_install.sh
-
-# Make executable
-chmod +x Rocky_9_MediaMTX_install.sh
-
-# Run installer
-sudo ./Rocky_9_MediaMTX_install.sh
-```
-
-### Ubuntu 22.04
+### Installation (3 Scripts, Run in Order)
 
 ```bash
-# Download the installer
-wget https://raw.githubusercontent.com/YOUR-USERNAME/mediamtx-installer/main/ubuntu-22.04/Ubuntu_22.04_MediaMTX_install.sh
+# Clone the repo
+git clone https://github.com/takwerx/mediamtx-installer.git
+cd mediamtx-installer
 
-# Make executable
-chmod +x Ubuntu_22.04_MediaMTX_install.sh
+# Step 1: Install MediaMTX
+chmod +x ubuntu-22.04/Ubuntu_22_04_MediaMTX_install.sh
+sudo ./ubuntu-22.04/Ubuntu_22_04_MediaMTX_install.sh
 
-# Run installer
-sudo ./Ubuntu_22.04_MediaMTX_install.sh
+# Step 2: Install Web Configuration Editor
+chmod +x config-editor/Install_MediaMTX_Config_Editor.sh
+sudo ./config-editor/Install_MediaMTX_Config_Editor.sh
+
+# Step 3 (Optional): Install Caddy for HTTPS + RTSPS certs
+chmod +x ubuntu-22.04/Install_MediaMTX_Caddy.sh
+sudo ./ubuntu-22.04/Install_MediaMTX_Caddy.sh
 ```
 
-**Installation time:** ~5 minutes
+**Installation time:** ~5-10 minutes
 
-The script will prompt for:
-- MediaMTX username (default: admin)
-- MediaMTX password (default: admin)
+**No username/password prompts!** The installer ships with a secure configuration:
+- FFmpeg localhost user (internal, no auth needed)
+- HLS viewer user with auto-generated random password
+- Public teststream (no auth required for testing)
+- All other users managed through the Web Editor
 
-**That's it!** MediaMTX and FFmpeg are automatically installed and configured.
+## 📡 What Each Script Does
 
-## 🔒 Add HTTPS with Caddy (Optional)
+### Script 1: MediaMTX Installer
+- Downloads and installs latest MediaMTX binary
+- Installs FFmpeg for HLS transcoding
+- Deploys custom production YAML configuration
+- Creates systemd service
+- Configures firewall (UFW)
+- Generates random HLS viewer password
 
-If you have a domain name, add automatic HTTPS:
+### Script 2: Web Editor Installer
+- Installs Python3, Flask, and dependencies (psutil, requests, ruamel.yaml)
+- Deploys web-based configuration editor
+- Creates systemd service on port 5000
+- Default login: admin / admin (change after first login!)
 
-### Rocky Linux 9
-```bash
-wget https://raw.githubusercontent.com/YOUR-USERNAME/mediamtx-installer/main/rocky-9/Rocky_9_Caddy_setup.sh
-chmod +x Rocky_9_Caddy_setup.sh
-sudo ./Rocky_9_Caddy_setup.sh
-```
+### Script 3: Caddy Installer
+- Installs Caddy web server
+- Creates HTTPS reverse proxy for Web Editor
+- Obtains Let's Encrypt SSL certificates
+- Writes certificate paths to MediaMTX YAML (for RTSPS/HLS)
+- **Does NOT enable encryption** — you do that via Web Editor when ready
+- Safely appends to existing Caddyfile (TAK Server coexistence)
 
-### Ubuntu 22.04
-```bash
-wget https://raw.githubusercontent.com/YOUR-USERNAME/mediamtx-installer/main/ubuntu-22.04/Ubuntu_22.04_Caddy_setup.sh
-chmod +x Ubuntu_22.04_Caddy_setup.sh
-sudo ./Ubuntu_22.04_Caddy_setup.sh
-```
+## 🔐 Enabling Encryption (After Caddy Install)
 
-**Requirements:**
-- Domain name (e.g., video.example.com)
-- DNS A record pointing to your server IP
-- Ports 80 and 443 accessible
+Caddy fills in the certificate paths but leaves encryption disabled. Enable when ready:
 
-## 🎨 Web Configuration Editor (Optional)
+**RTSPS (encrypted RTSP):**
+1. Open Web Editor → Advanced YAML
+2. Search for `rtspEncryption`
+3. Change to: `rtspEncryption: "optional"`
+4. Save and restart MediaMTX
 
-Manage MediaMTX configuration through a beautiful web interface instead of editing YAML files manually!
-
-```bash
-wget https://raw.githubusercontent.com/YOUR-USERNAME/mediamtx-installer/main/config-editor/Install_MediaMTX_Config_Editor.sh
-wget https://raw.githubusercontent.com/YOUR-USERNAME/mediamtx-installer/main/config-editor/mediamtx_config_editor.py
-chmod +x Install_MediaMTX_Config_Editor.sh mediamtx_config_editor.py
-sudo ./Install_MediaMTX_Config_Editor.sh
-```
-
-Access at: `http://YOUR-SERVER-IP:5000`
-
-**Features:**
-- 📝 User management (add/edit users and passwords)
-- 🔧 Protocol settings (RTSP, RTMP, HLS, SRT ports)
-- 💾 Automatic backups before changes
-- ⚡ Service control (start/stop/restart)
-- ✅ YAML syntax validation
-- 🎨 Clean tabbed interface
+**HLS encryption:**
+1. Open Web Editor → Advanced YAML
+2. Search for `hlsEncryption`
+3. Change to: `hlsEncryption: yes`
+4. Save and restart MediaMTX
 
 ## 📡 Streaming Protocols
 
-After installation, MediaMTX supports:
+| Protocol | Port | Use Case |
+|----------|------|----------|
+| **RTSP** | 8554 | Most apps, VLC, cameras, ATAK |
+| **RTSPS** | 8322 | Encrypted RTSP (after enabling) |
+| **HLS** | 8888 | Browser playback |
+| **SRT** | 8890 | Low-latency, reliable |
 
-| Protocol | Port | Use Case | Example URL |
-|----------|------|----------|-------------|
-| **RTSP** | 8554 | Most applications, VLC, cameras | `rtsp://user:pass@IP:8554/stream` |
-| **RTMP** | 1935 | OBS Studio, legacy apps | `rtmp://IP:1935/stream` |
-| **HLS** | 8888 | Browser playback, iOS | `http://IP:8888/stream/index.m3u8` |
-| **WebRTC** | 8889 | Low-latency browser | `http://IP:8889/stream` |
-| **SRT** | 8890 | Low-latency, reliable | `srt://IP:8890?streamid=stream` |
+**FFmpeg live/ path transcoding:** Publish to `rtsp://server:8554/live/uas1` and it automatically creates a clean `rtsp://server:8554/uas1` stream.
 
-With Caddy (HTTPS):
-- **HLS:** `https://video.example.com/hls/stream/index.m3u8`
-- **WebRTC:** `https://video.example.com/webrtc/?stream=stream`
+## 🎨 Web Configuration Editor
 
-## 🎬 Example: Stream with OBS Studio
+Access at `http://YOUR-IP:5000` (or `https://yourdomain.com` after Caddy)
 
-### RTMP Method
-1. **OBS Settings → Stream**
-2. **Service:** Custom
-3. **Server:** `rtmp://YOUR-IP:1935/`
-4. **Stream Key:** `mystream`
+**Default login:** admin / admin
 
-### RTSP Method (Recommended)
-1. **OBS Settings → Stream**
-2. **Service:** Custom
-3. **Server:** `rtsp://YOUR-IP:8554/mystream`
-4. **Use authentication:** Yes
-5. **Username:** (your username)
-6. **Password:** (your password)
+**Features:**
+- 📊 Dashboard with system stats and active streams
+- 👥 User management (add/edit/revoke streaming users)
+- 🔧 Protocol settings
+- 🎥 Recording management
+- 🎨 Theme/styling customization
+- 📝 Advanced YAML editor
+- ⚡ Service control (start/stop/restart)
+- 💾 Automatic backups
+- 🔄 Auto-update from GitHub releases
 
-### SRT Method (Low Latency)
-1. **OBS Settings → Stream**
-2. **Service:** Custom
-3. **Server:** `srt://YOUR-IP:8890?streamid=mystream`
+## 📂 Repository Contents
 
-## 📺 Example: View Stream
-
-### VLC Media Player
 ```
-Media → Open Network Stream
-rtsp://username:password@YOUR-IP:8554/stream
+mediamtx-installer/
+├── README.md
+├── DEPLOYMENT_GUIDE.md
+├── LICENSE
+├── ubuntu-22.04/
+│   ├── Ubuntu_22_04_MediaMTX_install.sh    ← MediaMTX + FFmpeg + custom YAML
+│   └── Install_MediaMTX_Caddy.sh           ← Caddy + HTTPS + cert paths
+└── config-editor/
+    ├── Install_MediaMTX_Config_Editor.sh    ← Web editor installer
+    └── mediamtx_config_editor.py            ← Web editor application
 ```
 
-### FFplay (Command Line)
+## 🔒 Security
+
+- HLS viewer password is auto-generated (16 random characters)
+- FFmpeg internal user locked to localhost only (127.0.0.1)
+- Web editor has its own login system (separate from MediaMTX users)
+- Encryption disabled by default — enable after Caddy provides certificates
+- All user management done through web editor (no plaintext passwords in scripts)
+
+## 🆘 Troubleshooting
+
 ```bash
-ffplay rtsp://username:password@YOUR-IP:8554/stream
-```
-
-### Web Browser (HLS)
-```html
-<video controls>
-    <source src="https://video.example.com/hls/stream/index.m3u8" type="application/x-mpegURL">
-</video>
-```
-
-## 📁 Repository Contents
-
-| File | Description |
-|------|-------------|
-| `rocky-9/Rocky_9_MediaMTX_install.sh` | Main installer for Rocky Linux 9 |
-| `rocky-9/Rocky_9_Caddy_setup.sh` | Caddy HTTPS setup for Rocky Linux 9 |
-| `ubuntu-22.04/Ubuntu_22.04_MediaMTX_install.sh` | Main installer for Ubuntu 22.04 |
-| `ubuntu-22.04/Ubuntu_22.04_Caddy_setup.sh` | Caddy HTTPS setup for Ubuntu 22.04 |
-| `config-editor/mediamtx_config_editor.py` | Web-based configuration editor |
-| `config-editor/Install_MediaMTX_Config_Editor.sh` | Config editor installer |
-| `DEPLOYMENT_GUIDE.md` | Comprehensive deployment documentation |
-
-## 🔧 Post-Installation
-
-### Check Status
-```bash
+# Check MediaMTX
 systemctl status mediamtx
 journalctl -u mediamtx -f
-```
 
-### Edit Configuration
-```bash
-# Manual method
-nano /usr/local/etc/mediamtx.yml
+# Check Web Editor
+systemctl status mediamtx-webeditor
+journalctl -u mediamtx-webeditor -f
 
-# Or use web editor
-http://YOUR-IP:5000
-```
-
-### Common Commands
-```bash
-# Restart MediaMTX
-systemctl restart mediamtx
-
-# Stop MediaMTX
-systemctl stop mediamtx
-
-# Start MediaMTX
-systemctl start mediamtx
-
-# View logs
-journalctl -u mediamtx -f
-```
-
-## 🔒 Security Best Practices
-
-1. **Change default credentials** immediately after installation
-2. **Restrict web config editor** access by IP using firewall
-3. **Use HTTPS** (Caddy) for all browser-based access
-4. **Enable encryption** for protocols (RTSP/RTMP/SRT)
-5. **Keep MediaMTX updated** regularly
-
-### Secure Web Config Editor
-
-```bash
-# Rocky - Allow only your IP
-firewall-cmd --add-rich-rule='rule family="ipv4" source address="YOUR-IP" port port="5000" protocol="tcp" accept' --permanent
-firewall-cmd --reload
-
-# Ubuntu - Allow only your IP
-ufw allow from YOUR-IP to any port 5000
+# Check Caddy
+systemctl status caddy
+journalctl -u caddy -f
 ```
 
 ## 📖 Documentation
 
-- **[Full Deployment Guide](DEPLOYMENT_GUIDE.md)** - Complete documentation with examples
-- **[MediaMTX Official Docs](https://github.com/bluenviron/mediamtx)** - MediaMTX documentation
-- **[Caddy Documentation](https://caddyserver.com/docs/)** - Caddy web server docs
-
-## 🆘 Troubleshooting
-
-### MediaMTX won't start
-```bash
-# Check logs
-journalctl -u mediamtx -n 50
-
-# Verify config syntax
-/usr/local/bin/mediamtx /usr/local/etc/mediamtx.yml --check
-```
-
-### Can't connect to stream
-```bash
-# Check firewall
-firewall-cmd --list-all  # Rocky
-ufw status               # Ubuntu
-
-# Test locally first
-ffplay rtsp://127.0.0.1:8554/test
-```
-
-### Caddy certificate fails
-```bash
-# Verify DNS
-dig your-domain.com
-
-# Check Caddy logs
-journalctl -u caddy -n 50
-
-# Validate Caddyfile
-caddy validate --config /etc/caddy/Caddyfile
-```
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit issues or pull requests.
+- **[Full Deployment Guide](DEPLOYMENT_GUIDE.md)**
+- **[MediaMTX Official Docs](https://github.com/bluenviron/mediamtx)**
+- **[Caddy Documentation](https://caddyserver.com/docs/)**
 
 ## 📜 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🔗 Related Projects
-
-- **[MediaMTX](https://github.com/bluenviron/mediamtx)** - The MediaMTX streaming server
-- **[Caddy](https://github.com/caddyserver/caddy)** - The Caddy web server
-- **Your TAK Server Installer** - [Link to your TAK server repo if public]
-
-## ⭐ Star This Repo
-
-If these scripts helped you, please consider giving this repo a star! It helps others find it.
-
-## 📧 Support
-
-For issues specific to these installation scripts, please open a GitHub issue.
-
-For MediaMTX-specific questions, see the [MediaMTX repository](https://github.com/bluenviron/mediamtx/issues).
+MIT License - see [LICENSE](LICENSE)
 
 ---
 
-**Made with ❤️ for the streaming community**
+**Made for emergency services and the streaming community**
