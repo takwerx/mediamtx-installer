@@ -275,10 +275,13 @@ if [ "$SKIP_CERTS" != "true" ]; then
     sed -i "s|^hlsServerKey:.*|hlsServerKey: $KEY_FILE|" /usr/local/etc/mediamtx.yml
     sed -i "s|^hlsServerCert:.*|hlsServerCert: $CERT_FILE|" /usr/local/etc/mediamtx.yml
     
+    # Enable encryption
+    sed -i 's/^rtspEncryption: .*/rtspEncryption: "optional"/' /usr/local/etc/mediamtx.yml
+    sed -i 's/^hlsEncryption: .*/hlsEncryption: yes/' /usr/local/etc/mediamtx.yml
+    
     echo "✓ Certificate paths written to mediamtx.yml"
-    echo ""
-    echo "  NOTE: Encryption is NOT enabled yet."
-    echo "  Enable RTSPS/HLS encryption via the Web Editor when ready."
+    echo "✓ RTSPS encryption enabled (optional - both RTSP and RTSPS work)"
+    echo "✓ HLS encryption enabled"
     
     # Restart MediaMTX to pick up config changes
     systemctl restart mediamtx
