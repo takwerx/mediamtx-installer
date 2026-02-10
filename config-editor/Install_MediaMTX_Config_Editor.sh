@@ -80,7 +80,7 @@ WEB_EDITOR_DIR="/opt/mediamtx-webeditor"
 mkdir -p "$WEB_EDITOR_DIR"
 mkdir -p "$WEB_EDITOR_DIR/backups"
 mkdir -p "$WEB_EDITOR_DIR/recordings"
-mkdir -p "$WEB_EDITOR_DIR/test_files"
+mkdir -p "$WEB_EDITOR_DIR/test_videos"
 
 # Find the Python file
 if [ -f "./config-editor/mediamtx_config_editor.py" ]; then
@@ -105,10 +105,10 @@ chmod 755 "$WEB_EDITOR_DIR/mediamtx_config_editor.py"
 
 # Copy test video file if present
 if [ -f "./config-editor/truck_60.ts" ]; then
-    cp ./config-editor/truck_60.ts "$WEB_EDITOR_DIR/test_files/"
+    cp ./config-editor/truck_60.ts "$WEB_EDITOR_DIR/test_videos/"
     echo "✓ Test video (truck_60.ts) installed"
 elif [ -f "./truck_60.ts" ]; then
-    cp ./truck_60.ts "$WEB_EDITOR_DIR/test_files/"
+    cp ./truck_60.ts "$WEB_EDITOR_DIR/test_videos/"
     echo "✓ Test video (truck_60.ts) installed"
 else
     echo "ℹ  No test video found (optional - upload via web editor later)"
