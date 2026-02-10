@@ -28,6 +28,35 @@ if ! command -v mediamtx &> /dev/null || [ ! -f /usr/local/etc/mediamtx.yml ]; t
 fi
 
 # ==========================================
+# Unattended-Upgrade Detection
+# ==========================================
+if pgrep -f "/usr/bin/unattended-upgrade$" > /dev/null; then
+    echo ""
+    echo "************************************************************"
+    echo "  YOUR OPERATING SYSTEM IS CURRENTLY DOING UPGRADES"
+    echo "  We need to wait until this is done."
+    echo "  The process will auto-start once updates are complete."
+    echo "************************************************************"
+    echo ""
+    
+    SECONDS=0
+    while pgrep -f "/usr/bin/unattended-upgrade$" > /dev/null; do
+        printf "\rWaiting... %02d:%02d elapsed" $((SECONDS/60)) $((SECONDS%60))
+        sleep 2
+    done
+    
+    echo ""
+    echo ""
+    echo "✓ Updates complete after $((SECONDS/60)) minutes! Starting installation..."
+    echo ""
+    sleep 2
+else
+    echo "Checking for system upgrades in progress..."
+    echo "✓ No system upgrades in progress, continuing..."
+    echo ""
+fi
+
+# ==========================================
 # Step 1: Domain Configuration
 # ==========================================
 echo "=========================================="
