@@ -194,7 +194,8 @@ sudo ./ubuntu-22.04/Ubuntu_22.04_Install_MediaMTX_Caddy.sh
 - Writes certificate paths into mediamtx.yml:
   - `rtspServerKey` / `rtspServerCert`
   - `hlsServerKey` / `hlsServerCert`
-- Does NOT enable encryption (you do that in Web Editor when ready)
+- Enables RTSPS encryption (optional — both RTSP and RTSPS work)
+- Enables HLS encryption (HTTPS on port 8888)
 - Restarts MediaMTX to pick up config changes
 
 **After Caddy:** Access web editor at `https://yourdomain.com`
@@ -222,7 +223,7 @@ systemctl status caddy
 2. **Change admin password** immediately
 3. **Add streaming users** for your agencies/teams via Users & Auth tab
 4. **Test streaming** — publish to `rtsp://IP:8554/teststream` and view in VLC
-5. **Enable encryption** when ready (see below)
+5. **Verify encryption** — RTSPS and HLS encryption are enabled automatically by Caddy
 
 ---
 
@@ -267,28 +268,25 @@ The web editor manages two independent login systems:
 
 ---
 
-## Enabling Encryption
+## Encryption
 
-After Caddy installs certificates, enable encryption via the Web Editor:
+The Caddy installer (Script 3) automatically enables encryption:
 
-### RTSPS (Encrypted RTSP on port 8322)
+- **RTSPS** — enabled in "optional" mode (both RTSP on 8554 and RTSPS on 8322 work)
+- **HLS** — enabled with HTTPS on port 8888
 
-1. Web Editor → Advanced YAML
-2. Search for `rtspEncryption`
-3. Change `rtspEncryption: "no"` to `rtspEncryption: "optional"`
-4. Save → Restart MediaMTX
+**No manual setup needed.** Certificates are obtained from Let's Encrypt and paths are written to MediaMTX config automatically.
+
+### Changing Encryption Settings
+
+If you need to adjust encryption later:
+
+1. Web Editor → Protocols tab
+2. Change RTSP Encryption: `"no"` / `"optional"` / `"strict"`
+3. Save → Restart MediaMTX
 
 **"optional"** means both RTSP (8554) and RTSPS (8322) work simultaneously.
 **"strict"** means only RTSPS (8322) works.
-
-### HLS Encryption (HTTPS on port 8888)
-
-1. Web Editor → Advanced YAML
-2. Search for `hlsEncryption`
-3. Change `hlsEncryption: no` to `hlsEncryption: yes`
-4. Save → Restart MediaMTX
-
-After enabling, HLS is accessed at `https://domain:8888/streamname/`
 
 ---
 
@@ -434,10 +432,9 @@ ufw allow from YOUR-IP to any port 5000
 ufw deny 5000
 ```
 
-### 3. Enable Encryption
-- Enable RTSPS for encrypted RTSP connections
-- Enable HLS encryption for browser playback
-- Add SRT passphrases for encrypted SRT streams
+### 3. Encryption
+- RTSPS and HLS encryption are enabled automatically when Caddy is installed
+- Add SRT passphrases for encrypted SRT streams via Protocols tab
 
 ### 4. Use HTTPS
 Always use Caddy for production deployments — provides HTTPS for the web editor automatically.

@@ -152,7 +152,7 @@ sudo ./ubuntu-22.04/Ubuntu_22.04_Install_MediaMTX_Caddy.sh
 - Obtains Let's Encrypt certificate
 - Configures HTTPS reverse proxy for web editor
 - Writes certificate paths to MediaMTX YAML
-- Does NOT enable encryption (you do that in web editor when ready)
+- Enables RTSPS and HLS encryption automatically
 
 **Access:** `https://yourdomain.com`
 

@@ -89,21 +89,17 @@ sudo ./ubuntu-22.04/Ubuntu_22.04_Install_MediaMTX_Caddy.sh
 
 **Access:** `https://yourdomain.com`
 
-> **Note:** Caddy writes certificate paths to mediamtx.yml but does NOT enable encryption. Enable RTSPS/HLS encryption via the Web Editor when ready.
+> **Note:** Caddy automatically enables RTSPS and HLS encryption using Let's Encrypt certificates.
 
 ---
 
-## 5. Enable Encryption (After Caddy)
+## 5. Encryption (Automatic with Caddy)
 
-### RTSPS
-1. Web Editor → Advanced YAML
-2. Change `rtspEncryption: "no"` to `rtspEncryption: "optional"`
-3. Save → Restart MediaMTX
+Caddy automatically enables:
+- **RTSPS** — optional mode (both RTSP 8554 and RTSPS 8322 work)
+- **HLS** — HTTPS on port 8888
 
-### HLS Encryption
-1. Web Editor → Advanced YAML
-2. Change `hlsEncryption: no` to `hlsEncryption: yes`
-3. Save → Restart MediaMTX
+To change settings later: Web Editor → Protocols tab.
 
 ---
 
