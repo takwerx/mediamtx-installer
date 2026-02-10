@@ -1,185 +1,264 @@
-# MediaMTX Automated Installer
-
-**Automated installation scripts for MediaMTX streaming server with Caddy HTTPS, RTSPS/HLS encryption, and web-based configuration editor.**
+# MediaMTX Streaming Server Installer
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![MediaMTX](https://img.shields.io/badge/MediaMTX-Auto--Download-blue)](https://github.com/bluenviron/mediamtx)
 [![OS Support](https://img.shields.io/badge/OS-Ubuntu%2022.04-green)]()
 
-## ✨ Features
+**Production-ready MediaMTX streaming server deployment with HTTPS, RTSPS encryption, and web-based configuration editor.**
 
-- 🚀 **Auto-downloads latest MediaMTX** from GitHub - no manual downloads needed!
-- 📦 **Ships with production YAML** - proven custom configuration, not the default
-- 🔒 **Automatic HTTPS** with Caddy and Let's Encrypt (no certbot cronjobs!)
-- 🔐 **RTSPS/HLS encryption** - Caddy certificates auto-configured for MediaMTX
-- 🎨 **Web-based configuration editor** - manage users, encryption, recording, and more
-- 🎬 **FFmpeg pre-installed** for HLS streaming and live/ path transcoding
-- ⚡ **Zero manual downloads** - completely automated installation
-- 🛡️ **Unattended-upgrade detection** - waits for system updates before installing
+Automated installation, SSL configuration, and streaming management for emergency services and live video operations. Created and maintained by [The TAK Syndicate](https://www.thetaksyndicate.org).
 
-## 📋 What is MediaMTX?
+---
 
-[MediaMTX](https://github.com/bluenviron/mediamtx) is a ready-to-use, zero-dependency real-time media server that supports RTSP, RTMP, HLS, WebRTC, and SRT protocols.
+## 🚀 Quick Start
 
-**Perfect for:**
-- Live drone video streaming (DJI → ATAK/TAK)
-- Security camera systems (RTSP)
-- Emergency services video distribution
-- Browser-based playback (HLS)
-- Low-latency applications (SRT)
-
-## 🎯 Quick Start
-
-### Prerequisites
-- Fresh VPS with Ubuntu 22.04
-- Root access
-- (Optional) Domain name for HTTPS/RTSPS
-
-### Installation (3 Scripts, Run in Order)
+**Three scripts to deploy a complete streaming server:**
 
 ```bash
-# Clone the repo
+# 1. Download scripts
 git clone https://github.com/takwerx/mediamtx-installer.git
 cd mediamtx-installer
 
-# Step 1: Install MediaMTX
-chmod +x ubuntu-22.04/Ubuntu_22_04_MediaMTX_install.sh
+# 2. Install MediaMTX
 sudo ./ubuntu-22.04/Ubuntu_22_04_MediaMTX_install.sh
 
-# Step 2: Install Web Configuration Editor
-chmod +x config-editor/Install_MediaMTX_Config_Editor.sh
+# 3. Install Web Configuration Editor
 sudo ./config-editor/Install_MediaMTX_Config_Editor.sh
 
-# Step 3 (Optional): Install Caddy for HTTPS + RTSPS certs
-chmod +x ubuntu-22.04/Install_MediaMTX_Caddy.sh
-sudo ./ubuntu-22.04/Install_MediaMTX_Caddy.sh
+# 4. (Optional) Add HTTPS and RTSPS certificates
+sudo ./ubuntu-22.04/Ubuntu_22_04_Install_MediaMTX_Caddy.sh
 ```
 
-**Installation time:** ~5-10 minutes
+**That's it!** MediaMTX is streaming at `rtsp://YOUR-IP:8554`
 
-**No username/password prompts!** The installer ships with a secure configuration:
-- FFmpeg localhost user (internal, no auth needed)
-- HLS viewer user with auto-generated random password
-- Public teststream (no auth required for testing)
-- All other users managed through the Web Editor
+📖 **[Read the complete deployment guide](MEDIAMTX-DEPLOYMENT-GUIDE.md)** for detailed instructions.
+⚡ **[Quick start for experienced users](MEDIAMTX-QUICK-START.md)**
 
-## 📡 What Each Script Does
+---
 
-### Script 1: MediaMTX Installer
-- Downloads and installs latest MediaMTX binary
+## ✨ Features
+
+### 🔧 MediaMTX Installation Script
+- ✅ Auto-downloads latest MediaMTX from GitHub
+- ✅ Ships with proven production YAML configuration
+- ✅ FFmpeg pre-installed for HLS transcoding
+- ✅ live/ path transcoding (publish to live/uas1, view at uas1)
+- ✅ Random HLS viewer password generation
+- ✅ Unattended-upgrade detection (waits for system updates)
+- ✅ Firewall configuration (UFW)
+- ✅ systemd service with auto-start
+
+### 🎨 Web Configuration Editor
+- ✅ User management with agency/group labels
+- ✅ Recording management with retention periods
+- ✅ Public access toggle
+- ✅ Theme/styling customization
+- ✅ Advanced YAML editor
+- ✅ Service control (start/stop/restart)
+- ✅ Automatic backups before changes
+- ✅ Auto-update from GitHub releases
+
+### 🔒 Caddy SSL Script (Optional)
+- ✅ Let's Encrypt SSL certificates (automatic)
+- ✅ HTTPS reverse proxy for web editor
+- ✅ Certificate paths auto-configured for RTSPS/HLS
+- ✅ TAK Server Caddy coexistence (appends, doesn't overwrite)
+- ✅ No manual certificate management
+
+---
+
+## 📋 What You Need
+
+### Required
+- Fresh VPS with Ubuntu 22.04
+- 2GB RAM minimum (4GB+ recommended for HLS)
+- 2+ CPU cores recommended
+- Root/sudo access
+- High bandwidth (video streaming intensive)
+
+### Optional (for SSL/RTSPS)
+- Domain name
+- DNS A record pointing to your VPS
+
+---
+
+## 📂 Repository Structure
+
+```
+mediamtx-installer/
+├── ubuntu-22.04/
+│   ├── Ubuntu_22_04_MediaMTX_install.sh          # MediaMTX installation
+│   └── Ubuntu_22_04_Install_MediaMTX_Caddy.sh    # SSL/Let's Encrypt setup
+├── config-editor/
+│   ├── Install_MediaMTX_Config_Editor.sh          # Web editor installer (universal)
+│   └── mediamtx_config_editor.py                  # Web editor application
+├── MEDIAMTX-DEPLOYMENT-GUIDE.md                   # Complete deployment guide
+├── MEDIAMTX-QUICK-START.md                        # Fast deployment instructions
+└── README.md                                      # This file
+```
+
+---
+
+## 🎯 Installation Overview
+
+### Step 1: Install MediaMTX
+
+Installs MediaMTX, FFmpeg, deploys custom YAML configuration, configures firewall.
+
+```bash
+sudo ./ubuntu-22.04/Ubuntu_22_04_MediaMTX_install.sh
+```
+
+**What it does:**
+- Downloads latest MediaMTX binary
 - Installs FFmpeg for HLS transcoding
-- Deploys custom production YAML configuration
-- Creates systemd service
-- Configures firewall (UFW)
+- Deploys production YAML with 3 built-in users
 - Generates random HLS viewer password
+- Creates systemd service
+- Configures UFW firewall
 
-### Script 2: Web Editor Installer
-- Installs Python3, Flask, and dependencies (psutil, requests, ruamel.yaml)
-- Deploys web-based configuration editor
+**Access:** `rtsp://YOUR-IP:8554/teststream` (no auth required for teststream)
+
+---
+
+### Step 2: Install Web Editor
+
+Web-based configuration management — no more manual YAML editing.
+
+```bash
+sudo ./config-editor/Install_MediaMTX_Config_Editor.sh
+```
+
+**What it does:**
+- Installs Python3, Flask, and dependencies
+- Deploys web editor to /opt/mediamtx-webeditor/
 - Creates systemd service on port 5000
-- Default login: admin / admin (change after first login!)
 
-### Script 3: Caddy Installer
-- Installs Caddy web server
-- Creates HTTPS reverse proxy for Web Editor
-- Obtains Let's Encrypt SSL certificates
-- Writes certificate paths to MediaMTX YAML (for RTSPS/HLS)
-- **Does NOT enable encryption** — you do that via Web Editor when ready
-- Safely appends to existing Caddyfile (TAK Server coexistence)
+**Access:** `http://YOUR-IP:5000`
+**Default login:** admin / admin (change immediately!)
 
-## 🔐 Enabling Encryption (After Caddy Install)
+---
 
-Caddy fills in the certificate paths but leaves encryption disabled. Enable when ready:
+### Step 3: Add SSL (Optional)
 
-**RTSPS (encrypted RTSP):**
-1. Open Web Editor → Advanced YAML
-2. Search for `rtspEncryption`
-3. Change to: `rtspEncryption: "optional"`
-4. Save and restart MediaMTX
+Adds HTTPS for web editor and certificate paths for RTSPS/HLS encryption.
 
-**HLS encryption:**
-1. Open Web Editor → Advanced YAML
-2. Search for `hlsEncryption`
-3. Change to: `hlsEncryption: yes`
-4. Save and restart MediaMTX
+```bash
+sudo ./ubuntu-22.04/Ubuntu_22_04_Install_MediaMTX_Caddy.sh
+```
+
+**What it does:**
+- Installs Caddy
+- Obtains Let's Encrypt certificate
+- Configures HTTPS reverse proxy for web editor
+- Writes certificate paths to MediaMTX YAML
+- Does NOT enable encryption (you do that in web editor when ready)
+
+**Access:** `https://yourdomain.com`
+
+---
 
 ## 📡 Streaming Protocols
 
 | Protocol | Port | Use Case |
 |----------|------|----------|
-| **RTSP** | 8554 | Most apps, VLC, cameras, ATAK |
-| **RTSPS** | 8322 | Encrypted RTSP (after enabling) |
-| **HLS** | 8888 | Browser playback |
-| **SRT** | 8890 | Low-latency, reliable |
+| **RTSP** | 8554/tcp | Most apps, VLC, cameras, ATAK |
+| **RTSPS** | 8322/tcp | Encrypted RTSP (after enabling) |
+| **HLS** | 8888/tcp | Browser playback |
+| **SRT** | 8890/udp | Low-latency, reliable |
 
-**FFmpeg live/ path transcoding:** Publish to `rtsp://server:8554/live/uas1` and it automatically creates a clean `rtsp://server:8554/uas1` stream.
+### live/ Path Transcoding
 
-## 🎨 Web Configuration Editor
-
-Access at `http://YOUR-IP:5000` (or `https://yourdomain.com` after Caddy)
-
-**Default login:** admin / admin
-
-**Features:**
-- 📊 Dashboard with system stats and active streams
-- 👥 User management (add/edit/revoke streaming users)
-- 🔧 Protocol settings
-- 🎥 Recording management
-- 🎨 Theme/styling customization
-- 📝 Advanced YAML editor
-- ⚡ Service control (start/stop/restart)
-- 💾 Automatic backups
-- 🔄 Auto-update from GitHub releases
-
-## 📂 Repository Contents
-
-```
-mediamtx-installer/
-├── README.md
-├── DEPLOYMENT_GUIDE.md
-├── LICENSE
-├── ubuntu-22.04/
-│   ├── Ubuntu_22_04_MediaMTX_install.sh    ← MediaMTX + FFmpeg + custom YAML
-│   └── Install_MediaMTX_Caddy.sh           ← Caddy + HTTPS + cert paths
-└── config-editor/
-    ├── Install_MediaMTX_Config_Editor.sh    ← Web editor installer
-    └── mediamtx_config_editor.py            ← Web editor application
-```
-
-## 🔒 Security
-
-- HLS viewer password is auto-generated (16 random characters)
-- FFmpeg internal user locked to localhost only (127.0.0.1)
-- Web editor has its own login system (separate from MediaMTX users)
-- Encryption disabled by default — enable after Caddy provides certificates
-- All user management done through web editor (no plaintext passwords in scripts)
-
-## 🆘 Troubleshooting
-
-```bash
-# Check MediaMTX
-systemctl status mediamtx
-journalctl -u mediamtx -f
-
-# Check Web Editor
-systemctl status mediamtx-webeditor
-journalctl -u mediamtx-webeditor -f
-
-# Check Caddy
-systemctl status caddy
-journalctl -u caddy -f
-```
-
-## 📖 Documentation
-
-- **[Full Deployment Guide](DEPLOYMENT_GUIDE.md)**
-- **[MediaMTX Official Docs](https://github.com/bluenviron/mediamtx)**
-- **[Caddy Documentation](https://caddyserver.com/docs/)**
-
-## 📜 License
-
-MIT License - see [LICENSE](LICENSE)
+Publish to `live/` prefix for automatic FFmpeg transcoding:
+- **Publish:** `rtsp://user:pass@IP:8554/live/uas1`
+- **View:** `rtsp://user:pass@IP:8554/uas1` (clean path)
 
 ---
 
-**Made for emergency services and the streaming community**
+## 🔐 Built-in Users
+
+The installer creates 3 users (no prompts during install):
+
+| User | Purpose | Auth |
+|------|---------|------|
+| FFmpeg localhost | Internal transcoding | No auth (127.0.0.1 only) |
+| HLS viewer | Browser HLS playback | Random password (shown at install) |
+| Public teststream | Test stream viewing | No auth (teststream path only) |
+
+All additional users are managed through the Web Editor → Users & Auth tab.
+
+---
+
+## 📚 Documentation
+
+- **[Complete Deployment Guide](MEDIAMTX-DEPLOYMENT-GUIDE.md)** - Step-by-step instructions with troubleshooting
+- **[Quick Start Guide](MEDIAMTX-QUICK-START.md)** - Fast deployment for experienced users
+- **[MediaMTX Official Docs](https://github.com/bluenviron/mediamtx)** - MediaMTX documentation
+
+---
+
+## 🔒 Security Notes
+
+### Default Credentials
+- **Web Editor:** admin / admin (change immediately!)
+- **HLS Viewer:** hlsviewer / (random, shown at install)
+- **Teststream:** No auth required (read-only, teststream path only)
+
+### Firewall Ports
+The scripts automatically configure these ports:
+- **8554/tcp** - RTSP
+- **8322/tcp** - RTSPS (after enabling encryption)
+- **8888/tcp** - HLS
+- **8890/udp** - SRT
+- **8000/udp** - RTP
+- **8001/udp** - RTCP
+- **5000/tcp** - Web editor
+- **80/tcp** - HTTP (only if using Caddy)
+- **443/tcp** - HTTPS (only if using Caddy)
+
+---
+
+## 🎓 Support
+
+Created by **[The TAK Syndicate](https://www.youtube.com/@thetaksyndicate6234)**
+
+- 🌐 Website: [https://www.thetaksyndicate.org](https://www.thetaksyndicate.org)
+- 📺 YouTube: [@TheTAKSyndicate](https://www.youtube.com/@thetaksyndicate6234)
+- 📧 Email: thetaksyndicate@gmail.com
+
+### Getting Help
+1. Check the [Deployment Guide](MEDIAMTX-DEPLOYMENT-GUIDE.md)
+2. Review [Troubleshooting](MEDIAMTX-DEPLOYMENT-GUIDE.md#troubleshooting)
+3. Search existing [GitHub Issues](https://github.com/takwerx/mediamtx-installer/issues)
+4. Open a new issue if needed
+
+---
+
+## 📜 License
+
+MIT License - See [LICENSE](LICENSE) file for details.
+
+Free to use, modify, and distribute. Attribution appreciated!
+
+---
+
+## 🙏 Credits
+
+- **MediaMTX** by [bluenviron](https://github.com/bluenviron/mediamtx)
+- **Scripts** by [The TAK Syndicate](https://www.thetaksyndicate.org)
+- **Community contributions** welcome!
+
+---
+
+## ⭐ Star This Repo!
+
+If these scripts helped you deploy a streaming server, please star this repository!
+
+**[⭐ Star on GitHub](https://github.com/takwerx/mediamtx-installer)**
+
+---
+
+**Latest Update:** February 2026
+**Script Version:** 2.0
+**Compatible with:** All MediaMTX versions (auto-downloads latest)
+**Tested on:** Ubuntu 22.04 LTS
