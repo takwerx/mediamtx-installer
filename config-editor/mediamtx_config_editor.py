@@ -5043,12 +5043,14 @@ def start_test_stream(filename):
         
         # Start FFmpeg streaming via SRT
         # Use stream copy for minimal CPU usage
+        # -map 0 ensures ALL streams are copied (video, audio, AND KLV data)
         cmd = [
             'ffmpeg',
             '-re',
             '-stream_loop', '-1',
             '-i', filepath,
-            '-c', 'copy',  # Copy all streams without re-encoding
+            '-map', '0',
+            '-c', 'copy',
             '-f', 'mpegts',
             srt_url
         ]
