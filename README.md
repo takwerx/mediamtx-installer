@@ -18,6 +18,7 @@ Automated installation, SSL configuration, and streaming management for emergenc
 # 1. Download scripts
 git clone https://github.com/takwerx/mediamtx-installer.git
 cd mediamtx-installer
+chmod +x ubuntu-22.04/*.sh config-editor/*.sh
 
 # 2. Install MediaMTX
 sudo ./ubuntu-22.04/Ubuntu_22.04_MediaMTX_install.sh
