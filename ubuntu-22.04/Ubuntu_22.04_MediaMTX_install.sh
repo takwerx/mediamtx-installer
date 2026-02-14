@@ -930,8 +930,10 @@ ufw allow 8890/udp   # SRT
 ufw allow 8000/udp   # RTP
 ufw allow 8001/udp   # RTCP
 
-# Keep SSH open
-ufw allow 22/tcp
+# Keep SSH open (detect current port - may have been changed by hardening)
+SSH_PORT=$(grep "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
+SSH_PORT=${SSH_PORT:-22}
+ufw allow ${SSH_PORT}/tcp   # SSH
 
 echo "✓ Firewall configured"
 
