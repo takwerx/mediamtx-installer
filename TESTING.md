@@ -30,7 +30,7 @@ This guide walks through every feature of the MediaMTX Web Editor so you can ver
 
 After login you should see:
 
-- **Web Editor version** banner (e.g., "Web Editor v1.1.6 — up to date")
+- **Web Editor version** banner (e.g., "Web Editor v1.1.7 — up to date")
 - **MediaMTX version** banner
 - **Active Streams** count (0 if nothing is streaming)
 - **Total Viewers** count

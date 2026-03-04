@@ -21,7 +21,7 @@ app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)  # Generate secure secret key
 
 # Version - used by auto-update checker
-CURRENT_VERSION = "v1.1.6"
+CURRENT_VERSION = "v1.1.7"
 GITHUB_REPO = "takwerx/mediamtx-installer"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/config-editor/mediamtx_config_editor.py"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -1933,6 +1933,63 @@ HTML_TEMPLATE = '''
                                     <button type="button" onclick="const f=document.getElementById('source-srt-passphrase'); const b=this; if(f.type==='password'){f.type='text';b.textContent='Hide';}else{f.type='password';b.textContent='Show';}" style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: #555; color: #fff; border: none; border-radius: 3px; padding: 4px 10px; cursor: pointer; font-size: 12px;">Show</button>
                                 </div>
                                 <p class="help-text">SRT encryption passphrase if their server requires one</p>
+                            </div>
+                            <div class="form-group" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #404040;">
+                                <label>Transport Profile</label>
+                                <select id="source-srt-profile" onchange="updateSrtProfile()">
+                                    <option value="default">Internet / LAN (default)</option>
+                                    <option value="cellular">Cellular / 4G-5G</option>
+                                    <option value="satellite">Satellite (KU/KA Band)</option>
+                                    <option value="custom">Custom</option>
+                                </select>
+                                <p class="help-text">Optimizes SRT buffer and retransmission settings for the transport type. Satellite links need much larger buffers due to high round-trip latency.</p>
+                            </div>
+                            <div id="srt-profile-summary" style="margin-top: 10px; padding: 12px; background: #1e1e1e; border-radius: 6px; border: 1px solid #404040; font-size: 13px; color: #ccc;">
+                            </div>
+                            <div id="srt-custom-fields" style="display: none; margin-top: 12px; padding: 16px; background: #1e1e1e; border-radius: 6px; border: 1px solid #404040;">
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>Latency (ms)</label>
+                                        <input type="number" id="source-srt-latency" placeholder="120" value="120" min="20" max="30000">
+                                        <p class="help-text">Receive buffer size in ms. Must cover full round-trip time + margin. Satellite: 2000-3000, Cellular: 500-1000, LAN: 120</p>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Peer Latency (ms)</label>
+                                        <input type="number" id="source-srt-peerlatency" placeholder="120" value="120" min="20" max="30000">
+                                        <p class="help-text">Latency announced to the peer during negotiation. Set equal to Latency to prevent the peer from negotiating it down.</p>
+                                    </div>
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>Receive Latency (ms)</label>
+                                        <input type="number" id="source-srt-rcvlatency" placeholder="120" value="120" min="20" max="30000">
+                                        <p class="help-text">Explicit receiver buffer. Set equal to Latency.</p>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Payload Size (bytes)</label>
+                                        <input type="number" id="source-srt-payloadsize" placeholder="1316" value="1316">
+                                        <p class="help-text">1316 (7x188) aligns with MPEG-TS packets. Rarely needs changing.</p>
+                                    </div>
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>Loss Max TTL</label>
+                                        <input type="number" id="source-srt-lossmaxttl" placeholder="0" value="0" min="0" max="1000">
+                                        <p class="help-text">Packets to tolerate out-of-order before declaring loss. Satellite links reorder packets during modulation. 0 = default, 30+ for satellite.</p>
+                                    </div>
+                                    <div class="form-group" style="display: flex; flex-direction: column; justify-content: center;">
+                                        <label style="margin-bottom: 8px;">Packet Drop &amp; NAK Reports</label>
+                                        <div style="display: flex; gap: 20px;">
+                                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-weight: normal;">
+                                                <input type="checkbox" id="source-srt-tlpktdrop" checked> Too-Late Packet Drop
+                                            </label>
+                                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-weight: normal;">
+                                                <input type="checkbox" id="source-srt-nakreport" checked> NAK Reports
+                                            </label>
+                                        </div>
+                                        <p class="help-text">Packet drop prevents freezing on loss. NAK reports speed up retransmission requests.</p>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                         <div id="rtsp-source-fields" style="display: none;">
@@ -3911,6 +3968,49 @@ HTML_TEMPLATE = '''
         // === EXTERNAL SOURCES ===
         let sourcesRefreshInterval = null;
         
+        const SRT_PROFILES = {
+            'default': {latency: 120, peerlatency: 120, rcvlatency: 120, payloadsize: 1316, lossmaxttl: 0, tlpktdrop: true, nakreport: true,
+                label: 'Internet / LAN', desc: 'Default SRT settings. Low latency buffer (120ms), suitable for reliable networks with <50ms round-trip.'},
+            'cellular': {latency: 500, peerlatency: 500, rcvlatency: 500, payloadsize: 1316, lossmaxttl: 10, tlpktdrop: true, nakreport: true,
+                label: 'Cellular / 4G-5G', desc: 'Moderate latency buffer (500ms) for mobile/cellular connections. Handles jitter and intermittent loss typical of wireless networks.'},
+            'satellite': {latency: 2000, peerlatency: 2000, rcvlatency: 2000, payloadsize: 1316, lossmaxttl: 30, tlpktdrop: true, nakreport: true,
+                label: 'Satellite (KU/KA Band)', desc: 'High latency buffer (2000ms) for geostationary satellite links (~1200ms round-trip). If video is still choppy, try Custom and increase latency to 3000ms.'}
+        };
+        
+        function updateSrtProfile() {
+            const profile = document.getElementById('source-srt-profile').value;
+            const summaryEl = document.getElementById('srt-profile-summary');
+            const customEl = document.getElementById('srt-custom-fields');
+            
+            if (profile === 'custom') {
+                summaryEl.style.display = 'none';
+                customEl.style.display = 'block';
+                return;
+            }
+            
+            customEl.style.display = 'none';
+            summaryEl.style.display = 'block';
+            
+            const p = SRT_PROFILES[profile];
+            if (p) {
+                summaryEl.innerHTML = '<strong>' + p.label + '</strong> — ' + p.desc + '<br><span style="color: #888; font-size: 12px; margin-top: 6px; display: inline-block;">Latency: ' + p.latency + 'ms | Payload: ' + p.payloadsize + ' | Loss TTL: ' + p.lossmaxttl + ' | Pkt Drop: ' + (p.tlpktdrop ? 'on' : 'off') + ' | NAK: ' + (p.nakreport ? 'on' : 'off') + '</span>';
+                document.getElementById('source-srt-latency').value = p.latency;
+                document.getElementById('source-srt-peerlatency').value = p.peerlatency;
+                document.getElementById('source-srt-rcvlatency').value = p.rcvlatency;
+                document.getElementById('source-srt-payloadsize').value = p.payloadsize;
+                document.getElementById('source-srt-lossmaxttl').value = p.lossmaxttl;
+                document.getElementById('source-srt-tlpktdrop').checked = p.tlpktdrop;
+                document.getElementById('source-srt-nakreport').checked = p.nakreport;
+            }
+        }
+        
+        function detectSrtProfile(params) {
+            for (const [key, p] of Object.entries(SRT_PROFILES)) {
+                if (params.latency == p.latency && params.lossmaxttl == p.lossmaxttl) return key;
+            }
+            return 'custom';
+        }
+        
         function showAddSourceForm() {
             document.getElementById('add-source-form').style.display = 'block';
             editingSourceName = null;
@@ -3924,6 +4024,8 @@ HTML_TEMPLATE = '''
             document.getElementById('source-srt-mode').value = 'caller';
             document.getElementById('source-srt-streamid').value = '';
             document.getElementById('source-srt-passphrase').value = '';
+            document.getElementById('source-srt-profile').value = 'default';
+            updateSrtProfile();
             // RTSP fields
             document.getElementById('source-rtsp-secure').value = 'rtsp';
             document.getElementById('source-rtsp-host').value = '';
@@ -4006,6 +4108,24 @@ HTML_TEMPLATE = '''
                     params.push('passphrase=' + passphrase);
                 }
                 params.push('mode=' + srtMode);
+                params.push('transtype=live');
+                
+                const srtLatency = parseInt(document.getElementById('source-srt-latency').value) || 120;
+                const srtPeerLatency = parseInt(document.getElementById('source-srt-peerlatency').value) || 120;
+                const srtRcvLatency = parseInt(document.getElementById('source-srt-rcvlatency').value) || 120;
+                const srtPayloadSize = parseInt(document.getElementById('source-srt-payloadsize').value) || 1316;
+                const srtLossMaxTTL = parseInt(document.getElementById('source-srt-lossmaxttl').value) || 0;
+                const srtTlPktDrop = document.getElementById('source-srt-tlpktdrop').checked;
+                const srtNakReport = document.getElementById('source-srt-nakreport').checked;
+                
+                params.push('latency=' + srtLatency);
+                params.push('peerlatency=' + srtPeerLatency);
+                params.push('rcvlatency=' + srtRcvLatency);
+                params.push('payloadsize=' + srtPayloadSize);
+                if (srtLossMaxTTL > 0) params.push('lossmaxttl=' + srtLossMaxTTL);
+                params.push('tlpktdrop=' + srtTlPktDrop);
+                params.push('nakreport=' + srtNakReport);
+                
                 sourceUrl += '?' + params.join('&');
             } else if (protocol === 'rtsp') {
                 const scheme = document.getElementById('source-rtsp-secure').value;
@@ -4106,6 +4226,7 @@ HTML_TEMPLATE = '''
                     html += '<thead><tr style="background: #383838; border-bottom: 2px solid #4a4a4a;">';
                     html += '<th style="padding: 12px; text-align: left;">Name</th>';
                     html += '<th style="padding: 12px; text-align: left;">Source URL</th>';
+                    html += '<th style="padding: 12px; text-align: center;">Transport</th>';
                     html += '<th style="padding: 12px; text-align: center;">Mode</th>';
                     html += '<th style="padding: 12px; text-align: center;">Status</th>';
                     html += '<th style="padding: 12px; text-align: center;">Actions</th>';
@@ -4115,11 +4236,26 @@ HTML_TEMPLATE = '''
                         html += '<tr style="border-bottom: 1px solid #4a4a4a;">';
                         html += '<td style="padding: 12px;"><strong>' + escapeHtml(source.name) + '</strong></td>';
                         
-                        // Mask passphrase in URL display
+                        // Clean URL display: mask passphrase and strip SRT tuning params
                         let displayUrl = source.source_url || '';
                         displayUrl = displayUrl.replace(/passphrase=[^&]+/, 'passphrase=****');
+                        displayUrl = displayUrl.replace(/&?(transtype|latency|peerlatency|rcvlatency|payloadsize|lossmaxttl|tlpktdrop|nakreport)=[^&]*/g, '');
+                        displayUrl = displayUrl.replace(/\?&/, '?').replace(/&&+/g, '&').replace(/[?&]$/, '');
                         const watchLink = window.location.origin + '/watch/' + source.name;
                         html += '<td style="padding: 12px; font-family: monospace; font-size: 13px; word-break: break-all;">' + escapeHtml(displayUrl) + ' <button onclick="navigator.clipboard.writeText(\\'' + watchLink + '\\'); this.textContent=\\'✅ Copied!\\'; setTimeout(() => this.textContent=\\'📋 Copy HLS Link\\', 2000);" style="background: #2196F3; color: white; border: none; border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 12px; margin-left: 8px; white-space: nowrap;">📋 Copy HLS Link</button></td>';
+                        
+                        // Transport profile for SRT sources
+                        if (source.source_url && source.source_url.startsWith('srt://')) {
+                            const latM = source.source_url.match(/latency=(\d+)/);
+                            const lat = latM ? parseInt(latM[1]) : 120;
+                            let profileLabel, profileColor;
+                            if (lat >= 1500) { profileLabel = 'Satellite'; profileColor = '#e91e63'; }
+                            else if (lat >= 300) { profileLabel = 'Cellular'; profileColor = '#ff9800'; }
+                            else { profileLabel = 'LAN'; profileColor = '#4caf50'; }
+                            html += '<td style="padding: 12px; text-align: center;"><span style="background: ' + profileColor + '; color: white; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: bold;">' + profileLabel + '</span></td>';
+                        } else {
+                            html += '<td style="padding: 12px; text-align: center;"><span style="color: #888;">—</span></td>';
+                        }
                         
                         // Mode - clickable Caller/Listener for SRT, text for others
                         if (source.source_url && source.source_url.startsWith('srt://')) {
@@ -4302,6 +4438,34 @@ HTML_TEMPLATE = '''
                         const ppMatch = url.match(/passphrase=([^&]+)/);
                         if (ppMatch) {
                             document.getElementById('source-srt-passphrase').value = ppMatch[1];
+                        }
+                        // Parse SRT tuning parameters
+                        const getParam = (name, fallback) => {
+                            const m = url.match(new RegExp(name + '=([^&]+)'));
+                            return m ? m[1] : fallback;
+                        };
+                        const parsedTuning = {
+                            latency: parseInt(getParam('latency', '120')),
+                            peerlatency: parseInt(getParam('peerlatency', '120')),
+                            rcvlatency: parseInt(getParam('rcvlatency', '120')),
+                            payloadsize: parseInt(getParam('payloadsize', '1316')),
+                            lossmaxttl: parseInt(getParam('lossmaxttl', '0')),
+                            tlpktdrop: getParam('tlpktdrop', 'true') === 'true',
+                            nakreport: getParam('nakreport', 'true') === 'true'
+                        };
+                        document.getElementById('source-srt-latency').value = parsedTuning.latency;
+                        document.getElementById('source-srt-peerlatency').value = parsedTuning.peerlatency;
+                        document.getElementById('source-srt-rcvlatency').value = parsedTuning.rcvlatency;
+                        document.getElementById('source-srt-payloadsize').value = parsedTuning.payloadsize;
+                        document.getElementById('source-srt-lossmaxttl').value = parsedTuning.lossmaxttl;
+                        document.getElementById('source-srt-tlpktdrop').checked = parsedTuning.tlpktdrop;
+                        document.getElementById('source-srt-nakreport').checked = parsedTuning.nakreport;
+                        const detectedProfile = detectSrtProfile(parsedTuning);
+                        document.getElementById('source-srt-profile').value = detectedProfile;
+                        updateSrtProfile();
+                        if (detectedProfile === 'custom') {
+                            document.getElementById('srt-custom-fields').style.display = 'block';
+                            document.getElementById('srt-profile-summary').style.display = 'none';
                         }
                     } else if (url.startsWith('rtsp://') || url.startsWith('rtsps://')) {
                         document.getElementById('source-protocol').value = 'rtsp';
