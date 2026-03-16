@@ -49,7 +49,7 @@ sudo ./ubuntu-22.04/Ubuntu_22.04_Install_MediaMTX_Caddy.sh
 - ✅ Firewall configuration (UFW)
 - ✅ systemd service with auto-start
 
-### 🎨 Web Configuration Editor
+### 🎨 Web Configuration Editor (v1.1.8)
 - ✅ User management with agency/group labels
 - ✅ Recording management with retention periods
 - ✅ Public access toggle
@@ -58,6 +58,8 @@ sudo ./ubuntu-22.04/Ubuntu_22.04_Install_MediaMTX_Caddy.sh
 - ✅ Service control (start/stop/restart)
 - ✅ Automatic backups before changes
 - ✅ Auto-update from GitHub releases
+- ✅ **Ku-band link simulator** — One-click “Simulate link” per external source to impair incoming traffic (delay/jitter/loss) for HLS testing without flying
+- ✅ **Share links** — Token-based share links (Active Streams: 4h; External Sources: configurable duration)
 
 ### 🔒 Caddy SSL Script (Optional)
 - ✅ Let's Encrypt SSL certificates (automatic)
@@ -92,9 +94,12 @@ mediamtx-installer/
 │   └── Ubuntu_22.04_Install_MediaMTX_Caddy.sh    # SSL/Let's Encrypt setup
 ├── config-editor/
 │   ├── Install_MediaMTX_Config_Editor.sh          # Web editor installer (universal)
-│   └── mediamtx_config_editor.py                  # Web editor application
+│   └── mediamtx_config_editor.py                  # Web editor application (v1.1.8)
+├── scripts/
+│   └── ku-band-simulator/                         # Ku-band link simulator (delay/jitter/loss)
 ├── MEDIAMTX-DEPLOYMENT-GUIDE.md                   # Complete deployment guide
 ├── MEDIAMTX-QUICK-START.md                        # Fast deployment instructions
+├── RELEASE-v1.1.8.md                              # Web Editor v1.1.8 release notes
 └── README.md                                      # This file
 ```
 
@@ -259,7 +264,8 @@ If these scripts helped you deploy a streaming server, please star this reposito
 
 ---
 
-**Latest Update:** February 2026
-**Script Version:** 2.0
-**Compatible with:** All MediaMTX versions (auto-downloads latest)
+**Latest Update:** March 2026  
+**Web Editor:** v1.1.8  
+**Script Version:** 2.0  
+**Compatible with:** All MediaMTX versions (auto-downloads latest)  
 **Tested on:** Ubuntu 22.04 LTS
