@@ -23,6 +23,14 @@ import psutil  # For system metrics
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)  # Generate secure secret key
 
+@app.after_request
+def add_no_cache_headers(response):
+    if 'text/html' in response.content_type:
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+    return response
+
 # Version - used by auto-update checker
 CURRENT_VERSION = "v2.0.3"
 GITHUB_REPO = "takwerx/mediamtx-installer"
