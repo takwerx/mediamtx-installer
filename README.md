@@ -37,6 +37,20 @@ sudo ./ubuntu-22.04/Ubuntu_22.04_Install_MediaMTX_Caddy.sh
 
 ---
 
+## 🔧 infra-TAK Users — Read This First
+
+If MediaMTX was deployed through [infra-TAK](https://github.com/takwerx/infra-TAK), the web editor runs with an LDAP overlay for Authentik integration.
+
+**Web editor not loading after an update?** The LDAP overlay can become stale after the editor auto-updates. To fix:
+
+1. Open your **infra-TAK console** — either `https://infratak.yourdomain.com` or `https://tak.yourdomain.com` (or the backdoor at `https://<VPS-IP>:5001`)
+2. Go to the **MediaMTX** page
+3. Click **Patch web editor**
+
+This re-syncs the LDAP overlay and restarts the editor. **v2.0.1** fixes this at startup by skipping conflicting route registration when the overlay is detected, and auto re-syncs the overlay during future updates. The manual patch always works as a fallback.
+
+---
+
 ## ✨ Features
 
 ### 🔧 MediaMTX Installation Script
@@ -49,7 +63,7 @@ sudo ./ubuntu-22.04/Ubuntu_22.04_Install_MediaMTX_Caddy.sh
 - ✅ Firewall configuration (UFW)
 - ✅ systemd service with auto-start
 
-### 🎨 Web Configuration Editor (v2.0.0)
+### 🎨 Web Configuration Editor (v2.0.1)
 - ✅ **HLS Tuning page** — Segment count, duration, variant, always remux, write queue — all from the browser
 - ✅ **HLS presets** — One-click LAN, Internet, and Satellite (KU/KA) profiles
 - ✅ **MPEG-TS demux toggle** — Enable/disable RTSP MPEG-TS unwrapping from the UI (no YAML editing)
@@ -97,12 +111,13 @@ mediamtx-installer/
 │   └── Ubuntu_22.04_Install_MediaMTX_Caddy.sh    # SSL/Let's Encrypt setup
 ├── config-editor/
 │   ├── Install_MediaMTX_Config_Editor.sh          # Web editor installer (universal)
-│   └── mediamtx_config_editor.py                  # Web editor application (v2.0.0)
+│   └── mediamtx_config_editor.py                  # Web editor application (v2.0.1)
 ├── scripts/
 │   └── ku-band-simulator/                         # Ku-band link simulator (delay/jitter/loss)
 ├── MEDIAMTX-DEPLOYMENT-GUIDE.md                   # Complete deployment guide
 ├── MEDIAMTX-QUICK-START.md                        # Fast deployment instructions
 ├── RELEASE-v2.0.0.md                               # Web Editor v2.0.0 release notes
+├── RELEASE-v2.0.1.md                               # v2.0.1 infra-TAK overlay fix
 └── README.md                                      # This file
 ```
 
@@ -267,7 +282,7 @@ If these scripts helped you deploy a streaming server, please star this reposito
 ---
 
 **Latest Update:** March 2026  
-**Web Editor:** v2.0.0  
+**Web Editor:** v2.0.1  
 **Script Version:** 2.0  
 **Compatible with:** MediaMTX v1.17.0+ (auto-downloads latest)  
 **Tested on:** Ubuntu 22.04 LTS

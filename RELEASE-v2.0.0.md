@@ -73,6 +73,12 @@ If your existing YAML has the `~^live/(.+)$` path, you can safely remove it afte
 
 MPEG-TS demuxing requires **MediaMTX v1.17.0 or later**. Update MediaMTX from the web editor's **System > Versions** page or manually.
 
+### infra-TAK Deployments
+
+**v2.0.1 fixes** the LDAP overlay route conflict that could crash the editor on infra-TAK deployments after an update. See [RELEASE-v2.0.1.md](RELEASE-v2.0.1.md) for details. If you are on v2.0.0, update to v2.0.1.
+
+**If the web editor won't load after updating:** Go back into the infra-TAK console (https://\<VPS-IP\>:5001) → **MediaMTX** page → click **Patch web editor**. This re-syncs the LDAP overlay and restarts the editor.
+
 ---
 
 ## Known Issues

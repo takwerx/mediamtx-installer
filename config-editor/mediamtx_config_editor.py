@@ -24,10 +24,14 @@ app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)  # Generate secure secret key
 
 # Version - used by auto-update checker
-CURRENT_VERSION = "v2.0.0"
+CURRENT_VERSION = "v2.0.1"
 GITHUB_REPO = "takwerx/mediamtx-installer"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/config-editor/mediamtx_config_editor.py"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
+LDAP_OVERLAY_ACTIVE = os.path.exists('/opt/mediamtx-webeditor/mediamtx_ldap_overlay.py')
+if LDAP_OVERLAY_ACTIVE:
+    print("INFO: LDAP overlay detected — skipping conflicting route registration", flush=True)
 
 # Initialize YAML handler that preserves comments
 yaml = YAML()
@@ -9845,13 +9849,32 @@ def apply_update():
         # Step 6: Clean up temp file
         os.remove(temp_file)
         
-        # Step 7: Restart the web editor service
+        # Step 7: Re-sync LDAP overlay if this is an infra-TAK install
+        overlay_synced = False
+        overlay_file = '/opt/mediamtx-webeditor/mediamtx_ldap_overlay.py'
+        if os.path.exists(overlay_file):
+            try:
+                infra_tak_overlay = None
+                for candidate in ['/root/infra-TAK/mediamtx_ldap_overlay.py',
+                                  '/opt/infra-TAK/mediamtx_ldap_overlay.py']:
+                    if os.path.exists(candidate):
+                        infra_tak_overlay = candidate
+                        break
+                if infra_tak_overlay:
+                    shutil.copy2(infra_tak_overlay, overlay_file)
+                    overlay_synced = True
+                    print(f"✓ LDAP overlay re-synced from {infra_tak_overlay}", flush=True)
+            except Exception as oe:
+                print(f"WARNING: Failed to re-sync LDAP overlay: {oe}", flush=True)
+        
+        # Step 8: Restart the web editor service
         subprocess.run(['sudo', 'systemctl', 'restart', 'mediamtx-webeditor'], timeout=10)
         
         return jsonify({
             'success': True,
             'new_version': new_version,
-            'backup_file': backup_file
+            'backup_file': backup_file,
+            'overlay_synced': overlay_synced
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -11577,8 +11600,7 @@ def api_share_links_revoke():
 
 # === SHAREABLE WATCH LINKS ===
 
-@app.route('/watch/<stream_name>')
-def watch_stream(stream_name):
+def _watch_stream_impl(stream_name):
     """Shareable HLS player page - credentials embedded server-side"""
     try:
         # Get HLS viewer credentials
@@ -11731,6 +11753,12 @@ def watch_stream(stream_name):
     except Exception as e:
         print(f"ERROR watch page: {e}", flush=True)
         return "Stream unavailable", 503
+
+# Register /watch/ only when the infra-TAK LDAP overlay is NOT present.
+# The overlay provides its own visibility-aware /watch/ route; registering both
+# crashes Flask with "View function mapping is overwriting an existing endpoint".
+if not LDAP_OVERLAY_ACTIVE:
+    watch_stream = app.route('/watch/<stream_name>', endpoint='watch_stream')(_watch_stream_impl)
 
 # === END SHAREABLE WATCH LINKS ===
 
@@ -11904,6 +11932,11 @@ if __name__ == '__main__':
             time.sleep(3)
     except Exception as e:
         print(f"Warning: Could not auto-patch IPv6 loopback: {e}")
+    
+    # Detect infra-TAK LDAP overlay
+    overlay_file = '/opt/mediamtx-webeditor/mediamtx_ldap_overlay.py'
+    if os.path.exists(overlay_file):
+        print(f"✓ infra-TAK LDAP overlay detected at {overlay_file}")
     
     print("="*50)
     print("MediaMTX Configuration Web Editor")
