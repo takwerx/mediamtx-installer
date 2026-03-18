@@ -5988,10 +5988,26 @@ HTML_TEMPLATE = '''
                 }
             })
             .catch(err => {
-                if (progressText) { progressText.innerHTML = '✅ Service is restarting... Reloading page.'; }
-                setTimeout(() => {
-                    window.location.href = '/?tab=versions&message=Update applied successfully&message_type=success';
-                }, 5000);
+                if (progressText) { progressText.innerHTML = '✅ Service is restarting...'; }
+                if (progress) { progress.style.background = 'rgba(34, 197, 94, 0.15)'; progress.style.border = '1px solid #22c55e'; }
+                var attempts = 0;
+                var pollReady = setInterval(function() {
+                    attempts++;
+                    if (progressText) { progressText.innerHTML = '✅ Service is restarting... (' + attempts + 's)'; }
+                    fetch('/api/status', {method: 'GET'}).then(function(r) {
+                        if (r.ok) {
+                            clearInterval(pollReady);
+                            if (progressText) { progressText.innerHTML = '✅ Update complete! Reloading...'; }
+                            setTimeout(function() {
+                                window.location.href = '/?tab=versions&message=Update applied successfully&message_type=success';
+                            }, 1000);
+                        }
+                    }).catch(function(){});
+                    if (attempts > 30) {
+                        clearInterval(pollReady);
+                        if (progressText) { progressText.innerHTML = '⚠️ Service taking longer than expected. <a href="/?tab=versions" style="color:#3b82f6;">Click here to reload.</a>'; }
+                    }
+                }, 1000);
             });
         }
         
