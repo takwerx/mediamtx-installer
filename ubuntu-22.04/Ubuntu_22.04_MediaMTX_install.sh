@@ -862,6 +862,7 @@ pathDefaults:
   runOnRecordSegmentComplete:
   srtPublishPassphrase:
   srtReadPassphrase:
+  rtspDemuxMpegts: true
 paths:
   teststream:
     record: no
@@ -872,10 +873,6 @@ paths:
   # Settings under path "all_others" are applied to all paths that
   # do not match another entry.
   all_others:
-  ~^live/(.+)$:
-    runOnReady: ffmpeg -i rtsp://localhost:8554/live/$G1 -c copy -f rtsp
-      rtsp://localhost:8554/$G1
-    runOnReadyRestart: true
 CONFIGEOF
 
 # Replace HLS viewer password with random generated one
@@ -885,7 +882,7 @@ echo "✓ Custom configuration installed"
 echo "  - FFmpeg localhost user (internal, no auth)"
 echo "  - HLS viewer user (read-only)"
 echo "  - Public teststream (no auth required)"
-echo "  - FFmpeg live/ path transcoding"
+echo "  - MPEG-TS demuxing enabled for RTSP publishers (TAKICU/UAS)"
 echo "  - Recording OFF by default (enable via Web Editor)"
 echo "  - Encryption OFF by default (enable after Caddy install)"
 

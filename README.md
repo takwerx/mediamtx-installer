@@ -4,7 +4,7 @@
 [![MediaMTX](https://img.shields.io/badge/MediaMTX-Auto--Download-blue)](https://github.com/bluenviron/mediamtx)
 [![OS Support](https://img.shields.io/badge/OS-Ubuntu%2022.04-green)]()
 
-**Production-ready MediaMTX streaming server deployment with HTTPS, RTSPS encryption, and web-based configuration editor.**
+**Production-ready MediaMTX streaming server deployment with HTTPS, RTSPS encryption, and web-based configuration editor. Now with native MPEG-TS demuxing — no FFmpeg required for HLS from ATAK/TAKICU/UAS feeds.**
 
 Automated installation, SSL configuration, and streaming management for emergency services and live video operations. Created and maintained by [The TAK Syndicate](https://www.thetaksyndicate.org).
 
@@ -42,14 +42,17 @@ sudo ./ubuntu-22.04/Ubuntu_22.04_Install_MediaMTX_Caddy.sh
 ### 🔧 MediaMTX Installation Script
 - ✅ Auto-downloads latest MediaMTX from GitHub
 - ✅ Ships with proven production YAML configuration
-- ✅ FFmpeg pre-installed for HLS transcoding
-- ✅ live/ path transcoding (publish to live/uas1, view at uas1)
+- ✅ **MPEG-TS demuxing enabled by default** — RTSP sources (TAKICU, ATAK UAS, ISR cameras) work with HLS natively
+- ✅ No FFmpeg transcoding required for MPEG-TS over RTSP sources
 - ✅ Random HLS viewer password generation
 - ✅ Unattended-upgrade detection (waits for system updates)
 - ✅ Firewall configuration (UFW)
 - ✅ systemd service with auto-start
 
-### 🎨 Web Configuration Editor (v1.1.9)
+### 🎨 Web Configuration Editor (v2.0.0)
+- ✅ **HLS Tuning page** — Segment count, duration, variant, always remux, write queue — all from the browser
+- ✅ **HLS presets** — One-click LAN, Internet, and Satellite (KU/KA) profiles
+- ✅ **MPEG-TS demux toggle** — Enable/disable RTSP MPEG-TS unwrapping from the UI (no YAML editing)
 - ✅ User management with agency/group labels
 - ✅ Recording management with retention periods
 - ✅ Public access toggle
@@ -94,12 +97,12 @@ mediamtx-installer/
 │   └── Ubuntu_22.04_Install_MediaMTX_Caddy.sh    # SSL/Let's Encrypt setup
 ├── config-editor/
 │   ├── Install_MediaMTX_Config_Editor.sh          # Web editor installer (universal)
-│   └── mediamtx_config_editor.py                  # Web editor application (v1.1.9)
+│   └── mediamtx_config_editor.py                  # Web editor application (v2.0.0)
 ├── scripts/
 │   └── ku-band-simulator/                         # Ku-band link simulator (delay/jitter/loss)
 ├── MEDIAMTX-DEPLOYMENT-GUIDE.md                   # Complete deployment guide
 ├── MEDIAMTX-QUICK-START.md                        # Fast deployment instructions
-├── RELEASE-v1.1.9.md                              # Web Editor v1.1.9 release notes
+├── RELEASE-v2.0.0.md                               # Web Editor v2.0.0 release notes
 └── README.md                                      # This file
 ```
 
@@ -109,7 +112,7 @@ mediamtx-installer/
 
 ### Step 1: Install MediaMTX
 
-Installs MediaMTX, FFmpeg, deploys custom YAML configuration, configures firewall.
+Installs MediaMTX, deploys custom YAML configuration with MPEG-TS demuxing, configures firewall.
 
 ```bash
 sudo ./ubuntu-22.04/Ubuntu_22.04_MediaMTX_install.sh
@@ -117,8 +120,7 @@ sudo ./ubuntu-22.04/Ubuntu_22.04_MediaMTX_install.sh
 
 **What it does:**
 - Downloads latest MediaMTX binary
-- Installs FFmpeg for HLS transcoding
-- Deploys production YAML with 3 built-in users
+- Deploys production YAML with MPEG-TS demuxing and 3 built-in users
 - Generates random HLS viewer password
 - Creates systemd service
 - Configures UFW firewall
@@ -173,11 +175,11 @@ sudo ./ubuntu-22.04/Ubuntu_22.04_Install_MediaMTX_Caddy.sh
 | **HLS** | 8888/tcp | Browser playback |
 | **SRT** | 8890/udp | Low-latency, reliable |
 
-### live/ Path Transcoding
+### MPEG-TS Demuxing (v2.0.0+)
 
-Publish to `live/` prefix for automatic FFmpeg transcoding:
-- **Publish:** `rtsp://user:pass@IP:8554/live/uas1`
-- **View:** `rtsp://user:pass@IP:8554/uas1` (clean path)
+RTSP sources that wrap H264/AAC inside MPEG-TS (TAKICU, ATAK UAS Tool, ISR cameras) are automatically unwrapped into native tracks. HLS playback works natively — no FFmpeg transcoding step required. KLV metadata tracks are preserved for RTSP readers and skipped by HLS.
+
+Requires MediaMTX v1.17.0+. Enable/disable from **Configuration > HLS Tuning** in the web editor.
 
 ---
 
@@ -265,7 +267,7 @@ If these scripts helped you deploy a streaming server, please star this reposito
 ---
 
 **Latest Update:** March 2026  
-**Web Editor:** v1.1.9  
+**Web Editor:** v2.0.0  
 **Script Version:** 2.0  
-**Compatible with:** All MediaMTX versions (auto-downloads latest)  
+**Compatible with:** MediaMTX v1.17.0+ (auto-downloads latest)  
 **Tested on:** Ubuntu 22.04 LTS

@@ -24,7 +24,7 @@ app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)  # Generate secure secret key
 
 # Version - used by auto-update checker
-CURRENT_VERSION = "v1.1.9"
+CURRENT_VERSION = "v2.0.0"
 GITHUB_REPO = "takwerx/mediamtx-installer"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/config-editor/mediamtx_config_editor.py"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -1386,6 +1386,7 @@ HTML_TEMPLATE = '''
                         <button class="sidebar-item {% if tab == 'basic' %}active{% endif %}" onclick="showTab('basic', event)"><span class="sidebar-label">Basic Settings</span></button>
                         <button class="sidebar-item {% if tab == 'users' %}active{% endif %}" onclick="showTab('users', event)"><span class="sidebar-label">Users & Auth</span></button>
                         <button class="sidebar-item {% if tab == 'protocols' %}active{% endif %}" onclick="showTab('protocols', event)"><span class="sidebar-label">Protocols</span></button>
+                        <button class="sidebar-item {% if tab == 'hls' %}active{% endif %}" onclick="showTab('hls', event)"><span class="sidebar-label">HLS Tuning</span></button>
                         <button class="sidebar-item {% if tab == 'advanced' %}active{% endif %}" onclick="showTab('advanced', event)"><span class="sidebar-label">Advanced YAML</span></button>
                     </div>
                 </div>
@@ -1935,6 +1936,108 @@ HTML_TEMPLATE = '''
                 </form>
             </div>
             
+            <!-- HLS Tuning Tab -->
+            <div id="hls" class="tab-content {% if tab == 'hls' %}active{% endif %}">
+                <h2 class="section-title">HLS Playback Tuning</h2>
+                <p class="help-text">Fine-tune HLS output for your network conditions. These settings control how MediaMTX segments and serves video to web browsers.</p>
+
+                <form method="POST" action="/save_hls">
+                    <input type="hidden" name="current_tab" value="hls">
+
+                    <h3 style="margin-top: 20px;">Segment Settings</h3>
+                    <div class="alert alert-info" style="margin-bottom: 20px;">
+                        <strong>💡 How segments work:</strong> MediaMTX chops the live stream into small segments. Browsers download these segments one at a time. More segments = more buffer = more resilient on bad links, but higher latency.
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>HLS Variant</label>
+                            <select name="hlsVariant">
+                                <option value="mpegts" {% if config.get('hlsVariant', 'mpegts') == 'mpegts' %}selected{% endif %}>MPEG-TS (max compatibility)</option>
+                                <option value="fmp4" {% if config.get('hlsVariant') == 'fmp4' %}selected{% endif %}>Fragmented MP4 (more efficient)</option>
+                                <option value="lowLatency" {% if config.get('hlsVariant') == 'lowLatency' %}selected{% endif %}>Low-Latency HLS</option>
+                            </select>
+                            <p class="help-text"><strong>MPEG-TS:</strong> Works everywhere, best for satellite/impaired links.<br><strong>fMP4:</strong> More efficient, modern browsers only.<br><strong>Low-Latency:</strong> Lowest delay, requires good network.</p>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Segment Count</label>
+                            <input type="number" name="hlsSegmentCount" value="{{ config.get('hlsSegmentCount', 7) }}" min="1" max="20" placeholder="7">
+                            <p class="help-text">Number of segments in the playlist. Higher = more buffer for impaired links. <strong>Recommended:</strong> 3 (LAN), 5-7 (Internet), 7-10 (Satellite).</p>
+                        </div>
+                        <div class="form-group">
+                            <label>Segment Duration</label>
+                            <input type="text" name="hlsSegmentDuration" value="{{ config.get('hlsSegmentDuration', '1s') }}" placeholder="1s">
+                            <p class="help-text">Duration of each segment. Use <code>500ms</code>, <code>1s</code>, <code>3s</code>, etc. Longer segments = more resilient but higher latency. <strong>Recommended:</strong> 500ms-1s (LAN), 1s-3s (Satellite).</p>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Part Duration (Low-Latency only)</label>
+                            <input type="text" name="hlsPartDuration" value="{{ config.get('hlsPartDuration', '200ms') }}" placeholder="200ms">
+                            <p class="help-text">Only used when variant is Low-Latency HLS. Size of each sub-segment part.</p>
+                        </div>
+                        <div class="form-group">
+                            <label>Max Segment Size</label>
+                            <input type="text" name="hlsSegmentMaxSize" value="{{ config.get('hlsSegmentMaxSize', '50M') }}" placeholder="50M">
+                            <p class="help-text">Maximum size of a single segment. Prevents runaway memory on high-bitrate streams.</p>
+                        </div>
+                    </div>
+
+                    <h3 style="margin-top: 30px;">Muxer Settings</h3>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Always Remux</label>
+                            <select name="hlsAlwaysRemux">
+                                <option value="yes" {% if config.get('hlsAlwaysRemux') in [True, 'yes'] %}selected{% endif %}>Yes</option>
+                                <option value="no" {% if config.get('hlsAlwaysRemux', 'no') in [False, 'no'] and config.get('hlsAlwaysRemux') not in [True, 'yes'] %}selected{% endif %}>No</option>
+                            </select>
+                            <p class="help-text"><strong>Yes:</strong> HLS muxer stays active even with no viewers (faster first load).<br><strong>No:</strong> Muxer only starts when someone connects (saves resources).</p>
+                        </div>
+                        <div class="form-group">
+                            <label>Muxer Close After</label>
+                            <input type="text" name="hlsMuxerCloseAfter" value="{{ config.get('hlsMuxerCloseAfter', '60s') }}" placeholder="60s">
+                            <p class="help-text">How long the HLS muxer stays alive after the last viewer disconnects (when Always Remux is off).</p>
+                        </div>
+                    </div>
+
+                    <h3 style="margin-top: 30px;">Presets</h3>
+                    <div class="alert alert-info" style="margin-bottom: 20px;">
+                        Click a preset to fill in recommended values. You can still adjust individual settings before saving.
+                    </div>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px;">
+                        <button type="button" class="btn btn-secondary" onclick="applyHlsPreset('lan')">🏠 LAN / Low Latency</button>
+                        <button type="button" class="btn btn-secondary" onclick="applyHlsPreset('internet')">🌐 Internet / Cellular</button>
+                        <button type="button" class="btn btn-secondary" onclick="applyHlsPreset('satellite')">🛰️ Satellite (KU/KA)</button>
+                    </div>
+
+                    <h3 style="margin-top: 30px;">RTSP MPEG-TS Unwrapping</h3>
+                    <div class="alert alert-info" style="margin-bottom: 20px;">
+                        <strong>📡 For ATAK / TAKICU / UAS Feeds:</strong> Many tactical video sources (TAKICU, ATAK UAS Tool, ISR cameras) wrap H264 video + KLV metadata inside MPEG-TS over RTSP. MediaMTX can't serve HLS from raw MPEG-TS — enable this to automatically unwrap the inner H264/AAC tracks so HLS works natively without FFmpeg.
+                    </div>
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                            <input type="checkbox" name="rtspDemuxMpegts" value="true" {% if config.get('pathDefaults', {}).get('rtspDemuxMpegts', True) not in [False, 'false', 'no'] %}checked{% endif %} style="width: 20px; height: 20px;">
+                            <span>Enable MPEG-TS Demuxing for RTSP Publishers</span>
+                        </label>
+                        <p class="help-text" style="margin-top: 8px;">When enabled, RTSP streams containing MPEG-TS will be automatically demuxed into their elementary tracks (H264, AAC, etc.). KLV metadata tracks are skipped by HLS but preserved for RTSP readers. <strong>Requires MediaMTX v1.17.0+.</strong></p>
+                    </div>
+
+                    <h3 style="margin-top: 30px;">Write Queue</h3>
+                    <div class="form-group">
+                        <label>Write Queue Size</label>
+                        <input type="number" name="writeQueueSize" value="{{ config.get('writeQueueSize', 512) }}" min="64" max="4096" step="64" placeholder="512">
+                        <p class="help-text">Buffer size for writing to clients. Increase if you see dropped frames on slow connections. <strong>Default:</strong> 512. <strong>Satellite:</strong> 1024-2048.</p>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary">Save HLS Settings & Restart MediaMTX</button>
+                </form>
+            </div>
+
             <!-- External Sources Tab -->
             <div id="sources" class="tab-content {% if tab == 'sources' %}active{% endif %}">
                 <h2 class="section-title">External Sources</h2>
@@ -3484,6 +3587,19 @@ HTML_TEMPLATE = '''
             `);
         }
         
+        // HLS Tuning presets
+        function applyHlsPreset(preset) {
+            const presets = {
+                lan: { hlsVariant: 'lowLatency', hlsSegmentCount: 3, hlsSegmentDuration: '500ms', hlsPartDuration: '200ms', hlsAlwaysRemux: 'no', hlsMuxerCloseAfter: '60s', writeQueueSize: 512 },
+                internet: { hlsVariant: 'fmp4', hlsSegmentCount: 5, hlsSegmentDuration: '1s', hlsPartDuration: '200ms', hlsAlwaysRemux: 'no', hlsMuxerCloseAfter: '60s', writeQueueSize: 512 },
+                satellite: { hlsVariant: 'mpegts', hlsSegmentCount: 7, hlsSegmentDuration: '3s', hlsPartDuration: '200ms', hlsAlwaysRemux: 'yes', hlsMuxerCloseAfter: '120s', writeQueueSize: 1024 }
+            };
+            const p = presets[preset];
+            if (!p) return;
+            const setVal = (name, val) => { const el = document.querySelector('[name="' + name + '"]'); if (el) { if (el.tagName === 'SELECT') { el.value = val; } else { el.value = val; } } };
+            Object.keys(p).forEach(k => setVal(k, p[k]));
+        }
+
         // Active Streams auto-refresh
         let streamsRefreshInterval = null;
         
@@ -8360,6 +8476,62 @@ def save_protocols():
     except Exception as e:
         print(f"ERROR saving protocols: {e}", flush=True)
         return redirect(f'/?message=Failed to save settings: {str(e)}&message_type=danger&tab={tab}')
+
+@app.route('/save_hls', methods=['POST'])
+@admin_required
+def save_hls():
+    tab = request.form.get('current_tab', 'hls')
+    try:
+        backup_file = os.path.join(BACKUP_DIR, f'mediamtx.yml.{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+        subprocess.run(['cp', CONFIG_FILE, backup_file], check=True)
+
+        hls_variant = request.form.get('hlsVariant', 'mpegts')
+        hls_segment_count = request.form.get('hlsSegmentCount', '7')
+        hls_segment_duration = request.form.get('hlsSegmentDuration', '1s')
+        hls_part_duration = request.form.get('hlsPartDuration', '200ms')
+        hls_segment_max_size = request.form.get('hlsSegmentMaxSize', '50M')
+        hls_always_remux = request.form.get('hlsAlwaysRemux', 'no')
+        hls_muxer_close_after = request.form.get('hlsMuxerCloseAfter', '60s')
+        write_queue_size = request.form.get('writeQueueSize', '512')
+
+        fields = {
+            'hlsVariant': hls_variant,
+            'hlsSegmentCount': hls_segment_count,
+            'hlsSegmentDuration': hls_segment_duration,
+            'hlsPartDuration': hls_part_duration,
+            'hlsSegmentMaxSize': hls_segment_max_size,
+            'hlsAlwaysRemux': hls_always_remux,
+            'hlsMuxerCloseAfter': hls_muxer_close_after,
+            'writeQueueSize': write_queue_size,
+        }
+
+        for field_name, value in fields.items():
+            result = subprocess.run(['grep', '-c', f'^{field_name}:', CONFIG_FILE], capture_output=True, text=True)
+            if result.stdout.strip() != '0':
+                subprocess.run(['sed', '-i', f's/^{field_name}: .*/{field_name}: {value}/', CONFIG_FILE], check=True)
+            else:
+                subprocess.run(['sed', '-i', f'/^hls:/a {field_name}: {value}', CONFIG_FILE], check=True)
+
+        demux_enabled = request.form.get('rtspDemuxMpegts') == 'true'
+        demux_value = 'true' if demux_enabled else 'false'
+
+        has_path_defaults = subprocess.run(['grep', '-q', '^pathDefaults:', CONFIG_FILE], capture_output=True)
+        has_demux_field = subprocess.run(['grep', '-q', '^  rtspDemuxMpegts:', CONFIG_FILE], capture_output=True)
+
+        if has_demux_field.returncode == 0:
+            subprocess.run(['sed', '-i', f's/^  rtspDemuxMpegts:.*/  rtspDemuxMpegts: {demux_value}/', CONFIG_FILE], check=True)
+        elif has_path_defaults.returncode == 0:
+            subprocess.run(['sed', '-i', f'/^pathDefaults:/a\\  rtspDemuxMpegts: {demux_value}', CONFIG_FILE], check=True)
+        else:
+            subprocess.run(['sed', '-i', f'/^paths:/i pathDefaults:\\n  rtspDemuxMpegts: {demux_value}\\n', CONFIG_FILE], check=True)
+
+        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True)
+        time.sleep(3)
+        return redirect(f'/?message=HLS settings saved and MediaMTX restarted!&message_type=success&tab={tab}')
+
+    except Exception as e:
+        print(f"ERROR saving HLS settings: {e}", flush=True)
+        return redirect(f'/?message=Failed to save HLS settings: {str(e)}&message_type=danger&tab={tab}')
 
 @app.route('/get_yaml')
 @login_required
