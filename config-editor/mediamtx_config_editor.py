@@ -3448,6 +3448,8 @@ HTML_TEMPLATE = '''
         // View stream in popup
         function viewStream(url, name) {
             const popup = window.open('', 'Stream: ' + name, 'width=800,height=600');
+            if (!popup) return;
+            popup.document.open();
             popup.document.write(`
                 <!DOCTYPE html>
                 <html>
@@ -3469,8 +3471,7 @@ HTML_TEMPLATE = '''
                                 maxMaxBufferLength: 60,
                                 liveSyncDurationCount: 5,
                                 liveMaxLatencyDurationCount: 7,
-                                liveBackBufferLength: 30,
-                                liveDurationInfinity: true
+                                liveBackBufferLength: -1
                             });
                             hls.loadSource(url);
                             hls.attachMedia(video);
@@ -5133,6 +5134,7 @@ HTML_TEMPLATE = '''
             );
             
             if (popup) {
+                popup.document.open();
                 popup.document.write(`
                     <!DOCTYPE html>
                     <html>
@@ -5160,8 +5162,7 @@ HTML_TEMPLATE = '''
                                     maxMaxBufferLength: 60,
                                     liveSyncDurationCount: 5,
                                     liveMaxLatencyDurationCount: 7,
-                                    liveBackBufferLength: 30,
-                                    liveDurationInfinity: true,
+                                    liveBackBufferLength: -1,
                                     xhrSetup: function(xhr, url) {
                                         // Add Basic Auth header
                                         const credentials = btoa(username + ':' + password);
@@ -9468,8 +9469,7 @@ def play_recording(filename):
                 maxMaxBufferLength: 60,
                 liveSyncDurationCount: 5,
                 liveMaxLatencyDurationCount: 7,
-                liveBackBufferLength: 30,
-                liveDurationInfinity: true
+                liveBackBufferLength: -1
             }});
             hls.loadSource(videoSrc);
             hls.attachMedia(video);
@@ -11506,8 +11506,7 @@ def watch_stream(stream_name):
                     maxMaxBufferLength: 60,
                     liveSyncDurationCount: 5,
                     liveMaxLatencyDurationCount: 7,
-                    liveBackBufferLength: 30,
-                    liveDurationInfinity: true,
+                    liveBackBufferLength: -1,
                     xhrSetup: function(xhr, url) {{
                         const credentials = btoa(username + ':' + password);
                         xhr.setRequestHeader('Authorization', 'Basic ' + credentials);
