@@ -11948,6 +11948,37 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"Warning: Could not auto-patch IPv6 loopback: {e}")
     
+    # Auto-patch: Remove legacy FFmpeg /live re-publish path
+    # With rtspDemuxMpegts (MediaMTX v1.17.0+), MPEG-TS sources are unwrapped
+    # natively — the FFmpeg copy step is no longer needed.
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            lines = f.readlines()
+        ffmpeg_start = None
+        ffmpeg_end = None
+        for i, line in enumerate(lines):
+            if '~^live/(.+)$' in line:
+                ffmpeg_start = i
+            elif ffmpeg_start is not None and ffmpeg_end is None:
+                if line.strip().startswith('runOnReady') or line.strip().startswith('runOnReadyRestart'):
+                    ffmpeg_end = i
+                else:
+                    ffmpeg_end = i - 1
+                    break
+        if ffmpeg_start is not None:
+            if ffmpeg_end is None:
+                ffmpeg_end = ffmpeg_start
+            # Remove lines including any trailing blank line
+            end = ffmpeg_end + 1
+            if end < len(lines) and lines[end].strip() == '':
+                end += 1
+            del lines[ffmpeg_start:end]
+            with open(CONFIG_FILE, 'w') as f:
+                f.writelines(lines)
+            print("✓ Removed legacy FFmpeg ~^live/(.+)$ path from mediamtx.yml (no longer needed with MPEG-TS demuxing)")
+    except Exception as e:
+        print(f"Warning: Could not remove legacy FFmpeg path: {e}")
+
     # Detect infra-TAK LDAP overlay
     overlay_file = '/opt/mediamtx-webeditor/mediamtx_ldap_overlay.py'
     if os.path.exists(overlay_file):
