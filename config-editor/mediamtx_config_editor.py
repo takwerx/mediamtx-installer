@@ -11956,31 +11956,45 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"Warning: Could not auto-patch IPv6 loopback: {e}")
     
-    # Auto-patch: Remove legacy FFmpeg /live re-publish path
-    # With rtspDemuxMpegts (MediaMTX v1.17.0+), MPEG-TS sources are unwrapped
-    # natively — the FFmpeg copy step is no longer needed.
+    # Auto-patch: Remove legacy FFmpeg /live re-publish path and any leftover
+    # fragments from earlier incomplete removals.
     try:
         with open(CONFIG_FILE, 'r') as f:
             lines = f.readlines()
+        changed = False
+
+        # Pass 1: Remove the full ~^live/(.+)$ block using indentation
         ffmpeg_start = None
-        ffmpeg_end = None
+        base_indent = 0
         for i, line in enumerate(lines):
             if '~^live/(.+)$' in line:
                 ffmpeg_start = i
-            elif ffmpeg_start is not None and ffmpeg_end is None:
-                if line.strip().startswith('runOnReady') or line.strip().startswith('runOnReadyRestart'):
-                    ffmpeg_end = i
-                else:
-                    ffmpeg_end = i - 1
+                base_indent = len(line) - len(line.lstrip())
+                continue
+            if ffmpeg_start is not None and i > ffmpeg_start:
+                stripped = line.strip()
+                if stripped == '':
+                    continue
+                cur_indent = len(line) - len(line.lstrip())
+                if cur_indent <= base_indent:
+                    end = i
+                    while end > ffmpeg_start and lines[end - 1].strip() == '':
+                        end -= 1
+                    del lines[ffmpeg_start:end]
+                    changed = True
                     break
-        if ffmpeg_start is not None:
-            if ffmpeg_end is None:
-                ffmpeg_end = ffmpeg_start
-            # Remove lines including any trailing blank line
-            end = ffmpeg_end + 1
-            if end < len(lines) and lines[end].strip() == '':
-                end += 1
-            del lines[ffmpeg_start:end]
+
+        # Pass 2: Clean up orphaned fragments from previous bad removals
+        cleaned = []
+        for line in lines:
+            s = line.strip()
+            if s == 'rtsp://localhost:8554/$G1' or s == 'runOnReadyRestart: true':
+                changed = True
+                continue
+            cleaned.append(line)
+        lines = cleaned
+
+        if changed:
             with open(CONFIG_FILE, 'w') as f:
                 f.writelines(lines)
             print("✓ Removed legacy FFmpeg ~^live/(.+)$ path from mediamtx.yml (no longer needed with MPEG-TS demuxing)")
