@@ -32,7 +32,7 @@ def add_no_cache_headers(response):
     return response
 
 # Version - used by auto-update checker
-CURRENT_VERSION = "v2.0.6"
+CURRENT_VERSION = "v2.0.7"
 GITHUB_REPO = "takwerx/mediamtx-installer"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/config-editor/mediamtx_config_editor.py"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -274,10 +274,17 @@ def prune_expired_share_links(links):
 def hls_fetch_for_share(subpath, query_string=None):
     """Fetch HLS content from MediaMTX (127.0.0.1:8888) with credentials.
 
-    query_string preserves v1.18.x session tokens (e.g. ?session=...) and
-    ?cookieCheck=1 flags that get passed in variant manifest URLs.
-    requests.Session() is used so the cookieCheck cookie persists across
-    the redirect cycle that MediaMTX v1.18.x performs on first fetch.
+    query_string preserves v1.18.x session tokens (?session=...) and
+    ?cookieCheck=1 flags that MediaMTX puts in variant manifest URLs.
+
+    Important: we deliberately do NOT use requests.Session() here. With a
+    Session, cookies persist across the cookieCheck redirect cycle and
+    MediaMTX switches to cookie-based session tracking — but since each
+    Flask request creates a fresh fetch, the cookie is lost between calls
+    and the second-level manifest gets a 401. By NOT preserving cookies,
+    MediaMTX falls back to URL-based session tracking, embedding ?session=...
+    in variant URLs. The browser sends those URLs back to us, and we forward
+    the query string to MediaMTX so the session is recognized.
 
     Returns (bytes, content_type).
     """
@@ -298,8 +305,7 @@ def hls_fetch_for_share(subpath, query_string=None):
     if cred:
         auth = base64.b64encode(f"{cred['username']}:{cred['password']}".encode()).decode()
         headers['Authorization'] = f'Basic {auth}'
-    session = requests.Session()
-    resp = session.get(url, headers=headers, timeout=10, verify=False, allow_redirects=True)
+    resp = requests.get(url, headers=headers, timeout=10, verify=False, allow_redirects=True)
     resp.raise_for_status()
     return resp.content, resp.headers.get('Content-Type', 'application/octet-stream')
 
