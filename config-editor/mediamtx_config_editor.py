@@ -32,7 +32,7 @@ def add_no_cache_headers(response):
     return response
 
 # Version - used by auto-update checker
-CURRENT_VERSION = "v2.0.4"
+CURRENT_VERSION = "v2.0.5"
 GITHUB_REPO = "takwerx/mediamtx-installer"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/config-editor/mediamtx_config_editor.py"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -212,6 +212,21 @@ def get_streaming_domain():
         'domain': None,
         'protocol': 'http'
     }
+
+def is_hls_localhost_bound():
+    """Return True if hlsAddress is bound to localhost (infra-TAK / Caddy-proxy mode).
+    When True, HLS URLs should use the /hls-proxy/ path so Caddy routes them
+    internally to MediaMTX — port 8888 is firewalled externally in this setup."""
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith('hlsAddress:'):
+                    addr = stripped.split(':', 1)[1].strip().strip('"\'')
+                    return addr.startswith('127.0.0.1') or addr.startswith('localhost')
+    except Exception:
+        pass
+    return False
 
 # Share links (token-based, no-login stream access)
 def load_share_links():
@@ -5233,34 +5248,38 @@ HTML_TEMPLATE = '''
         
         function watchStream(streamUrl) {
             console.log('[HLS] watchStream called with URL:', streamUrl);
-            console.log('[HLS] Current credential:', hlsViewerCredential);
-            
-            if (!hlsViewerCredential) {
+
+            // Proxied mode: /hls-proxy/ URLs are routed by Caddy to MediaMTX on localhost.
+            // Auth is handled server-side — no credentials needed in the browser.
+            // Direct mode: full https://domain:8888 URL, requires Basic Auth via xhrSetup.
+            const isProxied = streamUrl.startsWith('/hls-proxy/');
+
+            if (!isProxied && !hlsViewerCredential) {
                 alert('Viewer credential not loaded. Please refresh the page.');
                 return;
             }
-            
-            // Parse URL and prepare credentials
-            const url = new URL(streamUrl);
-            const username = hlsViewerCredential.username;
-            const password = hlsViewerCredential.password;
-            
-            console.log('[HLS] Original URL:', streamUrl);
-            console.log('[HLS] Will use Authorization header with username:', username);
-            
+
+            const username = hlsViewerCredential ? hlsViewerCredential.username : '';
+            const password = hlsViewerCredential ? hlsViewerCredential.password : '';
+
+            // Resolve relative URL to absolute so the popup (about:blank) can fetch it
+            const absoluteUrl = isProxied ? (window.location.origin + streamUrl) : streamUrl;
+
+            console.log('[HLS] Resolved URL:', absoluteUrl, '| proxied:', isProxied);
+
             // Open chromeless popup
             const width = 1280;
             const height = 720;
             const left = (screen.width - width) / 2;
             const top = (screen.height - height) / 2;
-            
+
             const popup = window.open(
                 '',
                 'streamViewer_teststream',
                 `width=${width},height=${height},left=${left},top=${top},` +
                 'toolbar=no,location=no,directories=no,status=no,menubar=no,scrollbars=no,resizable=yes'
             );
-            
+
             if (popup) {
                 popup.document.open();
                 popup.document.write(`
@@ -5278,12 +5297,13 @@ HTML_TEMPLATE = '''
                         <video id="player" controls autoplay muted></video>
                         <script>
                             const video = document.getElementById('player');
-                            const streamUrl = '${streamUrl}';
+                            const streamUrl = '${absoluteUrl}';
+                            const isProxied = ${isProxied};
                             const username = '${username}';
                             const password = '${password}';
-                            
+
                             if (Hls.isSupported()) {
-                                const hls = new Hls({
+                                const hlsConfig = {
                                     enableWorker: true,
                                     lowLatencyMode: false,
                                     maxBufferLength: 30,
@@ -5291,12 +5311,14 @@ HTML_TEMPLATE = '''
                                     liveSyncDurationCount: 5,
                                     liveMaxLatencyDurationCount: 7,
                                     liveBackBufferLength: -1,
-                                    xhrSetup: function(xhr, url) {
-                                        // Add Basic Auth header
+                                };
+                                if (!isProxied) {
+                                    hlsConfig.xhrSetup = function(xhr, url) {
                                         const credentials = btoa(username + ':' + password);
                                         xhr.setRequestHeader('Authorization', 'Basic ' + credentials);
-                                    }
-                                });
+                                    };
+                                }
+                                const hls = new Hls(hlsConfig);
                                 hls.loadSource(streamUrl);
                                 hls.attachMedia(video);
                                 hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -7736,9 +7758,13 @@ def api_streams():
                     except:
                         pass  # If we can't get details, just continue
                     
-                    # Generate HLS URL - use https only if hlsEncryption is enabled
-                    hls_protocol = 'https' if hls_encryption_on else 'http'
-                    stream_info['hls_url'] = f"{hls_protocol}://{hls_domain}:8888/{path_name}/index.m3u8"
+                    # Generate HLS URL — use /hls-proxy/ when MediaMTX is localhost-bound
+                    # (infra-TAK mode: port 8888 is firewalled, Caddy routes /hls-proxy/ internally)
+                    if is_hls_localhost_bound():
+                        stream_info['hls_url'] = f"/hls-proxy/{path_name}/index.m3u8"
+                    else:
+                        hls_protocol = 'https' if hls_encryption_on else 'http'
+                        stream_info['hls_url'] = f"{hls_protocol}://{hls_domain}:8888/{path_name}/index.m3u8"
                     # Share mode: public = static /watch/ link, private = token link (only affects link sharing)
                     stream_info['share_mode'] = load_share_mode().get(path_name, 'private')
                     
@@ -8915,7 +8941,7 @@ def get_stream_urls():
     urls = {
         'rtsp': f'rtsp://{domain}:8554/teststream',
         'srt': f'srt://{domain}:8890?streamid=read:teststream',
-        'hls': f'{protocol}://{domain}:8888/teststream/index.m3u8'
+        'hls': '/hls-proxy/teststream/index.m3u8' if is_hls_localhost_bound() else f'{protocol}://{domain}:8888/teststream/index.m3u8'
     }
     
     return jsonify(urls)
@@ -11633,12 +11659,12 @@ def _watch_stream_impl(stream_name):
         
         # Get streaming domain
         streaming = get_streaming_domain()
-        if streaming['domain']:
-            hls_base = f"{streaming['protocol']}://{streaming['domain']}:8888"
+        if is_hls_localhost_bound():
+            stream_url = f"/hls-proxy/{stream_name}/index.m3u8"
+        elif streaming['domain']:
+            stream_url = f"{streaming['protocol']}://{streaming['domain']}:8888/{stream_name}/index.m3u8"
         else:
-            hls_base = f"http://{request.host.split(':')[0]}:8888"
-        
-        stream_url = f"{hls_base}/{stream_name}/index.m3u8"
+            stream_url = f"http://{request.host.split(':')[0]}:8888/{stream_name}/index.m3u8"
         
         # Load theme for branding
         theme = load_theme()
