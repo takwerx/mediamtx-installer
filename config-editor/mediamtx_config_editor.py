@@ -32,7 +32,7 @@ def add_no_cache_headers(response):
     return response
 
 # Version - used by auto-update checker
-CURRENT_VERSION = "v2.0.5"
+CURRENT_VERSION = "v2.0.6"
 GITHUB_REPO = "takwerx/mediamtx-installer"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/config-editor/mediamtx_config_editor.py"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -271,25 +271,37 @@ def prune_expired_share_links(links):
         del links[tok]
     return links
 
-def hls_fetch_for_share(subpath):
-    """Fetch HLS content from MediaMTX (127.0.0.1:8888) with credentials. Returns (bytes, content_type)."""
+def hls_fetch_for_share(subpath, query_string=None):
+    """Fetch HLS content from MediaMTX (127.0.0.1:8888) with credentials.
+
+    query_string preserves v1.18.x session tokens (e.g. ?session=...) and
+    ?cookieCheck=1 flags that get passed in variant manifest URLs.
+    requests.Session() is used so the cookieCheck cookie persists across
+    the redirect cycle that MediaMTX v1.18.x performs on first fetch.
+
+    Returns (bytes, content_type).
+    """
     import base64
-    import ssl
-    import urllib.request
+    import requests
+    from urllib3.exceptions import InsecureRequestWarning
+    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
     cred = get_hlsviewer_credential()
     streaming = get_streaming_domain()
     proto = streaming.get('protocol', 'http')
     url = f'{proto}://127.0.0.1:8888/{subpath}'
+    if query_string:
+        if isinstance(query_string, bytes):
+            query_string = query_string.decode('utf-8', errors='replace')
+        if query_string:
+            url = f'{url}?{query_string}'
     headers = {'Accept': '*/*'}
     if cred:
         auth = base64.b64encode(f"{cred['username']}:{cred['password']}".encode()).decode()
         headers['Authorization'] = f'Basic {auth}'
-    req = urllib.request.Request(url, headers=headers)
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
-        return resp.read(), resp.headers.get('Content-Type', 'application/octet-stream')
+    session = requests.Session()
+    resp = session.get(url, headers=headers, timeout=10, verify=False, allow_redirects=True)
+    resp.raise_for_status()
+    return resp.content, resp.headers.get('Content-Type', 'application/octet-stream')
 
 # Authentication decorator
 def login_required(f):
@@ -11543,7 +11555,7 @@ def shared_hls_proxy(token, subpath):
     if not subpath.startswith(info['stream']):
         return 'Forbidden', 403
     try:
-        data, ct = hls_fetch_for_share(subpath)
+        data, ct = hls_fetch_for_share(subpath, request.query_string)
         r = Response(data, content_type=ct)
         r.headers['Cache-Control'] = 'no-cache'
         return r
