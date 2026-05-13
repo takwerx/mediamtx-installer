@@ -3,7 +3,22 @@
 **Affects:** All infra-TAK servers running MediaMTX v1.18.0 or later  
 **Status:** Required for HLS Watch playback to work on v1.18.x  
 **infra-TAK change:** Caddyfile template — `stream.DOMAIN` block only  
-**Scope:** One added line inside the existing `reverse_proxy` block
+**Scope:** One added line inside the existing `reverse_proxy` block  
+**Doc revision:** 2026-05-13 (rev 2 — supersedes any earlier draft using `handle_response`)
+
+---
+
+## TL;DR — The change
+
+In the `stream.DOMAIN` Caddyfile block, inside the existing `handle_path /hls-proxy/*` → `reverse_proxy https://127.0.0.1:8888` block, add this single line:
+
+```caddy
+header_down Location ^ /hls-proxy
+```
+
+That's the entire fix. No other directives need to be added or modified.
+
+**Do NOT use `handle_response` + `redir` for this fix.** An earlier draft of this doc proposed that approach — it does not work in this Caddyfile because the catch-all `forward_auth` directive still fires after `handle_response` and redirects HLS traffic to Authentik. See the "Why not use `handle_response`?" section below for details.
 
 ---
 
@@ -104,3 +119,43 @@ An earlier draft of this fix used `handle_response @mtx_redirect { redir ... }` 
 - **MediaMTX v1.18.0+:** Cookie check completes correctly. HLS plays.
 
 This change is backwards-compatible and safe to deploy to all infra-TAK servers regardless of their current MediaMTX version.
+
+---
+
+## Verification after deploy
+
+After regenerating the Caddyfile and reloading Caddy, run these checks on the target server:
+
+**1. Confirm the new line is in the Caddyfile:**
+
+```bash
+grep -A 6 "handle_path /hls-proxy" /etc/caddy/Caddyfile
+```
+
+Expected output should include `header_down Location ^ /hls-proxy` and **must not** include `handle_response` or `redir /hls-proxy`.
+
+**2. Confirm Caddy reloaded cleanly:**
+
+```bash
+caddy validate --config /etc/caddy/Caddyfile && systemctl is-active caddy
+```
+
+Expected: `Valid configuration` and `active`.
+
+**3. Confirm the redirect rewrite is working end-to-end** (use `<stream-domain>` for the actual stream hostname; this requires a publishing test stream named `teststream`):
+
+```bash
+curl -ski "https://<stream-domain>/hls-proxy/teststream/index.m3u8" 2>&1 | grep -iE "^(HTTP|location|set-cookie)"
+```
+
+**Expected (MediaMTX v1.18.x with the fix correctly applied):**
+
+```
+HTTP/2 302
+location: /hls-proxy/teststream/index.m3u8?cookieCheck=1
+set-cookie: cookieCheck=1; HttpOnly; Secure; ...
+```
+
+The `location` header MUST start with `/hls-proxy/`. If it starts with `/teststream/` (no `/hls-proxy` prefix), the `header_down` line is missing or wrong.
+
+**Failure indicator:** If the response is `302` with a `location:` pointing to `https://tak.<domain>/application/o/authorize/...` (Authentik authorize URL), the `handle_response` approach from the earlier doc draft is still in place. Remove it and use only the single `header_down Location ^ /hls-proxy` line.
