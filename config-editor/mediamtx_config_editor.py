@@ -32,7 +32,7 @@ def add_no_cache_headers(response):
     return response
 
 # Version - used by auto-update checker
-CURRENT_VERSION = "v2.0.7"
+CURRENT_VERSION = "v2.0.8"
 GITHUB_REPO = "takwerx/mediamtx-installer"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/config-editor/mediamtx_config_editor.py"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -274,24 +274,27 @@ def prune_expired_share_links(links):
 def hls_fetch_for_share(subpath, query_string=None):
     """Fetch HLS content from MediaMTX (127.0.0.1:8888) with credentials.
 
-    query_string preserves v1.18.x session tokens (?session=...) and
-    ?cookieCheck=1 flags that MediaMTX puts in variant manifest URLs.
+    We use urllib.request (NOT the `requests` library) deliberately. urllib's
+    default opener has no cookie jar, so Set-Cookie headers are never sent
+    back on follow-up requests — not even across redirects. With requests
+    (even without an explicit Session) urllib3 preserves cookies across the
+    cookieCheck redirect chain, which puts MediaMTX v1.18.x into cookie-based
+    session mode. Those cookies then die when this function returns and the
+    next Flask call gets a 401 from MediaMTX.
 
-    Important: we deliberately do NOT use requests.Session() here. With a
-    Session, cookies persist across the cookieCheck redirect cycle and
-    MediaMTX switches to cookie-based session tracking — but since each
-    Flask request creates a fresh fetch, the cookie is lost between calls
-    and the second-level manifest gets a 401. By NOT preserving cookies,
-    MediaMTX falls back to URL-based session tracking, embedding ?session=...
-    in variant URLs. The browser sends those URLs back to us, and we forward
-    the query string to MediaMTX so the session is recognized.
+    With urllib + no cookie jar, MediaMTX v1.18.x falls back to URL-based
+    session tracking, embedding ?session=<uuid> in variant manifest URLs.
+    The browser sends those URLs back through us, and we forward the
+    query string to MediaMTX so the session is recognized end-to-end.
+
+    query_string is forwarded to MediaMTX. v1.17.x and earlier emit no
+    query strings, so this is a no-op there.
 
     Returns (bytes, content_type).
     """
     import base64
-    import requests
-    from urllib3.exceptions import InsecureRequestWarning
-    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+    import ssl
+    import urllib.request
     cred = get_hlsviewer_credential()
     streaming = get_streaming_domain()
     proto = streaming.get('protocol', 'http')
@@ -301,13 +304,19 @@ def hls_fetch_for_share(subpath, query_string=None):
             query_string = query_string.decode('utf-8', errors='replace')
         if query_string:
             url = f'{url}?{query_string}'
-    headers = {'Accept': '*/*'}
+    req = urllib.request.Request(url, headers={'Accept': '*/*'})
     if cred:
         auth = base64.b64encode(f"{cred['username']}:{cred['password']}".encode()).decode()
-        headers['Authorization'] = f'Basic {auth}'
-    resp = requests.get(url, headers=headers, timeout=10, verify=False, allow_redirects=True)
-    resp.raise_for_status()
-    return resp.content, resp.headers.get('Content-Type', 'application/octet-stream')
+        req.add_header('Authorization', f'Basic {auth}')
+    ctx = None
+    if proto == 'https':
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    resp = urllib.request.urlopen(req, timeout=10, context=ctx)
+    data = resp.read()
+    ct = resp.headers.get('Content-Type', 'application/octet-stream')
+    return data, ct
 
 # Authentication decorator
 def login_required(f):
