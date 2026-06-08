@@ -2401,6 +2401,60 @@ HTML_TEMPLATE = '''
                                 <p class="help-text">Full URL to the .m3u8 playlist. Supports http:// and https://</p>
                             </div>
                         </div>
+
+                        <!-- KLV -> CoT (per-source) -->
+                        <div class="form-group" style="margin-top: 18px; padding-top: 16px; border-top: 1px solid #404040;">
+                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-weight: normal;">
+                                <input type="checkbox" id="source-klv-enable" onchange="toggleKlvFields()"> Extract KLV &rarr; CoT (send sensor metadata to an aggregator)
+                            </label>
+                            <p class="help-text">Taps MISB ST0601 KLV from this stream and forwards decoded platform / sensor / frame-center to a CoT aggregator over the mesh. Does not affect video playback. Connect this box to the aggregator's NetBird network first (panel above).</p>
+                        </div>
+                        <div id="klv-fields" style="display: none; margin-top: 4px; padding: 14px; background: #1e1e1e; border-radius: 6px; border: 1px solid #404040;">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>Transport</label>
+                                    <select id="source-klv-transport" onchange="updateKlvTransport()">
+                                        <option value="netbird">NetBird (mesh)</option>
+                                        <option value="mtls">mTLS (public)</option>
+                                    </select>
+                                </div>
+                                <div class="form-group" id="klv-proto-group">
+                                    <label>Protocol</label>
+                                    <select id="source-klv-proto">
+                                        <option value="tcp">TCP (recommended)</option>
+                                        <option value="udp">UDP</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>Aggregator target (host:port)</label>
+                                    <input type="text" id="source-klv-target" placeholder="e.g., 100.92.1.5:9000">
+                                    <p class="help-text">Aggregator's address on the mesh (NetBird IP) and port (usually 9000). Each stream can target a different aggregator.</p>
+                                </div>
+                                <div class="form-group">
+                                    <label>Aircraft hex / ID (optional)</label>
+                                    <input type="text" id="source-klv-hex" placeholder="defaults to the stream name">
+                                    <p class="help-text">ICAO hex; must match the aggregator's transform row. Blank = use this stream's name.</p>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label>Ingest token</label>
+                                <div style="position: relative;">
+                                    <input type="password" id="source-klv-token" placeholder="paste the token from the aggregator operator" style="padding-right: 60px;">
+                                    <button type="button" onclick="const f=document.getElementById('source-klv-token'); if(f.type==='password'){f.type='text';this.textContent='Hide';}else{f.type='password';this.textContent='Show';}" style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: #555; color: #fff; border: none; border-radius: 3px; padding: 4px 10px; cursor: pointer; font-size: 12px;">Show</button>
+                                </div>
+                                <p class="help-text">Required. Authenticates this aircraft to the aggregator — messages without a valid token are dropped.</p>
+                            </div>
+                            <div id="klv-mtls-fields" style="display: none;">
+                                <div class="form-row">
+                                    <div class="form-group"><label>Client cert path</label><input type="text" id="source-klv-cert" placeholder="/path/to/cert.pem"></div>
+                                    <div class="form-group"><label>Client key path</label><input type="text" id="source-klv-key" placeholder="/path/to/key.pem"></div>
+                                </div>
+                                <div class="form-group"><label>CA cert path</label><input type="text" id="source-klv-cacert" placeholder="/path/to/ca.pem"></div>
+                            </div>
+                        </div>
+
                         <button type="submit" class="btn btn-primary">Add Source</button>
                         <button type="button" class="btn btn-secondary" onclick="hideAddSourceForm()">Cancel</button>
                     </form>
@@ -4509,15 +4563,41 @@ HTML_TEMPLATE = '''
             document.getElementById('source-rtmp-path').value = '';
             // HLS fields
             document.getElementById('source-hls-url').value = '';
-            
+            // KLV fields
+            resetKlvFields();
+
             document.getElementById('source-protocol').value = 'srt';
             const submitBtn = document.querySelector('#external-source-form button[type="submit"]');
             if (submitBtn) submitBtn.textContent = 'Add Source';
             updateSourceFormFields();
         }
-        
+
         function hideAddSourceForm() {
             document.getElementById('add-source-form').style.display = 'none';
+        }
+
+        function resetKlvFields() {
+            var ids = ['source-klv-target', 'source-klv-hex', 'source-klv-token', 'source-klv-cert', 'source-klv-key', 'source-klv-cacert'];
+            ids.forEach(function(id) { var e = document.getElementById(id); if (e) e.value = ''; });
+            var en = document.getElementById('source-klv-enable'); if (en) en.checked = false;
+            var tr = document.getElementById('source-klv-transport'); if (tr) tr.value = 'netbird';
+            var pr = document.getElementById('source-klv-proto'); if (pr) pr.value = 'tcp';
+            toggleKlvFields(); updateKlvTransport();
+        }
+
+        function toggleKlvFields() {
+            var on = document.getElementById('source-klv-enable');
+            var box = document.getElementById('klv-fields');
+            if (box) box.style.display = (on && on.checked) ? 'block' : 'none';
+        }
+
+        function updateKlvTransport() {
+            var t = document.getElementById('source-klv-transport');
+            var mtls = document.getElementById('klv-mtls-fields');
+            var proto = document.getElementById('klv-proto-group');
+            var isMtls = t && t.value === 'mtls';
+            if (mtls) mtls.style.display = isMtls ? 'block' : 'none';
+            if (proto) proto.style.display = isMtls ? 'none' : 'block';  // mTLS is always TCP
         }
         
         function updateSourceFormFields() {
@@ -4661,17 +4741,38 @@ HTML_TEMPLATE = '''
                 return;
             }
             
+            // KLV -> CoT (per-source target/token/hex)
+            const klvEnableEl = document.getElementById('source-klv-enable');
+            let klvBody = { klvToCot: false };
+            if (klvEnableEl && klvEnableEl.checked) {
+                const kTarget = document.getElementById('source-klv-target').value.trim();
+                const kToken = document.getElementById('source-klv-token').value.trim();
+                if (!kTarget) { alert('KLV: aggregator target (host:port) is required'); return; }
+                if (!kToken) { alert('KLV: ingest token is required'); return; }
+                klvBody = {
+                    klvToCot: true,
+                    klvTransport: document.getElementById('source-klv-transport').value,
+                    klvProto: document.getElementById('source-klv-proto').value,
+                    klvTarget: kTarget,
+                    klvToken: kToken,
+                    klvHex: document.getElementById('source-klv-hex').value.trim(),
+                    klvCert: document.getElementById('source-klv-cert').value.trim(),
+                    klvKey: document.getElementById('source-klv-key').value.trim(),
+                    klvCacert: document.getElementById('source-klv-cacert').value.trim()
+                };
+            }
+
             const endpoint = editingSourceName ? '/api/external-sources/edit' : '/api/external-sources/add';
             const successMsg = editingSourceName ? 'External source updated! MediaMTX will restart.' : 'External source added! MediaMTX will restart.';
-            
+
             fetch(endpoint, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
+                body: JSON.stringify(Object.assign({
                     name: name,
                     sourceUrl: sourceUrl,
                     onDemand: !alwaysOn
-                })
+                }, klvBody))
             })
             .then(function(response) {
                 const ct = response.headers.get('content-type') || '';
@@ -4761,7 +4862,7 @@ HTML_TEMPLATE = '''
                     data.sources.forEach(source => {
                         const shareMode = shareModeMap[source.name] || 'private';
                         html += '<tr style="border-bottom: 1px solid #4a4a4a;">';
-                        html += '<td style="padding: 12px;"><strong>' + escapeHtml(source.name) + '</strong> <button class="share-mode-badge-ext" data-stream-name="' + escapeHtml(source.name).replace(/"/g, '&quot;') + '" data-mode="' + shareMode + '" style="margin-left:8px;padding:2px 8px;font-size:11px;font-weight:bold;border-radius:4px;border:none;cursor:pointer;background:' + (shareMode === 'public' ? '#16a34a' : '#dc2626') + ';color:#fff;" title="Link sharing: ' + (shareMode === 'public' ? 'Static' : 'Token') + '. Click to toggle (admin).">' + (shareMode === 'public' ? 'Public' : 'Private') + '</button></td>';
+                        html += '<td style="padding: 12px;"><strong>' + escapeHtml(source.name) + '</strong> <button class="share-mode-badge-ext" data-stream-name="' + escapeHtml(source.name).replace(/"/g, '&quot;') + '" data-mode="' + shareMode + '" style="margin-left:8px;padding:2px 8px;font-size:11px;font-weight:bold;border-radius:4px;border:none;cursor:pointer;background:' + (shareMode === 'public' ? '#16a34a' : '#dc2626') + ';color:#fff;" title="Link sharing: ' + (shareMode === 'public' ? 'Static' : 'Token') + '. Click to toggle (admin).">' + (shareMode === 'public' ? 'Public' : 'Private') + '</button>' + (source.klv && source.klv.to_cot ? ' <span style="padding:2px 8px;font-size:11px;font-weight:bold;border-radius:4px;background:#0e7490;color:#fff;" title="KLV &rarr; CoT to ' + escapeHtml(source.klv.target || '') + '">📡 KLV&rarr;CoT</span>' : '') + '</td>';
                         
                         // Clean URL display: mask passphrase and strip SRT tuning params
                         let displayUrl = source.source_url || '';
@@ -5012,7 +5113,21 @@ HTML_TEMPLATE = '''
                     // Change button text
                     const submitBtn = document.querySelector('#external-source-form button[type="submit"]');
                     if (submitBtn) submitBtn.textContent = 'Save Changes';
-                    
+
+                    // KLV fields (per-source)
+                    if (source.klv && source.klv.to_cot) {
+                        document.getElementById('source-klv-enable').checked = true;
+                        document.getElementById('source-klv-transport').value = source.klv.transport || 'netbird';
+                        document.getElementById('source-klv-proto').value = source.klv.proto || 'tcp';
+                        document.getElementById('source-klv-target').value = source.klv.target || '';
+                        document.getElementById('source-klv-token').value = source.klv.token || '';
+                        document.getElementById('source-klv-hex').value = source.klv.hex || '';
+                        document.getElementById('source-klv-cert').value = source.klv.cert || '';
+                        document.getElementById('source-klv-key').value = source.klv.key || '';
+                        document.getElementById('source-klv-cacert').value = source.klv.cacert || '';
+                        toggleKlvFields(); updateKlvTransport();
+                    }
+
                     let url = source.source_url || '';
                     // Normalize double srt:// so parse and display are correct
                     if (url.startsWith('srt://')) {
