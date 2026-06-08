@@ -10115,6 +10115,24 @@ def apply_update():
             import hashlib
             set_dev_baseline(hashlib.sha256(new_code).hexdigest())
 
+        # Step 6c: Sync the KLV->CoT sidecar from the same channel branch. The updater
+        # only fetches the editor file, but the KLV feature needs klv-to-cot.py present;
+        # without this, boxes that self-update (vs re-run the installer) would lack it.
+        try:
+            sidecar_url = (f"https://raw.githubusercontent.com/{GITHUB_REPO}/"
+                           f"{get_update_channel()}/config-editor/klv-to-cot.py")
+            sreq = urllib.request.Request(sidecar_url, headers={
+                'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION})
+            with urllib.request.urlopen(sreq, timeout=20, context=ctx) as sresp:
+                sidecar_code = sresp.read()
+            if len(sidecar_code) > 500 and b'ST0601' in sidecar_code:
+                with open(KLV_SIDECAR, 'wb') as sf:
+                    sf.write(sidecar_code)
+                os.chmod(KLV_SIDECAR, 0o755)
+                print('✓ KLV->CoT sidecar synced', flush=True)
+        except Exception as e:
+            print(f'Warning: could not sync klv-to-cot.py: {e}', flush=True)
+
         # Step 7: Re-sync LDAP overlay if this is an infra-TAK install
         overlay_synced = False
         overlay_file = '/opt/mediamtx-webeditor/mediamtx_ldap_overlay.py'
@@ -11080,6 +11098,68 @@ def save_external_sources_metadata(metadata):
         json.dump(metadata, f, indent=2)
     os.chmod(EXTERNAL_SOURCES_FILE, 0o600)
 
+
+# --- KLV -> CoT extraction (v2.1.0) ----------------------------------------
+# When enabled on an external source, MediaMTX runOnReady launches the
+# klv-to-cot.py sidecar to tap MISB ST0601 KLV off the live path and ship
+# decoded platform/sensor/frame-center samples to a remote aggregator.
+KLV_SIDECAR = '/opt/mediamtx-webeditor/klv-to-cot.py'
+
+
+def parse_klv_opts(data):
+    """Pull KLV fields from a request body into a normalized dict, validating.
+
+    Returns (klv_dict_or_None, error_or_None). klv_dict is None when disabled.
+    """
+    if not data.get('klvToCot'):
+        return None, None
+    target = (data.get('klvTarget') or '').strip()
+    host, _, port = target.rpartition(':')
+    if not host or not port.isdigit() or not (0 < int(port) < 65536):
+        return None, 'KLV aggregator target must be host:port'
+    transport = data.get('klvTransport') or 'netbird'
+    if transport not in ('netbird', 'mtls'):
+        return None, "KLV transport must be 'netbird' or 'mtls'"
+    klv = {
+        'to_cot': True,
+        'transport': transport,
+        'target': target,
+        'hex': (data.get('klvHex') or '').strip(),
+    }
+    if transport == 'mtls':
+        for k in ('cert', 'key', 'cacert'):
+            v = (data.get('klv' + k.capitalize()) or '').strip()
+            if not v:
+                return None, f'mTLS requires the {k} path'
+            klv[k] = v
+    else:
+        proto = data.get('klvProto') or 'udp'
+        if proto not in ('udp', 'tcp'):
+            return None, "KLV proto must be 'udp' or 'tcp'"
+        klv['proto'] = proto
+    return klv, None
+
+
+def klv_runon_lines(klv):
+    """YAML runOnReady/runOnNotReady lines for a path's KLV extraction, or '' if disabled.
+
+    The command is interpolated with MediaMTX's $MTX_PATH at runtime; hex defaults
+    to the path name when not given explicitly.
+    """
+    if not klv or not klv.get('to_cot'):
+        return ''
+    hexv = klv.get('hex') or '$MTX_PATH'
+    base = f"python3 {KLV_SIDECAR} --path $MTX_PATH --hex {hexv} --target {klv['target']}"
+    if klv.get('transport') == 'mtls':
+        base += f" --tls --cert {klv['cert']} --key {klv['key']} --cacert {klv['cacert']}"
+    else:
+        base += f" --proto {klv.get('proto', 'udp')}"
+    return (
+        f"    runOnReady: {base}\n"
+        f"    runOnReadyRestart: yes\n"
+        f"    runOnNotReady: {base} --downlink\n"
+    )
+
 @app.route('/api/external-sources')
 @login_required
 def api_list_external_sources():
@@ -11121,7 +11201,8 @@ def api_list_external_sources():
                 'source_url': meta.get('source_url', ''),
                 'on_demand': meta.get('on_demand', False),
                 'enabled': enabled,
-                'status': source_status
+                'status': source_status,
+                'klv': meta.get('klv') or None
             })
         
         return jsonify({'sources': sources})
@@ -11137,7 +11218,10 @@ def api_add_external_source():
         name = data.get('name', '').strip()
         source_url = data.get('sourceUrl', '').strip()
         on_demand = data.get('onDemand', False)
-        
+        klv, klv_err = parse_klv_opts(data)
+        if klv_err:
+            return jsonify({'success': False, 'error': klv_err}), 400
+
         if not name:
             return jsonify({'success': False, 'error': 'Stream name is required'}), 400
         
@@ -11179,6 +11263,7 @@ def api_add_external_source():
         # Build the path entry
         on_demand_value = 'yes' if on_demand else 'no'
         path_entry = f"\n  {name}:\n    source: {source_url}\n    sourceOnDemand: {on_demand_value}\n"
+        path_entry += klv_runon_lines(klv)
         
         # Insert into YAML - find the paths section and append before the last path or at end
         # Strategy: find the 'all_others:' or the regex path line and insert before it
@@ -11218,7 +11303,8 @@ def api_add_external_source():
         sources_metadata[name] = {
             'source_url': source_url,
             'on_demand': on_demand,
-            'enabled': True
+            'enabled': True,
+            'klv': klv,
         }
         save_external_sources_metadata(sources_metadata)
         
@@ -11406,6 +11492,7 @@ def api_toggle_external_source():
             on_demand = sources_metadata[name].get('on_demand', False)
             on_demand_value = 'yes' if on_demand else 'no'
             path_entry = f"\n  {name}:\n    source: {source_url}\n    sourceOnDemand: {on_demand_value}\n"
+            path_entry += klv_runon_lines(sources_metadata[name].get('klv'))
             
             with open(CONFIG_FILE, 'r') as f:
                 lines = f.readlines()
@@ -11511,7 +11598,10 @@ def api_edit_external_source():
         name = data.get('name', '').strip()
         new_source_url = data.get('sourceUrl', '').strip()
         on_demand = data.get('onDemand', False)
-        
+        klv, klv_err = parse_klv_opts(data)
+        if klv_err:
+            return jsonify({'success': False, 'error': klv_err}), 400
+
         if not name or not new_source_url:
             return jsonify({'success': False, 'error': 'Name and source URL are required'}), 400
         
@@ -11550,9 +11640,14 @@ def api_edit_external_source():
                     if stripped.startswith('source:'):
                         new_lines.append(f'    source: {new_source_url}\n')
                         continue
-                    # Replace sourceOnDemand line
+                    # Replace sourceOnDemand line, then (re)write KLV runOn lines after it
                     elif stripped.startswith('sourceOnDemand:'):
                         new_lines.append(f'    sourceOnDemand: {on_demand_value}\n')
+                        new_lines.append(klv_runon_lines(klv))  # '' clears it when disabled
+                        continue
+                    # Drop any existing KLV runOn lines — they're rewritten above
+                    elif (stripped.startswith('runOnReady:') or stripped.startswith('runOnReadyRestart:')
+                          or stripped.startswith('runOnNotReady:')):
                         continue
                     # Detect end of our path block
                     elif stripped and not line.startswith('    ') and not line.startswith('\t\t'):
@@ -11566,6 +11661,7 @@ def api_edit_external_source():
         # Update metadata
         sources_metadata[name]['source_url'] = new_source_url
         sources_metadata[name]['on_demand'] = on_demand
+        sources_metadata[name]['klv'] = klv
         save_external_sources_metadata(sources_metadata)
         
         # Restart MediaMTX if enabled
