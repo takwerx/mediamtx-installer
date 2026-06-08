@@ -284,7 +284,10 @@ def main():
         reader = sys.stdin.buffer if a.input == "-" else open(a.input, "rb")
     else:
         url = f"{a.rtsp_base}/{a.path}"
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
+        # +igndts: the KLV data substream's timestamps aren't monotonic over RTSP, which
+        # otherwise spams ffmpeg's 'non-monotonic DTS' muxer warning ~30x/sec into MediaMTX's
+        # logs. We only want the raw KLV bytes, so ignoring input DTS is safe.
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-fflags", "+igndts",
                "-rtsp_transport", "tcp", "-i", url,
                "-map", "0:d", "-c", "copy", "-f", "data", "pipe:1"]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=sys.stderr)
