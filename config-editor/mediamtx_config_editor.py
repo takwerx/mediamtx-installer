@@ -1551,14 +1551,10 @@ HTML_TEMPLATE = '''
                     ✅ Web Editor <span id="version-current"></span> — up to date
                 </div>
 
-                <!-- Update channel toggle (main = released, dev = testing builds) -->
-                <div id="db-channel-row" style="margin-bottom: 10px; padding: 8px 15px; border-radius: 6px; background: rgba(255,255,255,0.05); border: 1px solid #333; font-size: 13px; color: #888; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-                    <span style="font-weight: bold; color: #ccc;">Update channel:</span>
-                    <div style="display: inline-flex; border: 1px solid #404040; border-radius: 6px; overflow: hidden;">
-                        <button id="db-channel-main" onclick="setUpdateChannel('main')" style="padding: 4px 14px; background: #2563eb; color: #fff; border: none; cursor: pointer; font-size: 12px;">Main</button>
-                        <button id="db-channel-dev" onclick="setUpdateChannel('dev')" style="padding: 4px 14px; background: transparent; color: #aaa; border: none; cursor: pointer; font-size: 12px;">Dev</button>
-                    </div>
-                    <span id="db-channel-note" style="font-size: 12px; color: #888;"></span>
+                <!-- Read-only channel reflection. The Versions tab is the driver; this only
+                     shows when on Dev so updates here are understood as dev-branch builds. -->
+                <div id="db-channel-indicator" style="display: none; margin-bottom: 10px; padding: 8px 15px; border-radius: 6px; background: rgba(180,83,9,0.15); border: 1px solid #b45309; font-size: 13px; color: #fbbf24; cursor: pointer;" onclick="showTab('versions', event)">
+                    🧪 On <strong>Dev</strong> channel — updates track the dev branch. Switch back in the Versions tab →
                 </div>
 
                 <!-- MediaMTX Version Info (shown when up to date) -->
@@ -6298,12 +6294,11 @@ HTML_TEMPLATE = '''
         }
 
         function applyChannelUI(ch) {
-            // Updates both the dashboard (db-*) and Versions-tab (ve-*) toggles if present.
-            ['db', 've'].forEach(function(p) {
-                var m = document.getElementById(p + '-channel-main');
-                var dv = document.getElementById(p + '-channel-dev');
-                var note = document.getElementById(p + '-channel-note');
-                if (!m || !dv) return;
+            // Versions tab is the DRIVER: the Main/Dev buttons reflect + set the channel.
+            var m = document.getElementById('ve-channel-main');
+            var dv = document.getElementById('ve-channel-dev');
+            var note = document.getElementById('ve-channel-note');
+            if (m && dv) {
                 if (ch === 'dev') {
                     dv.style.background = '#b45309'; dv.style.color = '#fff';
                     m.style.background = 'transparent'; m.style.color = '#aaa';
@@ -6313,7 +6308,10 @@ HTML_TEMPLATE = '''
                     dv.style.background = 'transparent'; dv.style.color = '#aaa';
                     if (note) note.textContent = 'Stable released builds (default).';
                 }
-            });
+            }
+            // Dashboard is READ-ONLY: only flag that you're on Dev so updates here read as dev builds.
+            var ind = document.getElementById('db-channel-indicator');
+            if (ind) { ind.style.display = (ch === 'dev') ? 'block' : 'none'; }
         }
 
         function setUpdateChannel(ch) {
