@@ -4564,8 +4564,9 @@ HTML_TEMPLATE = '''
                     alert('SRT server address is required');
                     return;
                 }
-                // Avoid double srt:// if user pasted full URL into host
-                host = host.replace(/^srt:\/\//i, '');
+                // Normalize the host field: strip a pasted scheme, any path/query, and a
+                // trailing :port, so "host:8890" + the Port field doesn't yield "host:8890:8890".
+                host = host.replace(/^srt:\/\//i, '').replace(/[\/?].*$/, '').replace(/:\d+$/, '');
                 sourceUrl = 'srt://' + host + ':' + port;
                 let params = [];
                 if (streamId) {
