@@ -32,10 +32,47 @@ def add_no_cache_headers(response):
     return response
 
 # Version - used by auto-update checker
-CURRENT_VERSION = "v2.0.8"
+CURRENT_VERSION = "v2.0.9"
 GITHUB_REPO = "takwerx/mediamtx-installer"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/config-editor/mediamtx_config_editor.py"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
+# Update channel — mirrors infra-TAK's main/dev branch model. 'main' = released
+# (default; uses the GitHub releases API). 'dev' = bleeding-edge testing builds
+# pulled straight from the dev branch. Persisted in UPDATE_CHANNEL_FILE.
+UPDATE_CHANNEL_FILE = '/opt/mediamtx-webeditor/update_channel.json'
+VALID_CHANNELS = ('main', 'dev')
+
+
+def get_update_channel():
+    """Return the active update channel ('main' or 'dev'); defaults to 'main'."""
+    try:
+        if os.path.exists(UPDATE_CHANNEL_FILE):
+            with open(UPDATE_CHANNEL_FILE, 'r') as f:
+                ch = json.load(f).get('channel', 'main')
+                return ch if ch in VALID_CHANNELS else 'main'
+    except Exception:
+        pass
+    return 'main'
+
+
+def set_update_channel(channel):
+    """Persist the update channel. Returns the normalized value."""
+    channel = channel if channel in VALID_CHANNELS else 'main'
+    os.makedirs(os.path.dirname(UPDATE_CHANNEL_FILE), exist_ok=True)
+    with open(UPDATE_CHANNEL_FILE, 'w') as f:
+        json.dump({'channel': channel}, f)
+    try:
+        os.chmod(UPDATE_CHANNEL_FILE, 0o600)
+    except OSError:
+        pass
+    return channel
+
+
+def raw_url_for_channel(channel):
+    """Raw GitHub URL of the web editor on the given channel's branch."""
+    branch = channel if channel in VALID_CHANNELS else 'main'
+    return f"https://raw.githubusercontent.com/{GITHUB_REPO}/{branch}/config-editor/mediamtx_config_editor.py"
 
 LDAP_OVERLAY_ACTIVE = os.path.exists('/opt/mediamtx-webeditor/mediamtx_ldap_overlay.py')
 if LDAP_OVERLAY_ACTIVE:
@@ -2468,7 +2505,17 @@ HTML_TEMPLATE = '''
                 <h3 style="margin-top: 30px; margin-bottom: 15px; color: #4ade80;">Web Editor</h3>
                 <div style="background: rgba(255,255,255,0.03); border: 1px solid #404040; border-radius: 8px; padding: 20px; margin-bottom: 30px;">
                     <div id="ve-version-info" style="margin-bottom: 15px; color: #999;">Checking version...</div>
-                    
+
+                    <!-- Update channel selector (main = released, dev = branch tip) -->
+                    <div id="ve-channel-row" style="margin-bottom: 15px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                        <span style="color: #ccc; font-size: 14px; font-weight: bold;">Update channel:</span>
+                        <div style="display: inline-flex; border: 1px solid #404040; border-radius: 6px; overflow: hidden;">
+                            <button id="ve-channel-main" onclick="setUpdateChannel('main')" style="padding: 6px 16px; background: #2563eb; color: #fff; border: none; cursor: pointer; font-size: 13px;">Main</button>
+                            <button id="ve-channel-dev" onclick="setUpdateChannel('dev')" style="padding: 6px 16px; background: transparent; color: #aaa; border: none; cursor: pointer; font-size: 13px;">Dev</button>
+                        </div>
+                        <span id="ve-channel-note" style="font-size: 12px; color: #888;"></span>
+                    </div>
+
                     <div id="ve-update-section" style="display: none; margin-bottom: 20px; padding: 15px; border-radius: 8px; background: linear-gradient(135deg, #1a3a1a 0%, #1a2e1a 100%); border: 1px solid #2d5a2d;">
                         <div style="font-size: 15px; font-weight: bold; color: #4ade80; margin-bottom: 8px;">
                             Update Available: <span id="ve-remote-version"></span>
@@ -6225,12 +6272,47 @@ HTML_TEMPLATE = '''
         // === VERSIONS TAB FUNCTIONS ===
         
         function loadVersionsTab() {
+            loadUpdateChannel();
             loadVersionsWebEditor();
             loadVersionsMediaMTX();
             loadWebEditorBackups();
             loadMediaMTXBackups();
         }
-        
+
+        function loadUpdateChannel() {
+            fetch('/api/update-channel')
+            .then(res => res.json())
+            .then(data => { if (data.success) applyChannelUI(data.channel); })
+            .catch(() => {});
+        }
+
+        function applyChannelUI(ch) {
+            var m = document.getElementById('ve-channel-main');
+            var dv = document.getElementById('ve-channel-dev');
+            var note = document.getElementById('ve-channel-note');
+            if (!m || !dv) return;
+            if (ch === 'dev') {
+                dv.style.background = '#b45309'; dv.style.color = '#fff';
+                m.style.background = 'transparent'; m.style.color = '#aaa';
+                if (note) note.innerHTML = '⚠️ Bleeding-edge dev builds — test boxes only.';
+            } else {
+                m.style.background = '#2563eb'; m.style.color = '#fff';
+                dv.style.background = 'transparent'; dv.style.color = '#aaa';
+                if (note) note.textContent = 'Stable released builds (default).';
+            }
+        }
+
+        function setUpdateChannel(ch) {
+            if (ch === 'dev' && !confirm('Switch to the DEV channel?\\n\\nDev builds come straight off the dev branch and may be unstable — use only on test boxes. After switching, click Update Web Editor to pull the latest dev build. Switch back to Main anytime to return to the released version.')) return;
+            fetch('/api/update-channel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channel: ch }) })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) { applyChannelUI(data.channel); loadVersionsWebEditor(); }
+                else { alert(data.error || 'Failed to switch channel'); }
+            })
+            .catch(() => alert('Request failed'));
+        }
+
         function loadVersionsWebEditor() {
             fetch('/api/update/check')
             .then(res => res.json())
@@ -9818,15 +9900,78 @@ def serve_hls_recording(session_id, filename, hls_file):
 
 @app.route('/api/update/check')
 @admin_required
+@app.route('/api/update-channel', methods=['GET', 'POST'])
+@admin_required
+def update_channel():
+    """Get or set the update channel ('main' or 'dev')."""
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+        requested = data.get('channel', 'main')
+        if requested not in VALID_CHANNELS:
+            return jsonify({'success': False, 'error': "channel must be 'main' or 'dev'"}), 400
+        ch = set_update_channel(requested)
+        return jsonify({'success': True, 'channel': ch})
+    return jsonify({'success': True, 'channel': get_update_channel()})
+
+
+def _running_editor_path():
+    """Path of the deployed web editor (falls back to this file for local dev)."""
+    deployed = '/opt/mediamtx-webeditor/mediamtx_config_editor.py'
+    return deployed if os.path.exists(deployed) else os.path.abspath(__file__)
+
+
+def _check_dev_update(ctx):
+    """Dev channel: compare the running file to the dev branch by content hash.
+
+    Dev doesn't bump CURRENT_VERSION on every push, so a version compare would
+    miss most changes. Hashing the raw file makes every dev commit show up as an
+    available update.
+    """
+    import urllib.request
+    import hashlib
+    req = urllib.request.Request(raw_url_for_channel('dev'), headers={
+        'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION
+    })
+    with urllib.request.urlopen(req, timeout=10, context=ctx) as response:
+        remote = response.read()
+    remote_ver = 'dev'
+    for line in remote.decode('utf-8', 'replace').split('\n'):
+        if line.strip().startswith('CURRENT_VERSION'):
+            try:
+                remote_ver = line.split('=')[1].strip().strip('"').strip("'")
+            except Exception:
+                pass
+            break
+    try:
+        with open(_running_editor_path(), 'rb') as f:
+            local = f.read()
+    except Exception:
+        local = b''
+    update_available = hashlib.sha256(remote).hexdigest() != hashlib.sha256(local).hexdigest()
+    return jsonify({
+        'success': True,
+        'channel': 'dev',
+        'current_version': CURRENT_VERSION,
+        'remote_version': remote_ver + ' (dev)',
+        'update_available': update_available,
+        'release_notes': 'Bleeding-edge build from the dev branch. For testing only.',
+        'published_at': '',
+        'html_url': f'https://github.com/{GITHUB_REPO}/tree/dev'
+    })
+
+
 def check_for_update():
-    """Check GitHub for newer release"""
+    """Check GitHub for a newer build on the active channel (main=release, dev=branch tip)."""
     try:
         import urllib.request
         import ssl
-        
+
         # Create SSL context
         ctx = ssl.create_default_context()
-        
+
+        if get_update_channel() == 'dev':
+            return _check_dev_update(ctx)
+
         req = urllib.request.Request(GITHUB_API_URL, headers={
             'Accept': 'application/vnd.github.v3+json',
             'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION
@@ -9856,6 +10001,7 @@ def check_for_update():
         
         return jsonify({
             'success': True,
+            'channel': 'main',
             'current_version': CURRENT_VERSION,
             'remote_version': remote_version,
             'update_available': update_available,
@@ -9885,8 +10031,8 @@ def apply_update():
         backup_file = webeditor_file + f'.backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
         temp_file = '/tmp/mediamtx_config_editor_update.py'
         
-        # Step 1: Download new version to temp file
-        req = urllib.request.Request(GITHUB_RAW_URL, headers={
+        # Step 1: Download new version to temp file (from the active channel's branch)
+        req = urllib.request.Request(raw_url_for_channel(get_update_channel()), headers={
             'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION
         })
         
