@@ -32,6 +32,7 @@ import ssl
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 # ---------------------------------------------------------------------------
@@ -284,14 +285,25 @@ def main():
         reader = sys.stdin.buffer if a.input == "-" else open(a.input, "rb")
     else:
         url = f"{a.rtsp_base}/{a.path}"
-        # +igndts: the KLV data substream's timestamps aren't monotonic over RTSP, which
-        # otherwise spams ffmpeg's 'non-monotonic DTS' muxer warning ~30x/sec into MediaMTX's
-        # logs. We only want the raw KLV bytes, so ignoring input DTS is safe.
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-fflags", "+igndts",
                "-rtsp_transport", "tcp", "-i", url,
                "-map", "0:d", "-c", "copy", "-f", "data", "pipe:1"]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=sys.stderr)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         reader = proc.stdout
+
+        # The KLV data substream's timestamps aren't monotonic over RTSP, so ffmpeg's data
+        # muxer logs "non monotonic dts" ~30x/sec — pure noise that would flood MediaMTX's
+        # logs. Drop those lines; forward any genuine ffmpeg errors (e.g. connect failures).
+        def _filter_ffmpeg_stderr(pipe):
+            for line in iter(pipe.readline, b''):
+                if b'monoton' in line:
+                    continue
+                try:
+                    sys.stderr.buffer.write(line)
+                    sys.stderr.flush()
+                except Exception:
+                    break
+        threading.Thread(target=_filter_ffmpeg_stderr, args=(proc.stderr,), daemon=True).start()
 
     def shutdown(*_):
         if proc and proc.poll() is None:
