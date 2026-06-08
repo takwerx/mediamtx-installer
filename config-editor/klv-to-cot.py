@@ -248,7 +248,8 @@ def build_args():
     p.add_argument("--path", required=True, help="MediaMTX path name (used in rtsp url + tagging)")
     p.add_argument("--hex", required=True, help="aircraft hex/id; stamped on every message (merge key)")
     p.add_argument("--target", required=True, type=parse_target, help="aggregator host:port")
-    p.add_argument("--proto", choices=["udp", "tcp"], default="udp", help="netbird transport (ignored with --tls)")
+    p.add_argument("--token", default="", help="ingest token; stamped on every message (aggregator drops messages without a valid token)")
+    p.add_argument("--proto", choices=["udp", "tcp"], default="tcp", help="netbird transport (ignored with --tls)")
     p.add_argument("--tls", action="store_true", help="use TCP+mTLS")
     p.add_argument("--cert", help="client cert (mTLS)")
     p.add_argument("--key", help="client key (mTLS)")
@@ -269,6 +270,8 @@ def main():
 
     def envelope(event, extra=None):
         msg = {"event": event, "hex": a.hex, "path": a.path, "ts": round(time.time(), 3)}
+        if a.token:
+            msg["token"] = a.token  # aggregator authenticates/routes by this; required in prod
         if extra:
             msg.update(extra)
         return msg

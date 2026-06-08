@@ -2183,7 +2183,7 @@ HTML_TEMPLATE = '''
                         <div class="form-row">
                             <div class="form-group">
                                 <label>Management URL</label>
-                                <input type="text" id="netbird-mgmt" placeholder="https://netbird.their-server.com:33073">
+                                <input type="text" id="netbird-mgmt" value="https://netbird.tak-solutions.com" placeholder="https://netbird.their-server.com">
                                 <p class="help-text">Self-hosted Netbird management server (from the aggregator operator).</p>
                             </div>
                             <div class="form-group">
@@ -4708,7 +4708,7 @@ HTML_TEMPLATE = '''
                     connEl.style.display = 'block';
                 } else {
                     statusEl.innerHTML = d.installed ? '⚠️ Netbird installed but not connected.' : 'Not connected. Paste the aggregator\\'s management URL + setup key to join.';
-                    if (d.management_url) { var m = document.getElementById('netbird-mgmt'); if (m && !m.value) m.value = d.management_url; }
+                    if (d.management_url) { var m = document.getElementById('netbird-mgmt'); if (m) m.value = d.management_url; }
                     formEl.style.display = 'block';
                     connEl.style.display = 'none';
                 }
@@ -11197,10 +11197,14 @@ def parse_klv_opts(data):
     transport = data.get('klvTransport') or 'netbird'
     if transport not in ('netbird', 'mtls'):
         return None, "KLV transport must be 'netbird' or 'mtls'"
+    token = (data.get('klvToken') or '').strip()
+    if not token:
+        return None, 'KLV ingest token is required (paste it from the aggregator operator)'
     klv = {
         'to_cot': True,
         'transport': transport,
         'target': target,
+        'token': token,
         'hex': (data.get('klvHex') or '').strip(),
     }
     if transport == 'mtls':
@@ -11210,7 +11214,7 @@ def parse_klv_opts(data):
                 return None, f'mTLS requires the {k} path'
             klv[k] = v
     else:
-        proto = data.get('klvProto') or 'udp'
+        proto = data.get('klvProto') or 'tcp'
         if proto not in ('udp', 'tcp'):
             return None, "KLV proto must be 'udp' or 'tcp'"
         klv['proto'] = proto
@@ -11227,10 +11231,12 @@ def klv_runon_lines(klv):
         return ''
     hexv = klv.get('hex') or '$MTX_PATH'
     base = f"python3 {KLV_SIDECAR} --path $MTX_PATH --hex {hexv} --target {klv['target']}"
+    if klv.get('token'):
+        base += f" --token {klv['token']}"
     if klv.get('transport') == 'mtls':
         base += f" --tls --cert {klv['cert']} --key {klv['key']} --cacert {klv['cacert']}"
     else:
-        base += f" --proto {klv.get('proto', 'udp')}"
+        base += f" --proto {klv.get('proto', 'tcp')}"
     return (
         f"    runOnReady: {base}\n"
         f"    runOnReadyRestart: yes\n"
