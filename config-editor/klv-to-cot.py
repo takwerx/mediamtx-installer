@@ -321,7 +321,11 @@ def main():
 
     try:
         while True:
-            chunk = reader.read(65536)
+            # read1() returns as soon as data is available rather than blocking for a full
+            # 64KB. Plain read(n) would batch ~6s of KLV then process it in one burst, so
+            # the rate-limiter (same instant for the whole batch) would emit only one sample
+            # per batch — starving the aggregator regardless of --max-hz.
+            chunk = reader.read1(65536) if hasattr(reader, "read1") else reader.read(65536)
             if not chunk:
                 break
             for tags in scanner.feed(chunk):
