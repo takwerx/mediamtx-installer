@@ -2404,8 +2404,8 @@ HTML_TEMPLATE = '''
 
                         <!-- KLV -> CoT (per-source) -->
                         <div class="form-group" style="margin-top: 18px; padding-top: 16px; border-top: 1px solid #404040;">
-                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-weight: normal;">
-                                <input type="checkbox" id="source-klv-enable" onchange="toggleKlvFields()"> Extract KLV &rarr; CoT (send sensor metadata to an aggregator)
+                            <label style="cursor: pointer; font-weight: bold; display: inline-block;">
+                                <input type="checkbox" id="source-klv-enable" onchange="toggleKlvFields()" style="width: auto; vertical-align: middle; margin-right: 8px;"> Extract KLV &rarr; CoT (send sensor metadata to an aggregator)
                             </label>
                             <p class="help-text">Taps MISB ST0601 KLV from this stream and forwards decoded platform / sensor / frame-center to a CoT aggregator over the mesh. Does not affect video playback. Connect this box to the aggregator's NetBird network first (panel above).</p>
                         </div>
