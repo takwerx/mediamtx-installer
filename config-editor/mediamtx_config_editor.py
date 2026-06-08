@@ -74,6 +74,31 @@ def raw_url_for_channel(channel):
     branch = channel if channel in VALID_CHANNELS else 'main'
     return f"https://raw.githubusercontent.com/{GITHUB_REPO}/{branch}/config-editor/mediamtx_config_editor.py"
 
+
+# Dev-channel update detection can't hash the on-disk file: on infra-TAK/LDAP
+# boxes ensure_overlay.py mutates it at every start (port/api patches + overlay
+# injection), so it never matches the pristine dev raw. Instead we record the
+# hash of the dev file we last pulled and compare future dev tips against that.
+DEV_BASELINE_FILE = '/opt/mediamtx-webeditor/dev_baseline.json'
+
+
+def get_dev_baseline():
+    try:
+        with open(DEV_BASELINE_FILE, 'r') as f:
+            return json.load(f).get('hash')
+    except Exception:
+        return None
+
+
+def set_dev_baseline(h):
+    try:
+        os.makedirs(os.path.dirname(DEV_BASELINE_FILE), exist_ok=True)
+        with open(DEV_BASELINE_FILE, 'w') as f:
+            json.dump({'hash': h}, f)
+        os.chmod(DEV_BASELINE_FILE, 0o600)
+    except OSError:
+        pass
+
 LDAP_OVERLAY_ACTIVE = os.path.exists('/opt/mediamtx-webeditor/mediamtx_ldap_overlay.py')
 if LDAP_OVERLAY_ACTIVE:
     print("INFO: LDAP overlay detected — skipping conflicting route registration", flush=True)
@@ -9924,18 +9949,13 @@ def api_update_channel():
     return jsonify({'success': True, 'channel': get_update_channel()})
 
 
-def _running_editor_path():
-    """Path of the deployed web editor (falls back to this file for local dev)."""
-    deployed = '/opt/mediamtx-webeditor/mediamtx_config_editor.py'
-    return deployed if os.path.exists(deployed) else os.path.abspath(__file__)
-
-
 def _check_dev_update(ctx):
-    """Dev channel: compare the running file to the dev branch by content hash.
+    """Dev channel: is the dev branch tip newer than the dev build we last pulled?
 
-    Dev doesn't bump CURRENT_VERSION on every push, so a version compare would
-    miss most changes. Hashing the raw file makes every dev commit show up as an
-    available update.
+    Dev doesn't bump CURRENT_VERSION per push, so we compare the dev raw file's
+    hash to the baseline recorded at the last pull (see set_dev_baseline). When
+    no baseline exists yet (e.g. a box bootstrapped onto dev by hand), report an
+    update so one UI-driven pull establishes the baseline and it's accurate after.
     """
     import urllib.request
     import hashlib
@@ -9952,12 +9972,9 @@ def _check_dev_update(ctx):
             except Exception:
                 pass
             break
-    try:
-        with open(_running_editor_path(), 'rb') as f:
-            local = f.read()
-    except Exception:
-        local = b''
-    update_available = hashlib.sha256(remote).hexdigest() != hashlib.sha256(local).hexdigest()
+    baseline = get_dev_baseline()
+    remote_hash = hashlib.sha256(remote).hexdigest()
+    update_available = (baseline is None) or (remote_hash != baseline)
     return jsonify({
         'success': True,
         'channel': 'dev',
@@ -10082,7 +10099,14 @@ def apply_update():
         
         # Step 6: Clean up temp file
         os.remove(temp_file)
-        
+
+        # Step 6b: On dev channel, record the pulled file's hash as the baseline so
+        # the dashboard reads "up to date" until the dev branch actually moves again
+        # (the on-disk file gets mutated by ensure_overlay, so we can't re-hash it).
+        if get_update_channel() == 'dev':
+            import hashlib
+            set_dev_baseline(hashlib.sha256(new_code).hexdigest())
+
         # Step 7: Re-sync LDAP overlay if this is an infra-TAK install
         overlay_synced = False
         overlay_file = '/opt/mediamtx-webeditor/mediamtx_ldap_overlay.py'
