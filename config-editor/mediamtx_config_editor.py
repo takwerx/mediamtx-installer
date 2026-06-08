@@ -2183,7 +2183,7 @@ HTML_TEMPLATE = '''
                         <div class="form-row">
                             <div class="form-group">
                                 <label>Management URL</label>
-                                <input type="text" id="netbird-mgmt" value="https://netbird.tak-solutions.com" placeholder="https://netbird.their-server.com">
+                                <input type="text" id="netbird-mgmt" placeholder="https://netbird.your-aggregator.example">
                                 <p class="help-text">Self-hosted Netbird management server (from the aggregator operator).</p>
                             </div>
                             <div class="form-group">
