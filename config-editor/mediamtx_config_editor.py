@@ -3467,6 +3467,14 @@ HTML_TEMPLATE = '''
                     }
                 });
             }
+            // Per-tab init on DIRECT page load. The .tab loop above matches nothing
+            // (the nav uses .sidebar-item), and the active tab is shown server-side via
+            // Jinja — so its data loader never fires on a direct load. Dispatch here.
+            // Notably the post-update reload lands on /?tab=versions; without this it
+            // sits stuck on "Checking version..." with the channel toggle at its default.
+            if (tabParam === 'versions') {
+                loadVersionsTab();
+            }
         });
         
         // Status Badge Auto-Refresh
