@@ -9902,7 +9902,7 @@ def serve_hls_recording(session_id, filename, hls_file):
 @admin_required
 @app.route('/api/update-channel', methods=['GET', 'POST'])
 @admin_required
-def update_channel():
+def api_update_channel():
     """Get or set the update channel ('main' or 'dev')."""
     if request.method == 'POST':
         data = request.get_json(silent=True) or {}
