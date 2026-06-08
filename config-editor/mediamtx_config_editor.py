@@ -2174,8 +2174,38 @@ HTML_TEMPLATE = '''
                     2. <strong>We pull from them</strong> — Add their URL here. This tab handles that.
                 </div>
                 
+                <!-- Netbird link for KLV->CoT aggregator (box-level, set once) -->
+                <div style="margin-top: 20px; padding: 16px; background: rgba(255,255,255,0.03); border: 1px solid #404040; border-radius: 8px;">
+                    <h3 style="margin: 0 0 6px 0; font-size: 15px;">🔗 KLV Aggregator Link (Netbird)</h3>
+                    <p class="help-text" style="margin-top: 0;">Connect this box to your CoT aggregator's Netbird network <strong>once</strong>. After that, any source's <strong>KLV → CoT</strong> can target the aggregator over the mesh. Get the management URL + setup key from the aggregator operator.</p>
+                    <div id="netbird-status" style="margin: 8px 0; font-size: 13px; color: #999;">Checking Netbird…</div>
+                    <div id="netbird-form" style="display: none; margin-top: 10px;">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Management URL</label>
+                                <input type="text" id="netbird-mgmt" placeholder="https://netbird.their-server.com:33073">
+                                <p class="help-text">Self-hosted Netbird management server (from the aggregator operator).</p>
+                            </div>
+                            <div class="form-group">
+                                <label>Setup Key</label>
+                                <div style="position: relative;">
+                                    <input type="password" id="netbird-key" placeholder="paste the network key" style="padding-right: 60px;">
+                                    <button type="button" onclick="const f=document.getElementById('netbird-key'); if(f.type==='password'){f.type='text';this.textContent='Hide';}else{f.type='password';this.textContent='Show';}" style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: #555; color: #fff; border: none; border-radius: 3px; padding: 4px 10px; cursor: pointer; font-size: 12px;">Show</button>
+                                </div>
+                            </div>
+                        </div>
+                        <button class="btn btn-primary" id="netbird-connect-btn" onclick="netbirdConnect()">Connect to Netbird</button>
+                        <span id="netbird-msg" style="margin-left: 10px; font-size: 13px; color: #888;"></span>
+                    </div>
+                    <div id="netbird-connected" style="display: none; margin-top: 8px;">
+                        <button class="btn btn-secondary" onclick="netbirdDisconnect()">Disconnect</button>
+                        <button class="btn btn-secondary" onclick="loadNetbirdStatus()" style="margin-left: 8px;">Refresh</button>
+                        <span id="netbird-msg2" style="margin-left: 10px; font-size: 13px; color: #888;"></span>
+                    </div>
+                </div>
+
                 <button class="btn btn-primary" onclick="showAddSourceForm()" style="margin-top: 20px;">+ Add External Source</button>
-                
+
                 <div id="add-source-form" style="display: none; margin-top: 20px; padding: 20px; background: #2d2d2d; border-radius: 8px; border: 1px solid #404040;">
                     <h3>Add External Source</h3>
                     <form id="external-source-form">
@@ -3289,6 +3319,7 @@ HTML_TEMPLATE = '''
             
             // Load external sources when External Sources tab is opened
             if (tabName === 'sources' && typeof loadExternalSources === 'function') {
+                if (typeof loadNetbirdStatus === 'function') loadNetbirdStatus();
                 loadExternalSources();
                 // Start auto-refresh
                 if (!sourcesRefreshInterval) {
@@ -4661,6 +4692,51 @@ HTML_TEMPLATE = '''
             .catch(function(err) { alert('Error: ' + (err.message || String(err))); });
         });
         
+        // --- Netbird link (KLV aggregator connectivity) ---
+        var netbirdState = { connected: false, ip: '' };
+        function loadNetbirdStatus() {
+            fetch('/api/netbird/status').then(r => r.json()).then(d => {
+                if (!d.success) return;
+                netbirdState = { connected: !!d.connected, ip: d.ip || '' };
+                var statusEl = document.getElementById('netbird-status');
+                var formEl = document.getElementById('netbird-form');
+                var connEl = document.getElementById('netbird-connected');
+                if (d.connected) {
+                    statusEl.innerHTML = '✅ Connected to Netbird as <strong style="color:#4ade80;">' + (d.ip || '?') + '</strong>' + (d.peers ? ' · ' + d.peers + ' peer(s)' : '') + (d.management_url ? ' · <span style="color:#888;">' + d.management_url + '</span>' : '');
+                    formEl.style.display = 'none';
+                    connEl.style.display = 'block';
+                } else {
+                    statusEl.innerHTML = d.installed ? '⚠️ Netbird installed but not connected.' : 'Not connected. Paste the aggregator\\'s management URL + setup key to join.';
+                    if (d.management_url) { var m = document.getElementById('netbird-mgmt'); if (m && !m.value) m.value = d.management_url; }
+                    formEl.style.display = 'block';
+                    connEl.style.display = 'none';
+                }
+            }).catch(() => {
+                var s = document.getElementById('netbird-status'); if (s) s.textContent = 'Could not read Netbird status.';
+            });
+        }
+        function netbirdConnect() {
+            var mgmt = (document.getElementById('netbird-mgmt').value || '').trim();
+            var key = (document.getElementById('netbird-key').value || '').trim();
+            var msg = document.getElementById('netbird-msg');
+            var btn = document.getElementById('netbird-connect-btn');
+            if (!mgmt || !key) { msg.textContent = 'Management URL and setup key are required.'; msg.style.color = '#dc2626'; return; }
+            btn.disabled = true; msg.style.color = '#888'; msg.textContent = 'Installing/joining Netbird… (can take ~30s)';
+            fetch('/api/netbird/connect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ managementUrl: mgmt, setupKey: key }) })
+                .then(r => r.json()).then(d => {
+                    btn.disabled = false;
+                    if (d.success && d.connected) { document.getElementById('netbird-key').value = ''; loadNetbirdStatus(); }
+                    else { msg.style.color = '#dc2626'; msg.textContent = d.error || 'Connect failed'; loadNetbirdStatus(); }
+                }).catch(() => { btn.disabled = false; msg.style.color = '#dc2626'; msg.textContent = 'Request failed'; });
+        }
+        function netbirdDisconnect() {
+            var msg = document.getElementById('netbird-msg2');
+            if (!confirm('Disconnect this box from the Netbird mesh? KLV → CoT over Netbird will stop reaching the aggregator until you reconnect.')) return;
+            msg.style.color = '#888'; msg.textContent = 'Disconnecting…';
+            fetch('/api/netbird/disconnect', { method: 'POST' }).then(r => r.json()).then(() => loadNetbirdStatus())
+                .catch(() => { msg.style.color = '#dc2626'; msg.textContent = 'Request failed'; });
+        }
+
         function loadExternalSources() {
             Promise.all([fetch('/api/external-sources').then(r => r.json()), fetch('/api/share-mode').then(r => r.json()).catch(() => ({}))])
                 .then(([data, shareModeMap]) => {
@@ -11159,6 +11235,90 @@ def klv_runon_lines(klv):
         f"    runOnReadyRestart: yes\n"
         f"    runOnNotReady: {base} --downlink\n"
     )
+
+
+# --- Netbird connectivity (box-level; underpins the KLV "Netbird" transport) -
+# Mike self-hosts Netbird, so joining needs his management URL + a setup key.
+# Joined once per box; every KLV source then reaches the aggregator over the mesh.
+NETBIRD_LINK_FILE = '/opt/mediamtx-webeditor/netbird_link.json'  # remembers mgmt URL (never the key)
+
+
+def netbird_status():
+    """Return {installed, connected, ip, management_url, peers}."""
+    import shutil
+    info = {'installed': False, 'connected': False, 'ip': '', 'management_url': '', 'peers': 0}
+    try:
+        with open(NETBIRD_LINK_FILE, 'r') as f:
+            info['management_url'] = json.load(f).get('management_url', '')
+    except Exception:
+        pass
+    if not shutil.which('netbird'):
+        return info
+    info['installed'] = True
+    try:
+        r = subprocess.run(['netbird', 'status', '--json'], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            d = json.loads(r.stdout)
+            ip = d.get('netbirdIp') or d.get('ip') or ''
+            info['ip'] = ip.split('/')[0] if ip else ''
+            mgmt = d.get('managementState') or d.get('management') or {}
+            info['connected'] = bool(mgmt.get('connected'))
+            info['management_url'] = mgmt.get('URL') or mgmt.get('url') or info['management_url']
+            peers = d.get('peers') or {}
+            if isinstance(peers, dict):
+                info['peers'] = peers.get('connected', 0)
+    except Exception as e:
+        info['error'] = str(e)
+    return info
+
+
+@app.route('/api/netbird/status')
+@admin_required
+def api_netbird_status():
+    return jsonify({'success': True, **netbird_status()})
+
+
+@app.route('/api/netbird/connect', methods=['POST'])
+@admin_required
+def api_netbird_connect():
+    """Install netbird if missing, then join the aggregator's self-hosted mesh."""
+    import shutil
+    data = request.get_json() or {}
+    key = (data.get('setupKey') or '').strip()
+    mgmt = (data.get('managementUrl') or '').strip()
+    if not key:
+        return jsonify({'success': False, 'error': 'Setup key is required'}), 400
+    if not (mgmt.startswith('http://') or mgmt.startswith('https://')):
+        return jsonify({'success': False, 'error': 'Management URL is required (https://… for self-hosted Netbird)'}), 400
+    try:
+        if not shutil.which('netbird'):
+            subprocess.run('curl -fsSL https://pkgs.netbird.io/install.sh | sudo sh',
+                           shell=True, capture_output=True, text=True, timeout=180)
+            if not shutil.which('netbird'):
+                return jsonify({'success': False, 'error': 'Netbird agent install failed'}), 500
+        up = subprocess.run(['sudo', 'netbird', 'up', '--management-url', mgmt, '--setup-key', key],
+                            capture_output=True, text=True, timeout=60)
+        if up.returncode != 0:
+            return jsonify({'success': False, 'error': 'netbird up failed: ' + (up.stderr or up.stdout)[-300:]}), 500
+        with open(NETBIRD_LINK_FILE, 'w') as f:
+            json.dump({'management_url': mgmt}, f)
+        os.chmod(NETBIRD_LINK_FILE, 0o600)
+        time.sleep(2)
+        return jsonify({'success': True, **netbird_status()})
+    except subprocess.TimeoutExpired:
+        return jsonify({'success': False, 'error': 'Timed out joining Netbird (check the management URL is reachable)'}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/netbird/disconnect', methods=['POST'])
+@admin_required
+def api_netbird_disconnect():
+    try:
+        subprocess.run(['sudo', 'netbird', 'down'], capture_output=True, text=True, timeout=30)
+        return jsonify({'success': True, **netbird_status()})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/external-sources')
 @login_required
