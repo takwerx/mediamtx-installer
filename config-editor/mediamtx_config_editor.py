@@ -1550,7 +1550,17 @@ HTML_TEMPLATE = '''
                 <div id="version-badge" style="display: none; margin-bottom: 10px; padding: 10px 15px; border-radius: 6px; background: rgba(255,255,255,0.05); border: 1px solid #333; font-size: 13px; color: #888;">
                     ✅ Web Editor <span id="version-current"></span> — up to date
                 </div>
-                
+
+                <!-- Update channel toggle (main = released, dev = testing builds) -->
+                <div id="db-channel-row" style="margin-bottom: 10px; padding: 8px 15px; border-radius: 6px; background: rgba(255,255,255,0.05); border: 1px solid #333; font-size: 13px; color: #888; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                    <span style="font-weight: bold; color: #ccc;">Update channel:</span>
+                    <div style="display: inline-flex; border: 1px solid #404040; border-radius: 6px; overflow: hidden;">
+                        <button id="db-channel-main" onclick="setUpdateChannel('main')" style="padding: 4px 14px; background: #2563eb; color: #fff; border: none; cursor: pointer; font-size: 12px;">Main</button>
+                        <button id="db-channel-dev" onclick="setUpdateChannel('dev')" style="padding: 4px 14px; background: transparent; color: #aaa; border: none; cursor: pointer; font-size: 12px;">Dev</button>
+                    </div>
+                    <span id="db-channel-note" style="font-size: 12px; color: #888;"></span>
+                </div>
+
                 <!-- MediaMTX Version Info (shown when up to date) -->
                 <div id="mediamtx-version-badge" style="display: none; margin-bottom: 20px; padding: 10px 15px; border-radius: 6px; background: rgba(255,255,255,0.05); border: 1px solid #333; font-size: 13px; color: #888;">
                     ✅ MediaMTX <span id="mediamtx-version-current"></span> — up to date
@@ -6045,6 +6055,7 @@ HTML_TEMPLATE = '''
             fetch('/api/update/check')
             .then(res => res.json())
             .then(data => {
+                if (data.success) { applyChannelUI(data.channel || 'main'); }
                 if (data.success && data.update_available) {
                     document.getElementById('update-banner').style.display = 'block';
                     document.getElementById('update-remote-version').textContent = data.remote_version;
@@ -6287,19 +6298,22 @@ HTML_TEMPLATE = '''
         }
 
         function applyChannelUI(ch) {
-            var m = document.getElementById('ve-channel-main');
-            var dv = document.getElementById('ve-channel-dev');
-            var note = document.getElementById('ve-channel-note');
-            if (!m || !dv) return;
-            if (ch === 'dev') {
-                dv.style.background = '#b45309'; dv.style.color = '#fff';
-                m.style.background = 'transparent'; m.style.color = '#aaa';
-                if (note) note.innerHTML = '⚠️ Bleeding-edge dev builds — test boxes only.';
-            } else {
-                m.style.background = '#2563eb'; m.style.color = '#fff';
-                dv.style.background = 'transparent'; dv.style.color = '#aaa';
-                if (note) note.textContent = 'Stable released builds (default).';
-            }
+            // Updates both the dashboard (db-*) and Versions-tab (ve-*) toggles if present.
+            ['db', 've'].forEach(function(p) {
+                var m = document.getElementById(p + '-channel-main');
+                var dv = document.getElementById(p + '-channel-dev');
+                var note = document.getElementById(p + '-channel-note');
+                if (!m || !dv) return;
+                if (ch === 'dev') {
+                    dv.style.background = '#b45309'; dv.style.color = '#fff';
+                    m.style.background = 'transparent'; m.style.color = '#aaa';
+                    if (note) note.innerHTML = '⚠️ Bleeding-edge dev builds — test boxes only.';
+                } else {
+                    m.style.background = '#2563eb'; m.style.color = '#fff';
+                    dv.style.background = 'transparent'; dv.style.color = '#aaa';
+                    if (note) note.textContent = 'Stable released builds (default).';
+                }
+            });
         }
 
         function setUpdateChannel(ch) {
@@ -9898,8 +9912,6 @@ def serve_hls_recording(session_id, filename, hls_file):
 
 # === UPDATE ENDPOINTS ===
 
-@app.route('/api/update/check')
-@admin_required
 @app.route('/api/update-channel', methods=['GET', 'POST'])
 @admin_required
 def api_update_channel():
@@ -9960,6 +9972,7 @@ def _check_dev_update(ctx):
     })
 
 
+@app.route('/api/update/check')
 def check_for_update():
     """Check GitHub for a newer build on the active channel (main=release, dev=branch tip)."""
     try:
