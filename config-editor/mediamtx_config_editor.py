@@ -3024,15 +3024,27 @@ HTML_TEMPLATE = '''
                 <!-- Active remote push status -->
                 <div id="remote-push-status" style="display: none; margin-top: 15px; padding: 15px; background: #1b5e20; border-radius: 8px; border: 1px solid #2d6d2d;">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <div>
-                            <strong style="color: #4CAF50;">● PUSHING</strong>
-                            <p id="remote-push-status-text" style="margin: 5px 0 0 0; color: #b3e5fc; font-family: monospace; font-size: 13px;"></p>
+                        <div style="display: flex; align-items: center; gap: 12px;">
+                            <span id="remote-push-icon" style="font-size: 22px;">🟡</span>
+                            <p id="remote-push-status-text" style="margin: 0; color: #b3e5fc; font-family: monospace; font-size: 13px; line-height: 1.6;"></p>
                         </div>
                         <button class="btn btn-secondary" onclick="stopRemotePush()">⏹ Stop Push</button>
                     </div>
                 </div>
 
                 <div style="margin-top: 15px; padding: 20px; background: #2d2d2d; border-radius: 8px; border: 2px solid #444;">
+                    <div class="form-group" style="padding-bottom: 15px; border-bottom: 1px solid #444;">
+                        <label>💾 Saved Server Profiles</label>
+                        <div style="display: flex; gap: 10px;">
+                            <select id="remote-profile-select" style="flex: 1; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
+                                <option value="">— Select a saved profile —</option>
+                            </select>
+                            <button type="button" class="btn btn-secondary" onclick="loadRemoteProfile()">Load</button>
+                            <button type="button" class="btn btn-danger" onclick="deleteRemoteProfile()">🗑 Delete</button>
+                        </div>
+                        <p class="help-text">Load a saved target into the form below, or fill in the fields and click "Save as Profile" to store this server.</p>
+                    </div>
+
                     <div class="form-group">
                         <label>Source File</label>
                         <select id="remote-push-file" style="width: 100%; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
@@ -3100,6 +3112,7 @@ HTML_TEMPLATE = '''
                     </div>
 
                     <button type="button" class="btn btn-primary" onclick="startRemotePush()" style="margin-top: 10px;">📤 Start Push to Remote</button>
+                    <button type="button" class="btn btn-secondary" onclick="saveRemoteProfile()" style="margin-top: 10px; margin-left: 10px;">💾 Save as Profile</button>
                 </div>
             </div>
 
@@ -5732,8 +5745,9 @@ HTML_TEMPLATE = '''
         }
         
         function loadTestFiles() {
-            // Keep the remote-push file dropdown and status in sync with the file list
+            // Keep the remote-push file dropdown, saved profiles and status in sync
             loadRemotePushFiles();
+            loadRemoteProfilesList();
             updateRemotePushStatus();
 
             var container = document.getElementById('test-files-container');
@@ -5989,18 +6003,51 @@ HTML_TEMPLATE = '''
             });
         }
 
-        function updateRemotePushStatus() {
+        var remotePushPollTimer = null;
+
+        function renderRemotePushStatus(data) {
             var box = document.getElementById('remote-push-status');
+            var icon = document.getElementById('remote-push-icon');
+            var text = document.getElementById('remote-push-status-text');
             if (!box) return;
-            fetch('/api/test/remote/status').then(function(r) { return r.json(); }).then(function(data) {
-                if (data.pushing && data.target) {
-                    box.style.display = 'block';
-                    document.getElementById('remote-push-status-text').textContent =
-                        data.target.filename + '  →  ' + data.target.target;
+
+            if (data.pushing && data.target) {
+                box.style.display = 'block';
+                var route = escapeHtml(data.target.filename) + '  →  ' + escapeHtml(data.target.target);
+                if (data.connected) {
+                    // Target accepted the feed — bytes are flowing
+                    box.style.background = '#1b5e20';
+                    box.style.borderColor = '#2d6d2d';
+                    icon.textContent = '🟢';
+                    var mb = data.bytes ? (data.bytes / 1048576).toFixed(1) + ' MB sent' : '';
+                    text.innerHTML = '<strong style="color:#4CAF50;">LIVE — target accepting feed</strong><br>' +
+                        route + (mb ? '  ·  ' + mb : '');
                 } else {
-                    box.style.display = 'none';
+                    // Process up but no bytes yet — still handshaking with the remote
+                    box.style.background = '#4d3a00';
+                    box.style.borderColor = '#8a6d00';
+                    icon.textContent = '🟡';
+                    text.innerHTML = '<strong style="color:#ffc107;">Connecting to target…</strong><br>' + route;
                 }
-            });
+            } else {
+                box.style.display = 'none';
+                if (data.error) {
+                    // Push died on its own (e.g. connection refused / auth failed) — surfaced once
+                    alert('Remote push stopped:\n' + data.error);
+                }
+            }
+        }
+
+        function updateRemotePushStatus() {
+            if (!document.getElementById('remote-push-status')) return;
+            fetch('/api/test/remote/status').then(function(r) { return r.json(); }).then(function(data) {
+                renderRemotePushStatus(data);
+                // Keep one polling chain alive while a push is active
+                if (remotePushPollTimer) { clearTimeout(remotePushPollTimer); remotePushPollTimer = null; }
+                if (data.pushing) {
+                    remotePushPollTimer = setTimeout(updateRemotePushStatus, 2000);
+                }
+            }).catch(function() {});
         }
 
         function startRemotePush() {
@@ -6045,6 +6092,96 @@ HTML_TEMPLATE = '''
             fetch('/api/test/remote/stop', {method: 'POST'}).then(function(r) { return r.json(); }).then(function(data) {
                 if (data.success) {
                     updateRemotePushStatus();
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            });
+        }
+
+        // --- Saved server profiles ---
+        var remotePushProfiles = {};
+
+        function loadRemoteProfilesList() {
+            var select = document.getElementById('remote-profile-select');
+            if (!select) return;
+            var current = select.value;
+            fetch('/api/test/remote/profiles').then(function(r) { return r.json(); }).then(function(data) {
+                remotePushProfiles = data.profiles || {};
+                var names = Object.keys(remotePushProfiles).sort();
+                var html = '<option value="">— Select a saved profile —</option>';
+                names.forEach(function(n) {
+                    var p = remotePushProfiles[n];
+                    var label = n + '  (' + (p.protocol || '').toUpperCase() + ' ' + (p.host || '') + (p.port ? ':' + p.port : '') + ')';
+                    html += '<option value="' + escapeHtml(n) + '">' + escapeHtml(label) + '</option>';
+                });
+                select.innerHTML = html;
+                if (current && remotePushProfiles[current]) { select.value = current; }
+            });
+        }
+
+        function loadRemoteProfile() {
+            var name = document.getElementById('remote-profile-select').value;
+            if (!name) { alert('Select a profile to load'); return; }
+            var p = remotePushProfiles[name];
+            if (!p) { alert('Profile not found — try reloading'); return; }
+            document.getElementById('remote-push-protocol').value = p.protocol || 'rtsp';
+            updateRemotePushFields();
+            document.getElementById('remote-push-host').value = p.host || '';
+            document.getElementById('remote-push-port').value = p.port || '';
+            document.getElementById('remote-push-path').value = p.path || '';
+            document.getElementById('remote-push-username').value = p.username || '';
+            document.getElementById('remote-push-password').value = p.password || '';
+            document.getElementById('remote-push-transport').value = p.transport || 'tcp';
+            document.getElementById('remote-push-streamid').value = p.streamid || '';
+            document.getElementById('remote-push-passphrase').value = p.passphrase || '';
+        }
+
+        function saveRemoteProfile() {
+            var name = prompt('Save this remote target as a profile.\\nEnter a name (re-using a name overwrites it):');
+            if (name === null) return;
+            name = name.trim();
+            if (!name) { alert('Profile name is required'); return; }
+
+            var protocol = document.getElementById('remote-push-protocol').value;
+            var payload = {
+                name: name,
+                protocol: protocol,
+                host: document.getElementById('remote-push-host').value.trim(),
+                port: document.getElementById('remote-push-port').value.trim(),
+                path: document.getElementById('remote-push-path').value.trim(),
+                username: document.getElementById('remote-push-username').value.trim(),
+                password: document.getElementById('remote-push-password').value,
+                transport: document.getElementById('remote-push-transport').value,
+                streamid: document.getElementById('remote-push-streamid').value.trim(),
+                passphrase: document.getElementById('remote-push-passphrase').value
+            };
+            fetch('/api/test/remote/profiles/save', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            }).then(function(r) { return r.json(); }).then(function(data) {
+                if (data.success) {
+                    remotePushProfiles = data.profiles || {};
+                    loadRemoteProfilesList();
+                    document.getElementById('remote-profile-select').value = name;
+                    alert('Profile "' + name + '" saved');
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            }).catch(function(err) { alert('Error: ' + err); });
+        }
+
+        function deleteRemoteProfile() {
+            var name = document.getElementById('remote-profile-select').value;
+            if (!name) { alert('Select a profile to delete'); return; }
+            if (!confirm('Delete profile "' + name + '"?')) return;
+            fetch('/api/test/remote/profiles/delete', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: name})
+            }).then(function(r) { return r.json(); }).then(function(data) {
+                if (data.success) {
+                    loadRemoteProfilesList();
                 } else {
                     alert('Error: ' + data.error);
                 }
@@ -9359,6 +9496,55 @@ test_stream_filename = None
 # Runs alongside the local test stream; reads from the same uploaded .ts files
 remote_push_process = None
 remote_push_target = None  # dict describing the active target (for status display)
+remote_push_log_handle = None  # open file handle for FFmpeg stderr (so the pipe never blocks)
+
+# FFmpeg writes machine-readable progress here; bytes only flow AFTER the remote
+# accepts the connection, so a growing total_size confirms the target took the feed.
+REMOTE_PUSH_PROGRESS_FILE = '/tmp/mediamtx_remote_push.progress'
+REMOTE_PUSH_LOG_FILE = '/tmp/mediamtx_remote_push.log'
+
+# Saved remote-target profiles so a server's details don't have to be re-entered.
+# Stored as JSON keyed by profile name (same pattern as external_sources.json).
+REMOTE_PUSH_PROFILES_FILE = '/opt/mediamtx-webeditor/remote_push_profiles.json'
+
+
+def load_remote_push_profiles():
+    """Load saved remote-target profiles (dict keyed by profile name)."""
+    if os.path.exists(REMOTE_PUSH_PROFILES_FILE):
+        try:
+            with open(REMOTE_PUSH_PROFILES_FILE, 'r') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_remote_push_profiles(profiles):
+    """Persist remote-target profiles with owner-only perms (may contain creds)."""
+    os.makedirs(os.path.dirname(REMOTE_PUSH_PROFILES_FILE), exist_ok=True)
+    with open(REMOTE_PUSH_PROFILES_FILE, 'w') as f:
+        json.dump(profiles, f, indent=2)
+    os.chmod(REMOTE_PUSH_PROFILES_FILE, 0o600)
+
+
+def _read_remote_push_progress():
+    """Parse the tail of FFmpeg's -progress file into the latest key=value map."""
+    try:
+        if not os.path.exists(REMOTE_PUSH_PROGRESS_FILE):
+            return {}
+        with open(REMOTE_PUSH_PROGRESS_FILE, 'rb') as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 4096))
+            chunk = f.read().decode('utf-8', 'ignore')
+        result = {}
+        for line in chunk.splitlines():
+            if '=' in line:
+                k, v = line.split('=', 1)
+                result[k.strip()] = v.strip()
+        return result
+    except Exception:
+        return {}
 
 @app.route('/api/test/stream/start/<filename>', methods=['POST'])
 @login_required
@@ -9465,7 +9651,7 @@ def start_remote_push():
     runs as its own FFmpeg process so it can stream out while local 'Play' is
     also active. Stream copy (-c copy) keeps CPU low and preserves KLV data.
     """
-    global remote_push_process, remote_push_target
+    global remote_push_process, remote_push_target, remote_push_log_handle
     try:
         data = request.get_json(force=True) or {}
 
@@ -9502,8 +9688,18 @@ def start_remote_push():
             remote_push_process = None
             remote_push_target = None
 
+        # Start fresh: clear the old progress file so stale bytes don't read as "connected"
+        for p in (REMOTE_PUSH_PROGRESS_FILE, REMOTE_PUSH_LOG_FILE):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+
         base_cmd = [
             'ffmpeg',
+            '-progress', REMOTE_PUSH_PROGRESS_FILE,  # machine-readable progress -> confirms target accepted feed
+            '-stats_period', '1',
             '-re',
             '-stream_loop', '-1',
             '-i', filepath,
@@ -9559,11 +9755,18 @@ def start_remote_push():
             if streamid:
                 display_target += f' (streamid: {streamid})'
 
-        # Let FFmpeg output go to system logs (capturing causes buffer overflow on long runs)
+        # Send FFmpeg stderr to a real file (NOT a pipe) so the buffer never blocks on
+        # long runs, while still letting us surface connection errors to the user.
+        if remote_push_log_handle:
+            try:
+                remote_push_log_handle.close()
+            except Exception:
+                pass
+        remote_push_log_handle = open(REMOTE_PUSH_LOG_FILE, 'wb')
         remote_push_process = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stderr=remote_push_log_handle
         )
         remote_push_target = {
             'filename': filename,
@@ -9582,7 +9785,7 @@ def start_remote_push():
 @login_required
 def stop_remote_push():
     """Stop the remote-push FFmpeg process"""
-    global remote_push_process, remote_push_target
+    global remote_push_process, remote_push_target, remote_push_log_handle
     try:
         if remote_push_process:
             remote_push_process.terminate()
@@ -9593,6 +9796,12 @@ def stop_remote_push():
                 remote_push_process.wait()
             remote_push_process = None
             remote_push_target = None
+            if remote_push_log_handle:
+                try:
+                    remote_push_log_handle.close()
+                except Exception:
+                    pass
+                remote_push_log_handle = None
             return jsonify({'success': True})
         return jsonify({'success': False, 'error': 'No remote push running'}), 400
     except Exception as e:
@@ -9604,14 +9813,108 @@ def stop_remote_push():
 @app.route('/api/test/remote/status')
 @login_required
 def get_remote_push_status():
-    """Get current remote-push status"""
-    global remote_push_process, remote_push_target
+    """Get current remote-push status.
+
+    Reports three states so the UI can show an accurate icon:
+      - pushing=False           -> nothing running (or it died/failed to connect)
+      - pushing=True, connected=False -> FFmpeg up but no bytes sent yet (handshaking)
+      - pushing=True, connected=True  -> target accepted the feed, bytes are flowing
+    """
+    global remote_push_process, remote_push_target, remote_push_log_handle
     if remote_push_process and remote_push_process.poll() is None:
-        return jsonify({'pushing': True, 'target': remote_push_target})
+        prog = _read_remote_push_progress()
+        total_size_raw = (prog.get('total_size') or '0').strip()
+        total_size = int(total_size_raw) if total_size_raw.lstrip('-').isdigit() else 0
+        # Bytes only leave FFmpeg once the RTSP/SRT handshake with the remote succeeds
+        connected = total_size > 0 and prog.get('progress') in ('continuing', 'end')
+        return jsonify({
+            'pushing': True,
+            'connected': connected,
+            'target': remote_push_target,
+            'bytes': total_size,
+        })
     else:
+        # Not running. If it died on its own (not a user stop), surface the reason.
+        error = None
+        if remote_push_target is not None:
+            try:
+                if os.path.exists(REMOTE_PUSH_LOG_FILE):
+                    with open(REMOTE_PUSH_LOG_FILE, 'rb') as f:
+                        f.seek(0, os.SEEK_END)
+                        f.seek(max(0, f.tell() - 2048))
+                        tail = f.read().decode('utf-8', 'ignore').strip().splitlines()
+                    if tail:
+                        error = tail[-1]
+            except Exception:
+                pass
         remote_push_process = None
         remote_push_target = None
-        return jsonify({'pushing': False, 'target': None})
+        if remote_push_log_handle:
+            try:
+                remote_push_log_handle.close()
+            except Exception:
+                pass
+            remote_push_log_handle = None
+        return jsonify({'pushing': False, 'connected': False, 'target': None, 'error': error})
+
+
+@app.route('/api/test/remote/profiles', methods=['GET'])
+@login_required
+def list_remote_push_profiles():
+    """List saved remote-target profiles"""
+    return jsonify({'profiles': load_remote_push_profiles()})
+
+
+@app.route('/api/test/remote/profiles/save', methods=['POST'])
+@login_required
+def save_remote_push_profile():
+    """Save (create or overwrite) a remote-target profile by name"""
+    try:
+        data = request.get_json(force=True) or {}
+        name = (data.get('name') or '').strip()
+        if not name:
+            return jsonify({'success': False, 'error': 'Profile name is required'}), 400
+        if len(name) > 60:
+            return jsonify({'success': False, 'error': 'Profile name is too long (max 60)'}), 400
+
+        protocol = (data.get('protocol') or '').strip().lower()
+        if protocol not in ('rtsp', 'srt'):
+            return jsonify({'success': False, 'error': 'Protocol must be rtsp or srt'}), 400
+
+        profiles = load_remote_push_profiles()
+        profiles[name] = {
+            'protocol': protocol,
+            'host': (data.get('host') or '').strip(),
+            'port': str(data.get('port') or '').strip(),
+            'path': (data.get('path') or '').strip(),
+            'username': (data.get('username') or '').strip(),
+            'password': data.get('password') or '',
+            'transport': (data.get('transport') or 'tcp').strip().lower(),
+            'streamid': (data.get('streamid') or '').strip(),
+            'passphrase': data.get('passphrase') or '',
+        }
+        save_remote_push_profiles(profiles)
+        return jsonify({'success': True, 'profiles': profiles})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/test/remote/profiles/delete', methods=['POST'])
+@login_required
+def delete_remote_push_profile():
+    """Delete a saved remote-target profile by name"""
+    try:
+        data = request.get_json(force=True) or {}
+        name = (data.get('name') or '').strip()
+        profiles = load_remote_push_profiles()
+        if name in profiles:
+            del profiles[name]
+            save_remote_push_profiles(profiles)
+            return jsonify({'success': True, 'profiles': profiles})
+        return jsonify({'success': False, 'error': 'Profile not found'}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/api/stream-urls')
 @login_required
