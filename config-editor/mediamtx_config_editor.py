@@ -17,7 +17,7 @@ import secrets
 import json
 import re
 import socket
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 import psutil  # For system metrics
 
 app = Flask(__name__)
@@ -3016,8 +3016,93 @@ HTML_TEMPLATE = '''
                 <div id="test-files-container">
                     <p style="color: #999;">Loading...</p>
                 </div>
+
+                <!-- ===== Send to Remote Server ===== -->
+                <h3 style="margin-top: 40px;">📤 Send to Remote Server</h3>
+                <p class="help-text">Push one of the uploaded test files to a remote RTSP or SRT server. This runs independently — it can stream out to the remote target whether or not the same file is also playing locally above.</p>
+
+                <!-- Active remote push status -->
+                <div id="remote-push-status" style="display: none; margin-top: 15px; padding: 15px; background: #1b5e20; border-radius: 8px; border: 1px solid #2d6d2d;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <strong style="color: #4CAF50;">● PUSHING</strong>
+                            <p id="remote-push-status-text" style="margin: 5px 0 0 0; color: #b3e5fc; font-family: monospace; font-size: 13px;"></p>
+                        </div>
+                        <button class="btn btn-secondary" onclick="stopRemotePush()">⏹ Stop Push</button>
+                    </div>
+                </div>
+
+                <div style="margin-top: 15px; padding: 20px; background: #2d2d2d; border-radius: 8px; border: 2px solid #444;">
+                    <div class="form-group">
+                        <label>Source File</label>
+                        <select id="remote-push-file" style="width: 100%; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
+                            <option value="">Loading files...</option>
+                        </select>
+                        <p class="help-text">Choose an uploaded .ts file to push to the remote server</p>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Protocol</label>
+                        <select id="remote-push-protocol" onchange="updateRemotePushFields()" style="width: 100%; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
+                            <option value="rtsp">RTSP</option>
+                            <option value="srt">SRT</option>
+                        </select>
+                    </div>
+
+                    <div style="display: flex; gap: 15px;">
+                        <div class="form-group" style="flex: 2;">
+                            <label>Remote Host / IP</label>
+                            <input type="text" id="remote-push-host" placeholder="e.g. 203.0.113.10 or stream.example.com" style="width: 100%; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
+                        </div>
+                        <div class="form-group" style="flex: 1;">
+                            <label>Port</label>
+                            <input type="number" id="remote-push-port" placeholder="8554" min="1" max="65535" style="width: 100%; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
+                        </div>
+                    </div>
+
+                    <!-- RTSP-specific fields -->
+                    <div id="remote-push-rtsp-fields">
+                        <div class="form-group">
+                            <label>Stream Path</label>
+                            <input type="text" id="remote-push-path" placeholder="e.g. mystream or live/cam1" style="width: 100%; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
+                            <p class="help-text">Path appended to the RTSP URL: rtsp://host:port/<strong>path</strong></p>
+                        </div>
+                        <div style="display: flex; gap: 15px;">
+                            <div class="form-group" style="flex: 1;">
+                                <label>Username (optional)</label>
+                                <input type="text" id="remote-push-username" autocomplete="off" style="width: 100%; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
+                            </div>
+                            <div class="form-group" style="flex: 1;">
+                                <label>Password (optional)</label>
+                                <input type="password" id="remote-push-password" autocomplete="new-password" style="width: 100%; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Transport</label>
+                            <select id="remote-push-transport" style="width: 100%; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
+                                <option value="tcp">TCP (recommended)</option>
+                                <option value="udp">UDP</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- SRT-specific fields -->
+                    <div id="remote-push-srt-fields" style="display: none;">
+                        <div class="form-group">
+                            <label>Stream ID (optional)</label>
+                            <input type="text" id="remote-push-streamid" placeholder="e.g. publish:mystream (MediaMTX) or leave blank" style="width: 100%; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
+                            <p class="help-text">For a remote MediaMTX use <code>publish:&lt;path&gt;</code>. For other SRT servers, set the raw streamid or leave blank.</p>
+                        </div>
+                        <div class="form-group">
+                            <label>Passphrase (optional)</label>
+                            <input type="password" id="remote-push-passphrase" autocomplete="new-password" placeholder="SRT encryption passphrase (10-79 chars)" style="width: 100%; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
+                        </div>
+                    </div>
+
+                    <button type="button" class="btn btn-primary" onclick="startRemotePush()" style="margin-top: 10px;">📤 Start Push to Remote</button>
+                </div>
             </div>
-            
+
             <!-- Recordings Tab -->
             <div id="recordings" class="tab-content {% if tab == 'recordings' %}active{% endif %}">
                 <h2 class="section-title">Stream Recordings</h2>
@@ -5647,9 +5732,13 @@ HTML_TEMPLATE = '''
         }
         
         function loadTestFiles() {
+            // Keep the remote-push file dropdown and status in sync with the file list
+            loadRemotePushFiles();
+            updateRemotePushStatus();
+
             var container = document.getElementById('test-files-container');
             if (!container) return;
-            
+
             fetch('/api/test/stream/status').then(function(r) { return r.json(); }).then(function(statusData) {
                 fetch('/api/test/files').then(function(r) { return r.json(); }).then(function(data) {
                     if (data.files && data.files.length > 0) {
@@ -5873,7 +5962,95 @@ HTML_TEMPLATE = '''
                 }
             });
         }
-        
+
+        // === REMOTE PUSH (send test file to a remote RTSP/SRT server) ===
+
+        function updateRemotePushFields() {
+            var protocol = document.getElementById('remote-push-protocol').value;
+            document.getElementById('remote-push-rtsp-fields').style.display = (protocol === 'rtsp') ? 'block' : 'none';
+            document.getElementById('remote-push-srt-fields').style.display = (protocol === 'srt') ? 'block' : 'none';
+        }
+
+        function loadRemotePushFiles() {
+            var select = document.getElementById('remote-push-file');
+            if (!select) return;
+            var current = select.value;
+            fetch('/api/test/files').then(function(r) { return r.json(); }).then(function(data) {
+                if (data.files && data.files.length > 0) {
+                    var html = '';
+                    data.files.forEach(function(file) {
+                        html += '<option value="' + escapeHtml(file.name) + '">' + escapeHtml(file.name) + ' (' + file.size_mb + ' MB)</option>';
+                    });
+                    select.innerHTML = html;
+                    if (current) { select.value = current; }
+                } else {
+                    select.innerHTML = '<option value="">No test files uploaded</option>';
+                }
+            });
+        }
+
+        function updateRemotePushStatus() {
+            var box = document.getElementById('remote-push-status');
+            if (!box) return;
+            fetch('/api/test/remote/status').then(function(r) { return r.json(); }).then(function(data) {
+                if (data.pushing && data.target) {
+                    box.style.display = 'block';
+                    document.getElementById('remote-push-status-text').textContent =
+                        data.target.filename + '  →  ' + data.target.target;
+                } else {
+                    box.style.display = 'none';
+                }
+            });
+        }
+
+        function startRemotePush() {
+            var protocol = document.getElementById('remote-push-protocol').value;
+            var payload = {
+                filename: document.getElementById('remote-push-file').value,
+                protocol: protocol,
+                host: document.getElementById('remote-push-host').value.trim(),
+                port: document.getElementById('remote-push-port').value.trim()
+            };
+
+            if (!payload.filename) { alert('Please select a source file'); return; }
+            if (!payload.host) { alert('Please enter the remote host/IP'); return; }
+            if (!payload.port) { alert('Please enter the remote port'); return; }
+
+            if (protocol === 'rtsp') {
+                payload.path = document.getElementById('remote-push-path').value.trim();
+                payload.username = document.getElementById('remote-push-username').value.trim();
+                payload.password = document.getElementById('remote-push-password').value;
+                payload.transport = document.getElementById('remote-push-transport').value;
+            } else {
+                payload.streamid = document.getElementById('remote-push-streamid').value.trim();
+                payload.passphrase = document.getElementById('remote-push-passphrase').value;
+            }
+
+            fetch('/api/test/remote/start', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            }).then(function(r) { return r.json(); }).then(function(data) {
+                if (data.success) {
+                    alert('Remote push started!');
+                    updateRemotePushStatus();
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            }).catch(function(err) { alert('Error: ' + err); });
+        }
+
+        function stopRemotePush() {
+            if (!confirm('Stop pushing to remote server?')) return;
+            fetch('/api/test/remote/stop', {method: 'POST'}).then(function(r) { return r.json(); }).then(function(data) {
+                if (data.success) {
+                    updateRemotePushStatus();
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            });
+        }
+
         // === RECORDING FUNCTIONS ===
         
         function loadRecordingSettings() {
@@ -9178,6 +9355,11 @@ def optimize_test_file(filename):
 test_stream_process = None
 test_stream_filename = None
 
+# Global variable to track the independent remote-push process (RTSP/SRT to a remote server)
+# Runs alongside the local test stream; reads from the same uploaded .ts files
+remote_push_process = None
+remote_push_target = None  # dict describing the active target (for status display)
+
 @app.route('/api/test/stream/start/<filename>', methods=['POST'])
 @login_required
 def start_test_stream(filename):
@@ -9272,6 +9454,164 @@ def get_test_stream_status():
         test_stream_process = None
         test_stream_filename = None
         return jsonify({'streaming': False, 'filename': None})
+
+
+@app.route('/api/test/remote/start', methods=['POST'])
+@login_required
+def start_remote_push():
+    """Push an uploaded test file to a REMOTE server via RTSP or SRT.
+
+    Independent of the local test stream: reads from the same .ts files but
+    runs as its own FFmpeg process so it can stream out while local 'Play' is
+    also active. Stream copy (-c copy) keeps CPU low and preserves KLV data.
+    """
+    global remote_push_process, remote_push_target
+    try:
+        data = request.get_json(force=True) or {}
+
+        filename = (data.get('filename') or '').strip()
+        protocol = (data.get('protocol') or '').strip().lower()
+        host = (data.get('host') or '').strip()
+        port = str(data.get('port') or '').strip()
+
+        # --- Validation ---
+        if not filename:
+            return jsonify({'success': False, 'error': 'No file selected'}), 400
+        # Guard against path traversal — only allow files from the test dir
+        if '/' in filename or '\\' in filename or filename.startswith('.'):
+            return jsonify({'success': False, 'error': 'Invalid filename'}), 400
+        filepath = os.path.join(TEST_VIDEO_DIR, filename)
+        if not os.path.exists(filepath):
+            return jsonify({'success': False, 'error': 'File not found'}), 404
+
+        if protocol not in ('rtsp', 'srt'):
+            return jsonify({'success': False, 'error': 'Protocol must be rtsp or srt'}), 400
+        if not host:
+            return jsonify({'success': False, 'error': 'Host/IP is required'}), 400
+        if not port.isdigit() or not (1 <= int(port) <= 65535):
+            return jsonify({'success': False, 'error': 'Port must be a number between 1 and 65535'}), 400
+
+        # Stop any existing remote push first (one remote target at a time)
+        if remote_push_process:
+            remote_push_process.terminate()
+            try:
+                remote_push_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                remote_push_process.kill()
+                remote_push_process.wait()
+            remote_push_process = None
+            remote_push_target = None
+
+        base_cmd = [
+            'ffmpeg',
+            '-re',
+            '-stream_loop', '-1',
+            '-i', filepath,
+            '-map', '0',
+            '-c', 'copy',
+        ]
+
+        if protocol == 'rtsp':
+            transport = (data.get('transport') or 'tcp').strip().lower()
+            if transport not in ('tcp', 'udp'):
+                transport = 'tcp'
+            path = (data.get('path') or '').strip().lstrip('/')
+            username = (data.get('username') or '').strip()
+            password = data.get('password') or ''
+
+            # Build rtsp://[user:pass@]host:port/path
+            auth = ''
+            if username:
+                auth = quote(username, safe='')
+                if password:
+                    auth += ':' + quote(password, safe='')
+                auth += '@'
+            rtsp_url = f'rtsp://{auth}{host}:{port}'
+            if path:
+                rtsp_url += '/' + path
+
+            cmd = base_cmd + [
+                '-rtsp_transport', transport,
+                '-f', 'rtsp',
+                rtsp_url,
+            ]
+            display_target = f'rtsp://{host}:{port}/{path}' if path else f'rtsp://{host}:{port}'
+
+        else:  # srt
+            streamid = (data.get('streamid') or '').strip()
+            passphrase = data.get('passphrase') or ''
+
+            srt_url = f'srt://{host}:{port}'
+            params = []
+            if streamid:
+                params.append('streamid=' + quote(streamid, safe=''))
+            if passphrase:
+                params.append('passphrase=' + quote(passphrase, safe=''))
+            if params:
+                srt_url += '?' + '&'.join(params)
+
+            cmd = base_cmd + [
+                '-mpegts_flags', 'system_b',
+                '-f', 'mpegts',
+                srt_url,
+            ]
+            display_target = f'srt://{host}:{port}'
+            if streamid:
+                display_target += f' (streamid: {streamid})'
+
+        # Let FFmpeg output go to system logs (capturing causes buffer overflow on long runs)
+        remote_push_process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        remote_push_target = {
+            'filename': filename,
+            'protocol': protocol,
+            'target': display_target,
+        }
+
+        return jsonify({'success': True, 'target': remote_push_target})
+    except Exception as e:
+        remote_push_process = None
+        remote_push_target = None
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/test/remote/stop', methods=['POST'])
+@login_required
+def stop_remote_push():
+    """Stop the remote-push FFmpeg process"""
+    global remote_push_process, remote_push_target
+    try:
+        if remote_push_process:
+            remote_push_process.terminate()
+            try:
+                remote_push_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                remote_push_process.kill()
+                remote_push_process.wait()
+            remote_push_process = None
+            remote_push_target = None
+            return jsonify({'success': True})
+        return jsonify({'success': False, 'error': 'No remote push running'}), 400
+    except Exception as e:
+        remote_push_process = None
+        remote_push_target = None
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/test/remote/status')
+@login_required
+def get_remote_push_status():
+    """Get current remote-push status"""
+    global remote_push_process, remote_push_target
+    if remote_push_process and remote_push_process.poll() is None:
+        return jsonify({'pushing': True, 'target': remote_push_target})
+    else:
+        remote_push_process = None
+        remote_push_target = None
+        return jsonify({'pushing': False, 'target': None})
 
 @app.route('/api/stream-urls')
 @login_required
