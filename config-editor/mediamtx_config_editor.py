@@ -3086,7 +3086,10 @@ HTML_TEMPLATE = '''
                             </div>
                             <div class="form-group" style="flex: 1;">
                                 <label>Password (optional)</label>
-                                <input type="password" id="remote-push-password" autocomplete="new-password" style="width: 100%; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
+                                <div style="display: flex; gap: 8px;">
+                                    <input type="password" id="remote-push-password" autocomplete="new-password" style="flex: 1; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
+                                    <button type="button" class="btn btn-secondary" title="Show/hide password" onclick="togglePasswordVisibility('remote-push-password', this)" style="padding: 8px 12px;">👁</button>
+                                </div>
                             </div>
                         </div>
                         <div class="form-group">
@@ -3107,7 +3110,10 @@ HTML_TEMPLATE = '''
                         </div>
                         <div class="form-group">
                             <label>Passphrase (optional)</label>
-                            <input type="password" id="remote-push-passphrase" autocomplete="new-password" placeholder="SRT encryption passphrase (10-79 chars)" style="width: 100%; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
+                            <div style="display: flex; gap: 8px;">
+                                <input type="password" id="remote-push-passphrase" autocomplete="new-password" placeholder="SRT encryption passphrase (10-79 chars)" style="flex: 1; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
+                                <button type="button" class="btn btn-secondary" title="Show/hide passphrase" onclick="togglePasswordVisibility('remote-push-passphrase', this)" style="padding: 8px 12px;">👁</button>
+                            </div>
                         </div>
                     </div>
 
@@ -5978,6 +5984,18 @@ HTML_TEMPLATE = '''
         }
 
         // === REMOTE PUSH (send test file to a remote RTSP/SRT server) ===
+
+        function togglePasswordVisibility(inputId, btn) {
+            var input = document.getElementById(inputId);
+            if (!input) return;
+            if (input.type === 'password') {
+                input.type = 'text';
+                btn.textContent = '🙈';
+            } else {
+                input.type = 'password';
+                btn.textContent = '👁';
+            }
+        }
 
         function updateRemotePushFields() {
             var protocol = document.getElementById('remote-push-protocol').value;
@@ -9731,7 +9749,12 @@ def start_remote_push():
                 '-f', 'rtsp',
                 rtsp_url,
             ]
-            display_target = f'rtsp://{host}:{port}/{path}' if path else f'rtsp://{host}:{port}'
+            # Show creds in the status banner (password masked) so the user can confirm
+            # auth is actually being applied, without leaking the password.
+            display_auth = ''
+            if username:
+                display_auth = username + (':***' if password else '') + '@'
+            display_target = f'rtsp://{display_auth}{host}:{port}/{path}' if path else f'rtsp://{display_auth}{host}:{port}'
 
         else:  # srt
             streamid = (data.get('streamid') or '').strip()
