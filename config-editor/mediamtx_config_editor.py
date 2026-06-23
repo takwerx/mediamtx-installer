@@ -17,6 +17,7 @@ import secrets
 import json
 import re
 import socket
+import shutil
 from urllib.parse import urlparse, quote
 import psutil  # For system metrics
 
@@ -3074,7 +3075,7 @@ HTML_TEMPLATE = '''
 
                     <!-- RTSP-specific fields -->
                     <div id="remote-push-rtsp-fields">
-                        <p class="help-text" style="margin-top: 0; color: #ff9800;">⚠️ This RTSP push sends video + audio only (audio is re-encoded to AAC for compatibility). FFmpeg's RTSP pusher can't packetize KLV metadata — to forward KLV, use SRT. (RTSP itself supports KLV; this is an FFmpeg limitation.)</p>
+                        <p class="help-text" style="margin-top: 0; color: #4CAF50;">ℹ️ RTSP push uses GStreamer and forwards <strong>video + audio + KLV metadata</strong> (audio re-encoded to AAC for RTSP). If GStreamer isn't installed it falls back to FFmpeg, which sends video + audio only (no KLV).</p>
                         <div class="form-group">
                             <label>Stream Path</label>
                             <input type="text" id="remote-push-path" placeholder="e.g. mystream or live/cam1" style="width: 100%; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
@@ -6039,8 +6040,10 @@ HTML_TEMPLATE = '''
                     box.style.borderColor = '#2d6d2d';
                     icon.textContent = '🟢';
                     var mb = data.bytes ? (data.bytes / 1048576).toFixed(1) + ' MB sent' : '';
+                    var klv = (data.target.klv) ? '  ·  KLV ✓' : '';
+                    var eng = (data.target.engine === 'gstreamer') ? '  ·  GStreamer' : '';
                     text.innerHTML = '<strong style="color:#4CAF50;">LIVE — target accepting feed</strong><br>' +
-                        route + (mb ? '  ·  ' + mb : '');
+                        route + (mb ? '  ·  ' + mb : '') + klv + eng;
                 } else {
                     // Process up but no bytes yet — still handshaking with the remote
                     box.style.background = '#4d3a00';
@@ -9565,6 +9568,55 @@ def _read_remote_push_progress():
     except Exception:
         return {}
 
+
+def _read_remote_push_log_tail(maxbytes=16384):
+    """Read the tail of the remote-push process log (FFmpeg stderr or GStreamer output)."""
+    try:
+        if not os.path.exists(REMOTE_PUSH_LOG_FILE):
+            return ''
+        with open(REMOTE_PUSH_LOG_FILE, 'rb') as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - maxbytes))
+            return f.read().decode('utf-8', 'ignore')
+    except Exception:
+        return ''
+
+
+def _gst_launch_bin():
+    """Path to gst-launch-1.0 if GStreamer is installed, else None.
+
+    GStreamer's rtspclientsink can packetize KLV into RTP (via rtpklvpay), which
+    FFmpeg's RTSP muxer cannot. When present we use it so RTSP push carries KLV.
+    """
+    return shutil.which('gst-launch-1.0')
+
+
+def _probe_media_tracks(filepath):
+    """Detect which track types a media file has: {'video','audio','klv'} -> bool.
+
+    Order-independent: ffprobe's csv emits codec_name,codec_type (not the order
+    given to -show_entries), so we scan every token rather than assume a column.
+    """
+    info = {'video': False, 'audio': False, 'klv': False}
+    try:
+        out = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'stream=codec_type,codec_name',
+             '-of', 'csv=p=0', filepath],
+            capture_output=True, text=True, timeout=15
+        ).stdout
+        for line in out.splitlines():
+            toks = [t.strip().lower() for t in line.split(',')]
+            if 'video' in toks:
+                info['video'] = True
+            if 'audio' in toks:
+                info['audio'] = True
+            if 'data' in toks or any('klv' in t for t in toks):
+                info['klv'] = True
+    except Exception:
+        info['video'] = True  # assume at least a video track
+    return info
+
 @app.route('/api/test/stream/start/<filename>', methods=['POST'])
 @login_required
 def start_test_stream(filename):
@@ -9666,9 +9718,10 @@ def get_test_stream_status():
 def start_remote_push():
     """Push an uploaded test file to a REMOTE server via RTSP or SRT.
 
-    Independent of the local test stream: reads from the same .ts files but
-    runs as its own FFmpeg process so it can stream out while local 'Play' is
-    also active. Stream copy (-c copy) keeps CPU low and preserves KLV data.
+    Independent of the local test stream: reads from the same .ts files but runs
+    as its own process so it can stream out while local 'Play' is also active.
+    SRT uses FFmpeg (-map 0 -c copy, carries KLV). RTSP uses GStreamer when
+    available (carries KLV via rtpklvpay), else falls back to FFmpeg (no KLV).
     """
     global remote_push_process, remote_push_target, remote_push_log_handle
     try:
@@ -9723,10 +9776,12 @@ def start_remote_push():
             '-stream_loop', '-1',
             '-i', filepath,
         ]
-        # Mapping/codecs are protocol-specific. FFmpeg's RTSP/RTP muxer can't
-        # packetize KLV (data) streams and rejects ADTS-AAC-from-TS for lacking
-        # global headers, so RTSP = video copy + audio re-encoded to AAC, no KLV.
-        # SRT (MPEG-TS) carries everything as-is, incl. KLV.
+        # Mapping/codecs are protocol-specific:
+        #  - RTSP: prefer GStreamer (rtspclientsink) which CAN packetize KLV into
+        #    RTP (via rtpklvpay) and re-encodes ADTS AAC; falls back to FFmpeg
+        #    (video+audio, no KLV) if GStreamer isn't installed.
+        #  - SRT (MPEG-TS): FFmpeg -map 0 -c copy carries everything incl. KLV.
+        engine = 'ffmpeg'
 
         if protocol == 'rtsp':
             transport = (data.get('transport') or 'tcp').strip().lower()
@@ -9736,25 +9791,54 @@ def start_remote_push():
             username = (data.get('username') or '').strip()
             password = data.get('password') or ''
 
-            # Build rtsp://[user:pass@]host:port/path
-            auth = ''
-            if username:
-                auth = quote(username, safe='')
+            gst_bin = _gst_launch_bin()
+            if gst_bin:
+                # GStreamer path: carries video + audio (re-encoded AAC) + KLV.
+                engine = 'gstreamer'
+                tracks = _probe_media_tracks(filepath)
+                location = f'rtsp://{host}:{port}'
+                if path:
+                    location += '/' + path
+                # gst-launch with NO -v (keeps the log small) and NO -q (so the
+                # "(record) Starting recording" progress marker is still emitted).
+                cmd = [
+                    gst_bin,
+                    'multifilesrc', f'location={filepath}', 'loop=true', '!', 'tsdemux', 'name=d',
+                    'rtspclientsink', f'location={location}', f'protocols={transport}', 'name=s',
+                ]
+                if username:
+                    cmd.append(f'user-id={username}')
                 if password:
-                    auth += ':' + quote(password, safe='')
-                auth += '@'
-            rtsp_url = f'rtsp://{auth}{host}:{port}'
-            if path:
-                rtsp_url += '/' + path
+                    cmd.append(f'user-pw={password}')
+                # Video (assume H.264 — what the test/optimize pipeline produces): stream copy
+                cmd += ['d.', '!', 'queue', '!', 'h264parse', '!', 's.']
+                # Audio: re-encode to AAC (ADTS-from-TS has no RTP payloader as-is)
+                if tracks['audio']:
+                    cmd += ['d.', '!', 'queue', '!', 'aacparse', '!', 'avdec_aac', '!',
+                            'audioconvert', '!', 'audioresample', '!', 'avenc_aac', '!', 's.']
+                # KLV metadata: rtspclientsink auto-selects rtpklvpay for the data track
+                if tracks['klv']:
+                    cmd += ['d.', '!', 'queue', '!', 's.']
+            else:
+                # FFmpeg fallback (no KLV): video copy + audio re-encode to AAC.
+                auth = ''
+                if username:
+                    auth = quote(username, safe='')
+                    if password:
+                        auth += ':' + quote(password, safe='')
+                    auth += '@'
+                rtsp_url = f'rtsp://{auth}{host}:{port}'
+                if path:
+                    rtsp_url += '/' + path
+                cmd = base_cmd + [
+                    '-map', '0:v?', '-map', '0:a?',
+                    '-c:v', 'copy',
+                    '-c:a', 'aac', '-b:a', '128k',
+                    '-rtsp_transport', transport,
+                    '-f', 'rtsp',
+                    rtsp_url,
+                ]
 
-            cmd = base_cmd + [
-                '-map', '0:v?', '-map', '0:a?',  # video + audio only (RTSP can't carry KLV/data)
-                '-c:v', 'copy',
-                '-c:a', 'aac', '-b:a', '128k',   # re-encode: ADTS AAC from TS lacks the global headers RTSP needs
-                '-rtsp_transport', transport,
-                '-f', 'rtsp',
-                rtsp_url,
-            ]
             # Show creds in the status banner (password masked) so the user can confirm
             # auth is actually being applied, without leaking the password.
             display_auth = ''
@@ -9786,8 +9870,15 @@ def start_remote_push():
             if streamid:
                 display_target += f' (streamid: {streamid})'
 
-        # Send FFmpeg stderr to a real file (NOT a pipe) so the buffer never blocks on
-        # long runs, while still letting us surface connection errors to the user.
+        # Whether this push forwards KLV: SRT always does; RTSP only via GStreamer.
+        if protocol == 'srt':
+            carries_klv = True
+        else:
+            carries_klv = (engine == 'gstreamer') and bool(tracks.get('klv'))
+
+        # Send process output to a real file (NOT a pipe) so the buffer never blocks
+        # on long runs, while still letting us surface connection state to the user.
+        # GStreamer writes its progress markers to stdout, so capture both streams.
         if remote_push_log_handle:
             try:
                 remote_push_log_handle.close()
@@ -9796,13 +9887,15 @@ def start_remote_push():
         remote_push_log_handle = open(REMOTE_PUSH_LOG_FILE, 'wb')
         remote_push_process = subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,
+            stdout=remote_push_log_handle,
             stderr=remote_push_log_handle
         )
         remote_push_target = {
             'filename': filename,
             'protocol': protocol,
             'target': display_target,
+            'engine': engine,
+            'klv': carries_klv,
         }
 
         return jsonify({'success': True, 'target': remote_push_target})
@@ -9853,11 +9946,18 @@ def get_remote_push_status():
     """
     global remote_push_process, remote_push_target, remote_push_log_handle
     if remote_push_process and remote_push_process.poll() is None:
-        prog = _read_remote_push_progress()
-        total_size_raw = (prog.get('total_size') or '0').strip()
-        total_size = int(total_size_raw) if total_size_raw.lstrip('-').isdigit() else 0
-        # Bytes only leave FFmpeg once the RTSP/SRT handshake with the remote succeeds
-        connected = total_size > 0 and prog.get('progress') in ('continuing', 'end')
+        engine = (remote_push_target or {}).get('engine', 'ffmpeg')
+        if engine == 'gstreamer':
+            # GStreamer has no -progress file; detect the rtspclientsink marker.
+            log = _read_remote_push_log_tail()
+            connected = 'Starting recording' in log
+            total_size = 0
+        else:
+            prog = _read_remote_push_progress()
+            total_size_raw = (prog.get('total_size') or '0').strip()
+            total_size = int(total_size_raw) if total_size_raw.lstrip('-').isdigit() else 0
+            # Bytes only leave FFmpeg once the RTSP/SRT handshake with the remote succeeds
+            connected = total_size > 0 and prog.get('progress') in ('continuing', 'end')
         return jsonify({
             'pushing': True,
             'connected': connected,
@@ -9868,16 +9968,14 @@ def get_remote_push_status():
         # Not running. If it died on its own (not a user stop), surface the reason.
         error = None
         if remote_push_target is not None:
-            try:
-                if os.path.exists(REMOTE_PUSH_LOG_FILE):
-                    with open(REMOTE_PUSH_LOG_FILE, 'rb') as f:
-                        f.seek(0, os.SEEK_END)
-                        f.seek(max(0, f.tell() - 2048))
-                        tail = f.read().decode('utf-8', 'ignore').strip().splitlines()
-                    if tail:
-                        error = tail[-1]
-            except Exception:
-                pass
+            tail = _read_remote_push_log_tail()
+            lines = [l.strip() for l in tail.splitlines() if l.strip()]
+            # Prefer an informative error line (FFmpeg or GStreamer) over the last line
+            for l in lines:
+                if ('ERROR' in l or 'Failed' in l or 'error:' in l.lower()) and 'want to preroll' not in l:
+                    error = l
+            if not error and lines:
+                error = lines[-1]
         remote_push_process = None
         remote_push_target = None
         if remote_push_log_handle:
