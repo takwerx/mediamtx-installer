@@ -6033,7 +6033,7 @@ HTML_TEMPLATE = '''
                 box.style.display = 'none';
                 if (data.error) {
                     // Push died on its own (e.g. connection refused / auth failed) — surfaced once
-                    alert('Remote push stopped:\n' + data.error);
+                    alert('Remote push stopped: ' + data.error);
                 }
             }
         }
