@@ -3074,6 +3074,7 @@ HTML_TEMPLATE = '''
 
                     <!-- RTSP-specific fields -->
                     <div id="remote-push-rtsp-fields">
+                        <p class="help-text" style="margin-top: 0; color: #ff9800;">⚠️ This RTSP push sends video + audio only (audio is re-encoded to AAC for compatibility). FFmpeg's RTSP pusher can't packetize KLV metadata — to forward KLV, use SRT. (RTSP itself supports KLV; this is an FFmpeg limitation.)</p>
                         <div class="form-group">
                             <label>Stream Path</label>
                             <input type="text" id="remote-push-path" placeholder="e.g. mystream or live/cam1" style="width: 100%; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
@@ -9721,9 +9722,11 @@ def start_remote_push():
             '-re',
             '-stream_loop', '-1',
             '-i', filepath,
-            '-map', '0',
-            '-c', 'copy',
         ]
+        # Mapping/codecs are protocol-specific. FFmpeg's RTSP/RTP muxer can't
+        # packetize KLV (data) streams and rejects ADTS-AAC-from-TS for lacking
+        # global headers, so RTSP = video copy + audio re-encoded to AAC, no KLV.
+        # SRT (MPEG-TS) carries everything as-is, incl. KLV.
 
         if protocol == 'rtsp':
             transport = (data.get('transport') or 'tcp').strip().lower()
@@ -9745,6 +9748,9 @@ def start_remote_push():
                 rtsp_url += '/' + path
 
             cmd = base_cmd + [
+                '-map', '0:v?', '-map', '0:a?',  # video + audio only (RTSP can't carry KLV/data)
+                '-c:v', 'copy',
+                '-c:a', 'aac', '-b:a', '128k',   # re-encode: ADTS AAC from TS lacks the global headers RTSP needs
                 '-rtsp_transport', transport,
                 '-f', 'rtsp',
                 rtsp_url,
@@ -9770,6 +9776,8 @@ def start_remote_push():
                 srt_url += '?' + '&'.join(params)
 
             cmd = base_cmd + [
+                '-map', '0',  # carry everything incl. KLV metadata (MPEG-TS supports it)
+                '-c', 'copy',
                 '-mpegts_flags', 'system_b',
                 '-f', 'mpegts',
                 srt_url,
