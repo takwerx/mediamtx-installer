@@ -1,2 +1,10 @@
 # Ku-band simulator local config (has SOURCE_IP)
 scripts/ku-band-simulator/ku_band_simulator.conf
+
+# Internal working notes moved to the PRIVATE repo takwerx/mediamtx-installer-notes.
+# This repo is public — keep these out of it.
+docs/
+memory-bank/
+
+# Claude Code project guidance — local only, full copy mirrored in the private notes repo.
+CLAUDE.md
