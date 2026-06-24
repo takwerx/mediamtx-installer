@@ -2680,8 +2680,30 @@ HTML_TEMPLATE = '''
                         <div id="mtx-backups-list" style="color: #999; font-size: 13px;">Loading...</div>
                     </div>
                 </div>
+
+                <!-- FFmpeg Section -->
+                <h3 style="margin-top: 30px; margin-bottom: 15px; color: #fbbf24;">FFmpeg</h3>
+                <div style="background: rgba(255,255,255,0.03); border: 1px solid #404040; border-radius: 8px; padding: 20px; margin-bottom: 30px;">
+                    <div id="ff-version-info" style="margin-bottom: 15px; color: #999;">Checking version...</div>
+                    <p class="help-text" style="margin: 0 0 12px 0;">Used for recording, MP4 export, and the test stream.</p>
+                    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                        <button class="btn" id="ff-update-btn" onclick="updateDep('ffmpeg')" style="padding: 8px 20px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer;">⟳ Install / Update FFmpeg</button>
+                        <span id="ff-progress" style="display: none; color: #e5e5e5; font-size: 13px;">⏳ Working…</span>
+                    </div>
+                </div>
+
+                <!-- GStreamer Section -->
+                <h3 style="margin-top: 30px; margin-bottom: 15px; color: #a78bfa;">GStreamer <span style="font-size: 12px; color: #888; font-weight: normal;">(RTSP + KLV remote push)</span></h3>
+                <div style="background: rgba(255,255,255,0.03); border: 1px solid #404040; border-radius: 8px; padding: 20px; margin-bottom: 30px;">
+                    <div id="gs-version-info" style="margin-bottom: 15px; color: #999;">Checking version...</div>
+                    <p class="help-text" style="margin: 0 0 12px 0;">Required to forward <strong>KLV metadata</strong> over an RTSP "Send to Remote" push (FFmpeg can't packetize KLV). Without it, RTSP push falls back to video+audio only.</p>
+                    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                        <button class="btn" id="gs-update-btn" onclick="updateDep('gstreamer')" style="padding: 8px 20px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer;">⟳ Install / Update GStreamer</button>
+                        <span id="gs-progress" style="display: none; color: #e5e5e5; font-size: 13px;">⏳ Working…</span>
+                    </div>
+                </div>
             </div>
-            
+
             <!-- Firewall Tab -->
             <div id="firewall" class="tab-content {% if tab == 'firewall' %}active{% endif %}">
                 <h2 class="section-title">Firewall Rules (UFW)</h2>
@@ -6845,6 +6867,73 @@ HTML_TEMPLATE = '''
             loadVersionsMediaMTX();
             loadWebEditorBackups();
             loadMediaMTXBackups();
+            loadDepsStatus();
+        }
+
+        function loadDepsStatus(refresh) {
+            var ffEl = document.getElementById('ff-version-info');
+            var gsEl = document.getElementById('gs-version-info');
+            if (ffEl) ffEl.innerHTML = '<span style="color:#888;">Checking…</span>';
+            if (gsEl) gsEl.innerHTML = '<span style="color:#888;">Checking…</span>';
+            fetch('/api/deps/status' + (refresh ? '?refresh=1' : ''))
+            .then(function(r){ return r.json(); })
+            .then(function(d){
+                // FFmpeg
+                var ff = d.ffmpeg || {};
+                if (!ff.installed) {
+                    ffEl.innerHTML = '<span style="color:#f87171;">✗ Not installed</span>';
+                } else if (ff.update_available) {
+                    ffEl.innerHTML = '<strong style="color:#fbbf24;">' + escapeHtml(ff.version || '') + '</strong> — <span style="color:#fbbf24;">update available</span>';
+                } else {
+                    ffEl.innerHTML = '<strong>' + escapeHtml(ff.version || '') + '</strong> — <span style="color:#4ade80;">✅ up to date</span>';
+                }
+                // GStreamer
+                var gs = d.gstreamer || {};
+                if (!gs.installed) {
+                    gsEl.innerHTML = '<span style="color:#f87171;">✗ Not installed — RTSP push will run without KLV</span>';
+                } else {
+                    var klv = gs.klv_ready
+                        ? '<span style="color:#4ade80;">✅ KLV-ready</span> <span style="color:#888;">(rtpklvpay + rtspclientsink)</span>'
+                        : '<span style="color:#fbbf24;">⚠ not KLV-ready</span> <span style="color:#888;">(missing ' +
+                          (!gs.rtpklvpay ? 'rtpklvpay ' : '') + (!gs.rtspclientsink ? 'rtspclientsink' : '') + ')</span>';
+                    var upd = gs.update_available ? ' — <span style="color:#fbbf24;">update available</span>' : '';
+                    gsEl.innerHTML = '<strong>' + escapeHtml(gs.version || '') + '</strong> · ' + klv + upd;
+                }
+            })
+            .catch(function(){
+                if (ffEl) ffEl.innerHTML = '<span style="color:#f87171;">Could not check (host package manager unavailable?)</span>';
+                if (gsEl) gsEl.innerHTML = '';
+            });
+        }
+
+        function updateDep(component) {
+            var btnId = component === 'ffmpeg' ? 'ff-update-btn' : 'gs-update-btn';
+            var progId = component === 'ffmpeg' ? 'ff-progress' : 'gs-progress';
+            var btn = document.getElementById(btnId);
+            var prog = document.getElementById(progId);
+            if (!confirm('Install/update ' + component + ' from the OS package manager? This may take a minute.')) return;
+            if (btn) btn.disabled = true;
+            if (prog) { prog.style.display = 'inline'; prog.textContent = '⏳ Installing ' + component + '… (may take a minute)'; }
+            fetch('/api/deps/update', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({component: component})
+            })
+            .then(function(r){ return r.json(); })
+            .then(function(d){
+                if (btn) btn.disabled = false;
+                if (d.success) {
+                    if (prog) { prog.style.color = '#4ade80'; prog.textContent = '✅ ' + (d.message || 'Done'); }
+                    loadDepsStatus(true);
+                    setTimeout(function(){ if (prog) prog.style.display = 'none'; prog.style.color = '#e5e5e5'; }, 4000);
+                } else {
+                    if (prog) { prog.style.color = '#f87171'; prog.textContent = '✗ ' + (d.error || 'Failed'); }
+                }
+            })
+            .catch(function(err){
+                if (btn) btn.disabled = false;
+                if (prog) { prog.style.color = '#f87171'; prog.textContent = '✗ ' + err; }
+            });
         }
 
         function loadUpdateChannel() {
@@ -11942,6 +12031,184 @@ def rollback_status():
         return jsonify({'available': False})
 
 # === END MEDIAMTX VERSION ENDPOINTS ===
+
+
+# === SYSTEM DEPENDENCY MANAGEMENT (ffmpeg + GStreamer) — shown in Versions tab ===
+# ffmpeg and GStreamer are host packages the console relies on (recording / MP4
+# export / test stream / RTSP-KLV remote push). Unlike the editor & MediaMTX
+# (GitHub releases), these are managed by the OS package manager, so "update
+# available" comes from apt/dnf, and install/update runs via the console's sudo.
+
+# EL9 doesn't package rtspclientsink; we ship a prebuilt .so and drop it in.
+GST_PLUGIN_DIR_RHEL = '/usr/lib64/gstreamer-1.0'
+GST_RTSPSINK_SO_REPO_PATH = 'config-editor/assets/gst/el9/libgstrtspclientsink.so'
+
+DEPS_PACKAGES = {
+    'apt': {
+        'ffmpeg': ['ffmpeg'],
+        'gstreamer': ['gstreamer1.0-tools', 'gstreamer1.0-plugins-base',
+                      'gstreamer1.0-plugins-good', 'gstreamer1.0-plugins-bad',
+                      'gstreamer1.0-libav', 'gstreamer1.0-rtsp'],
+    },
+    'dnf': {
+        'ffmpeg': ['ffmpeg'],
+        'gstreamer': ['gstreamer1-plugins-good', 'gstreamer1-plugins-bad-free',
+                      'gstreamer1-plugins-bad-freeworld', 'gstreamer1-plugin-libav'],
+    },
+}
+
+
+def _host_pkg_mgr():
+    """'apt' | 'dnf' | None — host package manager."""
+    if shutil.which('apt-get'):
+        return 'apt'
+    if shutil.which('dnf'):
+        return 'dnf'
+    return None
+
+
+def _run_quiet(args, timeout=30, use_sudo=False):
+    """Run a command, return (returncode, combined_output)."""
+    try:
+        if use_sudo:
+            args = ['sudo'] + list(args)
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, (r.stdout or '') + (r.stderr or '')
+    except Exception as e:
+        return -1, str(e)
+
+
+def _detect_ffmpeg():
+    code, out = _run_quiet(['ffmpeg', '-version'], timeout=10)
+    if code != 0:
+        return {'installed': False, 'version': None}
+    m = re.search(r'ffmpeg version (\S+)', out)
+    return {'installed': True, 'version': m.group(1) if m else 'unknown'}
+
+
+def _detect_gstreamer():
+    gst = shutil.which('gst-launch-1.0')
+    insp = shutil.which('gst-inspect-1.0')
+    if not gst:
+        return {'installed': False, 'version': None, 'klv_ready': False,
+                'rtpklvpay': False, 'rtspclientsink': False}
+    _, out = _run_quiet([gst, '--version'], timeout=10)
+    m = re.search(r'GStreamer\s+(\S+)', out)
+
+    def _has(el):
+        if not insp:
+            return False
+        c, _o = _run_quiet([insp, el], timeout=10)
+        return c == 0
+    klv = _has('rtpklvpay')
+    sink = _has('rtspclientsink')
+    return {'installed': True, 'version': m.group(1) if m else 'unknown',
+            'rtpklvpay': klv, 'rtspclientsink': sink, 'klv_ready': klv and sink}
+
+
+def _pkg_update_available(pkgs, refresh=False):
+    """Best-effort: is a newer version available for any of pkgs? Uses cached
+    metadata unless refresh=True (which needs sudo and is slower)."""
+    pm = _host_pkg_mgr()
+    try:
+        if pm == 'apt':
+            if refresh:
+                _run_quiet(['apt-get', 'update', '-qq'], timeout=120, use_sudo=True)
+            for p in pkgs:
+                _, out = _run_quiet(['apt-cache', 'policy', p], timeout=20)
+                inst = cand = None
+                for line in out.splitlines():
+                    s = line.strip()
+                    if s.startswith('Installed:'):
+                        inst = s.split(':', 1)[1].strip()
+                    elif s.startswith('Candidate:'):
+                        cand = s.split(':', 1)[1].strip()
+                if inst and cand and inst not in ('(none)',) and inst != cand:
+                    return True
+            return False
+        elif pm == 'dnf':
+            if refresh:
+                _run_quiet(['dnf', '-q', 'makecache'], timeout=120, use_sudo=True)
+            code, _ = _run_quiet(['dnf', '-q', 'check-update'] + list(pkgs), timeout=60)
+            return code == 100  # dnf: 100 = updates available
+    except Exception:
+        pass
+    return False
+
+
+@app.route('/api/deps/status')
+@login_required
+def deps_status():
+    """Report ffmpeg + GStreamer install state, version, KLV-readiness and
+    whether a package update is available (from the OS package manager)."""
+    pm = _host_pkg_mgr()
+    refresh = request.args.get('refresh') == '1'
+    ff = _detect_ffmpeg()
+    gs = _detect_gstreamer()
+    pkgs = DEPS_PACKAGES.get(pm, {})
+    ff['update_available'] = _pkg_update_available(pkgs.get('ffmpeg', []), refresh) if ff['installed'] else False
+    gs['update_available'] = _pkg_update_available(pkgs.get('gstreamer', []), refresh) if gs['installed'] else False
+    return jsonify({'pkg_mgr': pm, 'ffmpeg': ff, 'gstreamer': gs})
+
+
+@app.route('/api/deps/update', methods=['POST'])
+@admin_required
+def deps_update():
+    """Install/update ffmpeg or GStreamer via the host package manager. On RHEL,
+    also drops the prebuilt rtspclientsink.so (not packaged for EL9)."""
+    try:
+        data = request.get_json(force=True) or {}
+        component = (data.get('component') or '').strip().lower()
+        if component not in ('ffmpeg', 'gstreamer'):
+            return jsonify({'success': False, 'error': 'component must be ffmpeg or gstreamer'}), 400
+        pm = _host_pkg_mgr()
+        if not pm:
+            return jsonify({'success': False, 'error': 'No supported package manager (apt/dnf) found'}), 500
+        pkgs = DEPS_PACKAGES[pm][component]
+
+        if pm == 'apt':
+            _run_quiet(['apt-get', 'update', '-qq'], timeout=180, use_sudo=True)
+            env_args = ['env', 'DEBIAN_FRONTEND=noninteractive']
+            code, out = _run_quiet(env_args + ['apt-get', 'install', '-y'] + pkgs,
+                                   timeout=900, use_sudo=True)
+        else:  # dnf
+            code, out = _run_quiet(['dnf', 'install', '-y'] + pkgs, timeout=900, use_sudo=True)
+
+        if code != 0:
+            return jsonify({'success': False, 'error': f'Package install failed: {out.strip()[-400:]}'}), 500
+
+        # On RHEL, rtspclientsink isn't packaged — fetch the prebuilt .so and drop it in.
+        so_note = ''
+        if component == 'gstreamer' and pm == 'dnf':
+            if not shutil.which('gst-inspect-1.0') or _run_quiet(['gst-inspect-1.0', 'rtspclientsink'])[0] != 0:
+                try:
+                    import urllib.request
+                    import ssl
+                    branch = get_update_channel()
+                    so_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{branch}/{GST_RTSPSINK_SO_REPO_PATH}"
+                    ctx = ssl.create_default_context()
+                    req = urllib.request.Request(so_url, headers={'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION})
+                    with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
+                        so_bytes = resp.read()
+                    if len(so_bytes) < 10000:
+                        raise ValueError('downloaded .so too small')
+                    tmp_so = '/tmp/libgstrtspclientsink.so'
+                    with open(tmp_so, 'wb') as f:
+                        f.write(so_bytes)
+                    _run_quiet(['install', '-m', '644', tmp_so,
+                                f'{GST_PLUGIN_DIR_RHEL}/libgstrtspclientsink.so'],
+                               timeout=30, use_sudo=True)
+                    os.remove(tmp_so)
+                    so_note = ' (+ rtspclientsink.so installed)'
+                except Exception as e:
+                    return jsonify({'success': False,
+                                    'error': f'Packages installed, but fetching rtspclientsink.so failed: {e}'}), 500
+
+        return jsonify({'success': True,
+                        'message': f'{component} installed/updated{so_note}',
+                        'status': {'ffmpeg': _detect_ffmpeg(), 'gstreamer': _detect_gstreamer()}})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 # === THEME ENDPOINTS ===
 
