@@ -1592,7 +1592,11 @@ HTML_TEMPLATE = '''
                 <div id="mediamtx-update-banner" style="display: none; margin-bottom: 20px; padding: 10px 15px; border-radius: 6px; background: rgba(255,255,255,0.05); border: 1px solid #2d4a6d; font-size: 13px; color: #888; cursor: pointer;" onclick="showTab('versions', event)">
                     🆕 MediaMTX update available: <span id="mediamtx-update-remote-version" style="color: #60a5fa; font-weight: bold;"></span> — <span style="color: #60a5fa;">Go to Versions tab to update →</span>
                 </div>
-                
+
+                <!-- FFmpeg + GStreamer badges (populated from /api/deps/status) -->
+                <div id="ffmpeg-version-badge" style="display: none; margin-bottom: 10px; padding: 10px 15px; border-radius: 6px; background: rgba(255,255,255,0.05); border: 1px solid #333; font-size: 13px; color: #888; cursor: pointer;" onclick="showTab('versions', event)"></div>
+                <div id="gstreamer-version-badge" style="display: none; margin-bottom: 20px; padding: 10px 15px; border-radius: 6px; background: rgba(255,255,255,0.05); border: 1px solid #333; font-size: 13px; color: #888; cursor: pointer;" onclick="showTab('versions', event)"></div>
+
                 <!-- Top Stats Row -->
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px;">
                     <!-- Active Streams -->
@@ -6620,7 +6624,49 @@ HTML_TEMPLATE = '''
                 updateCheckDone = true;
                 setTimeout(checkForUpdate, 1500);  // Slight delay so dashboard loads first
                 setTimeout(checkMediaMTXUpdate, 2000);  // Check MediaMTX version too
+                setTimeout(checkDepsForDashboard, 2500);  // FFmpeg + GStreamer badges
             }
+        }
+
+        function checkDepsForDashboard() {
+            fetch('/api/deps/status')
+            .then(function(r){ return r.json(); })
+            .then(function(d){
+                // FFmpeg badge
+                var ffB = document.getElementById('ffmpeg-version-badge');
+                var ff = d.ffmpeg || {};
+                if (ffB) {
+                    if (!ff.installed) {
+                        ffB.innerHTML = '⚠️ FFmpeg not installed — <span style="color:#fbbf24;">install in the Versions tab →</span>';
+                        ffB.style.borderColor = '#b45309'; ffB.style.display = 'block';
+                    } else if (ff.update_available) {
+                        ffB.innerHTML = '🆕 FFmpeg update available (current <strong>' + escapeHtml(ff.version||'') + '</strong>) — <span style="color:#fbbf24;">Versions tab →</span>';
+                        ffB.style.borderColor = '#b45309'; ffB.style.display = 'block';
+                    } else {
+                        ffB.innerHTML = '✅ FFmpeg ' + escapeHtml(ff.version||'') + ' — up to date';
+                        ffB.style.borderColor = '#333'; ffB.style.display = 'block';
+                    }
+                }
+                // GStreamer badge
+                var gsB = document.getElementById('gstreamer-version-badge');
+                var gs = d.gstreamer || {};
+                if (gsB) {
+                    if (!gs.installed) {
+                        gsB.innerHTML = '⚠️ GStreamer not installed — RTSP remote push runs without KLV. <span style="color:#fbbf24;">Versions tab →</span>';
+                        gsB.style.borderColor = '#b45309'; gsB.style.display = 'block';
+                    } else if (!gs.klv_ready) {
+                        gsB.innerHTML = '⚠️ GStreamer ' + escapeHtml(gs.version||'') + ' — not KLV-ready. <span style="color:#fbbf24;">Versions tab →</span>';
+                        gsB.style.borderColor = '#b45309'; gsB.style.display = 'block';
+                    } else if (gs.update_available) {
+                        gsB.innerHTML = '🆕 GStreamer update available (current <strong>' + escapeHtml(gs.version||'') + '</strong>, KLV-ready) — <span style="color:#fbbf24;">Versions tab →</span>';
+                        gsB.style.borderColor = '#b45309'; gsB.style.display = 'block';
+                    } else {
+                        gsB.innerHTML = '✅ GStreamer ' + escapeHtml(gs.version||'') + ' — up to date · KLV-ready';
+                        gsB.style.borderColor = '#333'; gsB.style.display = 'block';
+                    }
+                }
+            })
+            .catch(function(){});
         }
         
         function stopDashboardRefresh() {
