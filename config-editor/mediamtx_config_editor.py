@@ -12066,9 +12066,13 @@ def rollback_status():
 # (GitHub releases), these are managed by the OS package manager, so "update
 # available" comes from apt/dnf, and install/update runs via the console's sudo.
 
-# EL9 doesn't package rtspclientsink; we ship a prebuilt .so and drop it in.
+# RHEL doesn't package rtspclientsink; we ship a prebuilt .so per EL major and
+# drop it in. Keying by EL major keeps the .so matched to the distro's GStreamer:
+# within an EL release the GStreamer stays on one ABI-stable series (el9 = 1.22.x),
+# so normal dnf updates can't break it; only an EL major jump (el9 -> el10) needs a
+# new build, which lives under its own assets/gst/el<N>/ path.
 GST_PLUGIN_DIR_RHEL = '/usr/lib64/gstreamer-1.0'
-GST_RTSPSINK_SO_REPO_PATH = 'config-editor/assets/gst/el9/libgstrtspclientsink.so'
+GST_RTSPSINK_SO_REPO_PATH = 'config-editor/assets/gst/el{el}/libgstrtspclientsink.so'
 
 DEPS_PACKAGES = {
     'apt': {
@@ -12091,6 +12095,25 @@ def _host_pkg_mgr():
         return 'apt'
     if shutil.which('dnf'):
         return 'dnf'
+    return None
+
+
+def _el_major():
+    """RHEL/Rocky major version as a string (e.g. '9'), or None."""
+    try:
+        r = subprocess.run(['rpm', '-E', '%rhel'], capture_output=True, text=True, timeout=5)
+        v = (r.stdout or '').strip()
+        if v.isdigit():
+            return v
+    except Exception:
+        pass
+    try:
+        with open('/etc/os-release') as f:
+            m = re.search(r'VERSION_ID="?(\d+)', f.read())
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
     return None
 
 
@@ -12213,15 +12236,20 @@ def deps_update():
         if code != 0:
             return jsonify({'success': False, 'error': f'Package install failed: {out.strip()[-400:]}'}), 500
 
-        # On RHEL, rtspclientsink isn't packaged — fetch the prebuilt .so and drop it in.
+        # On RHEL, rtspclientsink isn't packaged — fetch the prebuilt .so (keyed by
+        # EL major so it matches the box's GStreamer) and drop it in, then verify it
+        # actually loads (ABI check) so version drift fails loudly, not silently.
         so_note = ''
         if component == 'gstreamer' and pm == 'dnf':
             if not shutil.which('gst-inspect-1.0') or _run_quiet(['gst-inspect-1.0', 'rtspclientsink'])[0] != 0:
+                el = _el_major() or '9'
+                branch = get_update_channel()
+                rel_path = GST_RTSPSINK_SO_REPO_PATH.format(el=el)
+                so_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{branch}/{rel_path}"
                 try:
                     import urllib.request
+                    import urllib.error
                     import ssl
-                    branch = get_update_channel()
-                    so_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{branch}/{GST_RTSPSINK_SO_REPO_PATH}"
                     ctx = ssl.create_default_context()
                     req = urllib.request.Request(so_url, headers={'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION})
                     with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
@@ -12235,10 +12263,21 @@ def deps_update():
                                 f'{GST_PLUGIN_DIR_RHEL}/libgstrtspclientsink.so'],
                                timeout=30, use_sudo=True)
                     os.remove(tmp_so)
-                    so_note = ' (+ rtspclientsink.so installed)'
+                except urllib.error.HTTPError as he:
+                    if he.code == 404:
+                        return jsonify({'success': False,
+                                        'error': f'No prebuilt rtspclientsink.so for el{el} on the {branch} channel — it needs to be built and committed for this RHEL major.'}), 500
+                    return jsonify({'success': False, 'error': f'Packages installed, but fetching rtspclientsink.so failed: {he}'}), 500
                 except Exception as e:
                     return jsonify({'success': False,
                                     'error': f'Packages installed, but fetching rtspclientsink.so failed: {e}'}), 500
+                # ABI check: confirm the dropped .so registers against this GStreamer.
+                vcode, _vout = _run_quiet(['gst-inspect-1.0', 'rtspclientsink'], timeout=15)
+                if vcode != 0:
+                    gsv = (_detect_gstreamer() or {}).get('version')
+                    return jsonify({'success': False,
+                                    'error': f'Installed packages and fetched the el{el} rtspclientsink.so, but it does not load against this GStreamer {gsv} (ABI mismatch) — a rebuild for el{el}/{gsv} is needed.'}), 500
+                so_note = ' (+ rtspclientsink.so installed)'
 
         return jsonify({'success': True,
                         'message': f'{component} installed/updated{so_note}',
