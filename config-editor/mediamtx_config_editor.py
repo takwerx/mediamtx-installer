@@ -6079,18 +6079,26 @@ HTML_TEMPLATE = '''
                     text.innerHTML = '<strong style="color:#4CAF50;">LIVE — target accepting feed</strong><br>' +
                         route + (mb ? '  ·  ' + mb : '') + klv + eng;
                 } else {
-                    // Process up but no bytes yet — still handshaking with the remote
+                    // Process up but no bytes yet — still handshaking / retrying
                     box.style.background = '#4d3a00';
                     box.style.borderColor = '#8a6d00';
                     icon.textContent = '🟡';
-                    var retryNote = (data.target.retry) ? ' <span style="color:#888;">(no timeout — retrying until it connects)</span>' : '';
-                    text.innerHTML = '<strong style="color:#ffc107;">Connecting to target…</strong>' + retryNote + '<br>' + route;
+                    var retryNote = (data.target.retry) ? ' <span style="color:#888;">(no timeout — retrying)</span>' : '';
+                    // Show the last failure reason so it's clear WHY it's not connecting yet
+                    var lastErr = data.last_error ? '<br><span style="color:#f87171;">⚠ last attempt: ' + escapeHtml(data.last_error) + '</span>' : '';
+                    text.innerHTML = '<strong style="color:#ffc107;">Connecting to target…</strong>' + retryNote + '<br>' + route + lastErr;
                 }
             } else {
-                box.style.display = 'none';
+                // Not pushing. If it stopped on an error, show it IN the banner (persistent),
+                // not a popup that vanishes — so the failure reason stays visible.
                 if (data.error) {
-                    // Push died on its own (e.g. connection refused / auth failed) — surfaced once
-                    alert('Remote push stopped: ' + data.error);
+                    box.style.display = 'block';
+                    box.style.background = '#3a1a1a';
+                    box.style.borderColor = '#8a2d2d';
+                    icon.textContent = '🔴';
+                    text.innerHTML = '<strong style="color:#f87171;">Push stopped</strong><br>' + escapeHtml(data.error);
+                } else {
+                    box.style.display = 'none';
                 }
             }
         }
@@ -10147,11 +10155,22 @@ def get_remote_push_status():
     global remote_push_process, remote_push_target, remote_push_log_handle
     if remote_push_process and remote_push_process.poll() is None:
         engine = (remote_push_target or {}).get('engine', 'ffmpeg')
+        last_error = None
         if engine == 'gstreamer':
             # GStreamer has no -progress file; detect the rtspclientsink marker.
             log = _read_remote_push_log_tail()
             connected = 'Starting recording' in log
             total_size = 0
+            # While retrying/handshaking, surface the most recent failure reason so the
+            # UI can show WHY it isn't connecting (e.g. "461 Missing DePacketizer").
+            if not connected:
+                for line in reversed(log.splitlines()):
+                    if 'Got error response:' in line:
+                        last_error = line.split('Got error response:', 1)[1].strip()
+                        break
+                    if 'ERROR' in line and 'want to preroll' not in line and 'Could not read' not in line:
+                        last_error = line.strip()
+                        break
         else:
             prog = _read_remote_push_progress()
             total_size_raw = (prog.get('total_size') or '0').strip()
@@ -10163,6 +10182,7 @@ def get_remote_push_status():
             'connected': connected,
             'target': remote_push_target,
             'bytes': total_size,
+            'last_error': last_error,
         })
     else:
         # Not running. If it died on its own (not a user stop), surface the reason.
