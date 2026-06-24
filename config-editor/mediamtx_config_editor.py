@@ -3057,7 +3057,7 @@ HTML_TEMPLATE = '''
                             <span id="remote-push-icon" style="font-size: 22px;">🟡</span>
                             <p id="remote-push-status-text" style="margin: 0; color: #b3e5fc; font-family: monospace; font-size: 13px; line-height: 1.6;"></p>
                         </div>
-                        <button class="btn btn-secondary" onclick="stopRemotePush()">⏹ Stop Push</button>
+                        <button id="remote-push-stop-btn" class="btn btn-secondary" onclick="stopRemotePush()">⏹ Stop Push</button>
                     </div>
                 </div>
 
@@ -6063,10 +6063,12 @@ HTML_TEMPLATE = '''
             var box = document.getElementById('remote-push-status');
             var icon = document.getElementById('remote-push-icon');
             var text = document.getElementById('remote-push-status-text');
+            var stopBtn = document.getElementById('remote-push-stop-btn');
             if (!box) return;
 
             if (data.pushing && data.target) {
                 box.style.display = 'block';
+                if (stopBtn) stopBtn.style.display = '';  // active push → show Stop
                 var route = escapeHtml(data.target.filename) + '  →  ' + escapeHtml(data.target.target);
                 if (data.connected) {
                     // Target accepted the feed — bytes are flowing
@@ -6091,12 +6093,13 @@ HTML_TEMPLATE = '''
             } else {
                 // Not pushing. If it stopped on an error, show it IN the banner (persistent),
                 // not a popup that vanishes — so the failure reason stays visible.
+                if (stopBtn) stopBtn.style.display = 'none';  // nothing to stop
                 if (data.error) {
                     box.style.display = 'block';
                     box.style.background = '#3a1a1a';
                     box.style.borderColor = '#8a2d2d';
                     icon.textContent = '🔴';
-                    text.innerHTML = '<strong style="color:#f87171;">Push stopped</strong><br>' + escapeHtml(data.error);
+                    text.innerHTML = '<strong style="color:#f87171;">Push stopped</strong> — not streaming<br>' + escapeHtml(data.error);
                 } else {
                     box.style.display = 'none';
                 }
