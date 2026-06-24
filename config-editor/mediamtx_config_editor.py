@@ -6067,29 +6067,30 @@ HTML_TEMPLATE = '''
             if (!box) return;
 
             if (data.pushing && data.target) {
+                // Two separate states: OUR end (are we pushing?) vs the TARGET (is the
+                // remote accepting/restreaming it?). They're independent — our pusher
+                // can be running fine while the target rejects the feed.
                 box.style.display = 'block';
                 if (stopBtn) stopBtn.style.display = '';  // active push → show Stop
-                var route = escapeHtml(data.target.filename) + '  →  ' + escapeHtml(data.target.target);
+                var route = '<span style="color:#aaa;">' + escapeHtml(data.target.filename) + '  →  ' + escapeHtml(data.target.target) + '</span>';
+                var engName = (data.target.engine === 'gstreamer') ? 'GStreamer' : 'FFmpeg';
+                var retryTxt = (data.target.retry) ? ' (retrying)' : '';
+                var ourEnd = '<span style="color:#4CAF50;">🟢 Our end:</span> ' + engName + ' pushing' + retryTxt;
+                var tgt;
                 if (data.connected) {
-                    // Target accepted the feed — bytes are flowing
-                    box.style.background = '#1b5e20';
-                    box.style.borderColor = '#2d6d2d';
-                    icon.textContent = '🟢';
-                    var mb = data.bytes ? (data.bytes / 1048576).toFixed(1) + ' MB sent' : '';
+                    box.style.background = '#1b5e20'; box.style.borderColor = '#2d6d2d'; icon.textContent = '🟢';
+                    var mb = data.bytes ? '  ·  ' + (data.bytes / 1048576).toFixed(1) + ' MB' : '';
                     var klv = (data.target.klv) ? '  ·  KLV ✓' : '';
-                    var eng = (data.target.engine === 'gstreamer') ? '  ·  GStreamer' : '';
-                    text.innerHTML = '<strong style="color:#4CAF50;">LIVE — target accepting feed</strong><br>' +
-                        route + (mb ? '  ·  ' + mb : '') + klv + eng;
+                    tgt = '<span style="color:#4CAF50;">🟢 Target:</span> accepting / restreaming' + mb + klv;
+                } else if (data.last_error) {
+                    // Our pusher is up; the remote is rejecting it → green for us, red for them
+                    box.style.background = '#3a2a14'; box.style.borderColor = '#8a5d2d'; icon.textContent = '🟡';
+                    tgt = '<span style="color:#f87171;">🔴 Target:</span> rejecting — ' + escapeHtml(data.last_error);
                 } else {
-                    // Process up but no bytes yet — still handshaking / retrying
-                    box.style.background = '#4d3a00';
-                    box.style.borderColor = '#8a6d00';
-                    icon.textContent = '🟡';
-                    var retryNote = (data.target.retry) ? ' <span style="color:#888;">(no timeout — retrying)</span>' : '';
-                    // Show the last failure reason so it's clear WHY it's not connecting yet
-                    var lastErr = data.last_error ? '<br><span style="color:#f87171;">⚠ last attempt: ' + escapeHtml(data.last_error) + '</span>' : '';
-                    text.innerHTML = '<strong style="color:#ffc107;">Connecting to target…</strong>' + retryNote + '<br>' + route + lastErr;
+                    box.style.background = '#4d3a00'; box.style.borderColor = '#8a6d00'; icon.textContent = '🟡';
+                    tgt = '<span style="color:#ffc107;">🟡 Target:</span> connecting…';
                 }
+                text.innerHTML = ourEnd + '<br>' + tgt + '<br>' + route;
             } else {
                 // Not pushing. If it stopped on an error, show it IN the banner (persistent),
                 // not a popup that vanishes — so the failure reason stays visible.
@@ -6099,7 +6100,8 @@ HTML_TEMPLATE = '''
                     box.style.background = '#3a1a1a';
                     box.style.borderColor = '#8a2d2d';
                     icon.textContent = '🔴';
-                    text.innerHTML = '<strong style="color:#f87171;">Push stopped</strong> — not streaming<br>' + escapeHtml(data.error);
+                    text.innerHTML = '<span style="color:#f87171;">🔴 Our end:</span> stopped (not streaming)<br>' +
+                        '<span style="color:#f87171;">🔴 Target:</span> ' + escapeHtml(data.error);
                 } else {
                     box.style.display = 'none';
                 }
