@@ -9522,8 +9522,12 @@ remote_push_log_handle = None  # open file handle for FFmpeg stderr (so the pipe
 
 # FFmpeg writes machine-readable progress here; bytes only flow AFTER the remote
 # accepts the connection, so a growing total_size confirms the target took the feed.
-REMOTE_PUSH_PROGRESS_FILE = '/tmp/mediamtx_remote_push.progress'
-REMOTE_PUSH_LOG_FILE = '/tmp/mediamtx_remote_push.log'
+# uid-suffixed so the file is always owned by (and writable to) the process that
+# runs the console — avoids EACCES if another user ever created the fixed-name
+# file first in a sticky /tmp.
+_RP_UID = os.getuid()
+REMOTE_PUSH_PROGRESS_FILE = f'/tmp/mediamtx_remote_push_{_RP_UID}.progress'
+REMOTE_PUSH_LOG_FILE = f'/tmp/mediamtx_remote_push_{_RP_UID}.log'
 
 # Saved remote-target profiles so a server's details don't have to be re-entered.
 # Stored as JSON keyed by profile name (same pattern as external_sources.json).
