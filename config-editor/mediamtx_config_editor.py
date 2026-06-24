@@ -2687,7 +2687,8 @@ HTML_TEMPLATE = '''
                     <div id="ff-version-info" style="margin-bottom: 15px; color: #999;">Checking version...</div>
                     <p class="help-text" style="margin: 0 0 12px 0;">Used for recording, MP4 export, and the test stream.</p>
                     <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                        <button class="btn" id="ff-update-btn" onclick="updateDep('ffmpeg')" style="padding: 8px 20px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer;">⟳ Install / Update FFmpeg</button>
+                        <button class="btn" id="ff-update-btn" onclick="updateDep('ffmpeg')" style="display: none; padding: 8px 20px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer;">⟳ Update FFmpeg</button>
+                        <span id="ff-note" style="display: none; color: #888; font-size: 13px;"></span>
                         <span id="ff-progress" style="display: none; color: #e5e5e5; font-size: 13px;">⏳ Working…</span>
                     </div>
                 </div>
@@ -2698,7 +2699,8 @@ HTML_TEMPLATE = '''
                     <div id="gs-version-info" style="margin-bottom: 15px; color: #999;">Checking version...</div>
                     <p class="help-text" style="margin: 0 0 12px 0;">Required to forward <strong>KLV metadata</strong> over an RTSP "Send to Remote" push (FFmpeg can't packetize KLV). Without it, RTSP push falls back to video+audio only.</p>
                     <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                        <button class="btn" id="gs-update-btn" onclick="updateDep('gstreamer')" style="padding: 8px 20px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer;">⟳ Install / Update GStreamer</button>
+                        <button class="btn" id="gs-update-btn" onclick="updateDep('gstreamer')" style="display: none; padding: 8px 20px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer;">⟳ Update GStreamer</button>
+                        <span id="gs-note" style="display: none; color: #888; font-size: 13px;"></span>
                         <span id="gs-progress" style="display: none; color: #e5e5e5; font-size: 13px;">⏳ Working…</span>
                     </div>
                 </div>
@@ -6899,11 +6901,36 @@ HTML_TEMPLATE = '''
                     var upd = gs.update_available ? ' — <span style="color:#fbbf24;">update available</span>' : '';
                     gsEl.innerHTML = '<strong>' + escapeHtml(gs.version || '') + '</strong> · ' + klv + upd;
                 }
+                var canInstall = !!d.can_install;
+                applyDepAction('ff', (!ff.installed ? 'install' : (ff.update_available ? 'update' : 'none')), canInstall, 'FFmpeg');
+                var gsState = !gs.installed ? 'install' : (!gs.klv_ready ? 'klv' : (gs.update_available ? 'update' : 'none'));
+                applyDepAction('gs', gsState, canInstall, 'GStreamer');
             })
             .catch(function(){
                 if (ffEl) ffEl.innerHTML = '<span style="color:#f87171;">Could not check (host package manager unavailable?)</span>';
                 if (gsEl) gsEl.innerHTML = '';
             });
+        }
+
+        // Show an action button only when something is actually needed AND the
+        // console can install (root/sudo). Otherwise show a note or nothing.
+        function applyDepAction(prefix, state, canInstall, label) {
+            var btn = document.getElementById(prefix + '-update-btn');
+            var note = document.getElementById(prefix + '-note');
+            if (!btn || !note) return;
+            btn.style.display = 'none';
+            note.style.display = 'none';
+            if (state === 'none') return;  // up to date / KLV-ready → no action, no button
+            var labels = { install: '⬇ Install ' + label, update: '⟳ Update ' + label, klv: '⬇ Install KLV support' };
+            if (canInstall) {
+                btn.textContent = labels[state] || ('Install ' + label);
+                btn.style.display = 'inline-block';
+            } else {
+                note.textContent = (state === 'update')
+                    ? 'Update available — this box is managed; deps come from the infra-TAK deploy.'
+                    : 'Not available here — this box is managed; deps come from the infra-TAK deploy.';
+                note.style.display = 'inline';
+            }
         }
 
         function updateDep(component) {
@@ -12148,7 +12175,16 @@ def deps_status():
     pkgs = DEPS_PACKAGES.get(pm, {})
     ff['update_available'] = _pkg_update_available(pkgs.get('ffmpeg', []), refresh) if ff['installed'] else False
     gs['update_available'] = _pkg_update_available(pkgs.get('gstreamer', []), refresh) if gs['installed'] else False
-    return jsonify({'pkg_mgr': pm, 'ffmpeg': ff, 'gstreamer': gs})
+    # Can this console actually install packages? (root, or passwordless sudo.)
+    # On managed infra-TAK boxes the console runs as a non-sudo user — there the
+    # deps come from the infra-TAK deploy, so we hide the in-UI install button.
+    can_install = (os.geteuid() == 0)
+    if not can_install:
+        try:
+            can_install = subprocess.run(['sudo', '-n', 'true'], capture_output=True, timeout=5).returncode == 0
+        except Exception:
+            can_install = False
+    return jsonify({'pkg_mgr': pm, 'can_install': can_install, 'ffmpeg': ff, 'gstreamer': gs})
 
 
 @app.route('/api/deps/update', methods=['POST'])
