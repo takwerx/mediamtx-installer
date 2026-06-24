@@ -10190,10 +10190,16 @@ def get_remote_push_status():
         if remote_push_target is not None:
             tail = _read_remote_push_log_tail()
             lines = [l.strip() for l in tail.splitlines() if l.strip()]
-            # Prefer an informative error line (FFmpeg or GStreamer) over the last line
-            for l in lines:
-                if ('ERROR' in l or 'Failed' in l or 'error:' in l.lower()) and 'want to preroll' not in l:
-                    error = l
+            # Prefer the specific server response (e.g. "461 (Missing DePacketizer)")
+            # over the generic "Could not read from resource" wrapper.
+            for l in reversed(lines):
+                if 'Got error response:' in l:
+                    error = l.split('Got error response:', 1)[1].strip()
+                    break
+            if not error:
+                for l in lines:
+                    if ('ERROR' in l or 'Failed' in l) and 'want to preroll' not in l and 'Could not read' not in l:
+                        error = l
             if not error and lines:
                 error = lines[-1]
         remote_push_process = None
