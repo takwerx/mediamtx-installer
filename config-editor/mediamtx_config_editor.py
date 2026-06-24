@@ -3147,6 +3147,12 @@ HTML_TEMPLATE = '''
                         </div>
                     </div>
 
+                    <div class="form-group">
+                        <label>Connection timeout (seconds)</label>
+                        <input type="number" id="remote-push-conntimeout" min="0" value="20" style="width: 100%; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 8px; border-radius: 4px;">
+                        <p class="help-text">How long to wait for the remote to accept the publish before giving up. <strong>0 = no timeout</strong> (keep waiting). Increase it if the server is slow to take the hook.</p>
+                    </div>
+
                     <button type="button" class="btn btn-primary" onclick="startRemotePush()" style="margin-top: 10px;">📤 Start Push to Remote</button>
                     <button type="button" class="btn btn-secondary" onclick="saveRemoteProfile()" style="margin-top: 10px; margin-left: 10px;">💾 Save as Profile</button>
                 </div>
@@ -6106,7 +6112,8 @@ HTML_TEMPLATE = '''
                 filename: document.getElementById('remote-push-file').value,
                 protocol: protocol,
                 host: document.getElementById('remote-push-host').value.trim(),
-                port: document.getElementById('remote-push-port').value.trim()
+                port: document.getElementById('remote-push-port').value.trim(),
+                conn_timeout: document.getElementById('remote-push-conntimeout').value.trim()
             };
 
             if (!payload.filename) { alert('Please select a source file'); return; }
@@ -6184,6 +6191,7 @@ HTML_TEMPLATE = '''
             document.getElementById('remote-push-transport').value = p.transport || 'tcp';
             document.getElementById('remote-push-streamid').value = p.streamid || '';
             document.getElementById('remote-push-passphrase').value = p.passphrase || '';
+            document.getElementById('remote-push-conntimeout').value = (p.conn_timeout != null ? p.conn_timeout : 20);
         }
 
         function saveRemoteProfile() {
@@ -6203,7 +6211,8 @@ HTML_TEMPLATE = '''
                 password: document.getElementById('remote-push-password').value,
                 transport: document.getElementById('remote-push-transport').value,
                 streamid: document.getElementById('remote-push-streamid').value.trim(),
-                passphrase: document.getElementById('remote-push-passphrase').value
+                passphrase: document.getElementById('remote-push-passphrase').value,
+                conn_timeout: document.getElementById('remote-push-conntimeout').value.trim()
             };
             fetch('/api/test/remote/profiles/save', {
                 method: 'POST',
@@ -9897,6 +9906,10 @@ def start_remote_push():
         protocol = (data.get('protocol') or '').strip().lower()
         host = (data.get('host') or '').strip()
         port = str(data.get('port') or '').strip()
+        # Connection timeout in seconds (how long to wait for the remote to accept
+        # the publish before giving up). 0 = no timeout (keep waiting). Default 20.
+        ct_raw = str(data.get('conn_timeout', '')).strip()
+        conn_timeout = int(ct_raw) if ct_raw.isdigit() else 20
 
         # --- Validation ---
         if not filename:
@@ -9970,7 +9983,9 @@ def start_remote_push():
                 cmd = [
                     gst_bin,
                     'multifilesrc', f'location={filepath}', 'loop=true', '!', 'tsdemux', 'name=d',
-                    'rtspclientsink', f'location={location}', f'protocols={transport}', 'name=s',
+                    'rtspclientsink', f'location={location}', f'protocols={transport}',
+                    f'tcp-timeout={conn_timeout * 1000000}',  # µs; 0 = no timeout (wait indefinitely)
+                    'name=s',
                 ]
                 if username:
                     cmd.append(f'user-id={username}')
@@ -10000,6 +10015,7 @@ def start_remote_push():
                     '-map', '0:v?', '-map', '0:a?',
                     '-c:v', 'copy',
                     '-c:a', 'aac', '-b:a', '128k',
+                ] + (['-rw_timeout', str(conn_timeout * 1000000)] if conn_timeout > 0 else []) + [
                     '-rtsp_transport', transport,
                     '-f', 'rtsp',
                     rtsp_url,
@@ -10022,6 +10038,8 @@ def start_remote_push():
                 params.append('streamid=' + quote(streamid, safe=''))
             if passphrase:
                 params.append('passphrase=' + quote(passphrase, safe=''))
+            if conn_timeout > 0:
+                params.append('timeout=' + str(conn_timeout * 1000000))  # µs; omit = no timeout
             if params:
                 srt_url += '?' + '&'.join(params)
 
@@ -10187,6 +10205,7 @@ def save_remote_push_profile():
             'transport': (data.get('transport') or 'tcp').strip().lower(),
             'streamid': (data.get('streamid') or '').strip(),
             'passphrase': data.get('passphrase') or '',
+            'conn_timeout': int(str(data.get('conn_timeout', '')).strip()) if str(data.get('conn_timeout', '')).strip().isdigit() else 20,
         }
         save_remote_push_profiles(profiles)
         return jsonify({'success': True, 'profiles': profiles})
