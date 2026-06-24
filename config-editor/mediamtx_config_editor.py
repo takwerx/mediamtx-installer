@@ -6083,7 +6083,8 @@ HTML_TEMPLATE = '''
                     box.style.background = '#4d3a00';
                     box.style.borderColor = '#8a6d00';
                     icon.textContent = '🟡';
-                    text.innerHTML = '<strong style="color:#ffc107;">Connecting to target…</strong><br>' + route;
+                    var retryNote = (data.target.retry) ? ' <span style="color:#888;">(no timeout — retrying until it connects)</span>' : '';
+                    text.innerHTML = '<strong style="color:#ffc107;">Connecting to target…</strong>' + retryNote + '<br>' + route;
                 }
             } else {
                 box.style.display = 'none';
@@ -10060,6 +10061,20 @@ def start_remote_push():
         else:
             carries_klv = (engine == 'gstreamer') and bool(tracks.get('klv'))
 
+        # conn_timeout == 0 ("no timeout") = keep retrying until it connects or the
+        # user stops — so a target that's not ready yet (e.g. firewall being opened)
+        # connects the moment it comes up, instead of the push dying on one attempt.
+        # The trap kills the child on SIGTERM so Stop still cleans up immediately.
+        retry = (conn_timeout == 0)
+        if retry:
+            import shlex
+            inner = ' '.join(shlex.quote(x) for x in cmd)
+            # NOTE: single-quote the trap body so $c is evaluated when the trap FIRES
+            # (current child PID), not when it's defined (empty). Otherwise Stop
+            # kills bash but orphans the child gst/ffmpeg.
+            loop = f"trap 'kill $c 2>/dev/null; exit 0' TERM INT; while true; do {inner} & c=$!; wait $c; sleep 3; done"
+            cmd = ['bash', '-c', loop]
+
         # Send process output to a real file (NOT a pipe) so the buffer never blocks
         # on long runs, while still letting us surface connection state to the user.
         # GStreamer writes its progress markers to stdout, so capture both streams.
@@ -10080,6 +10095,7 @@ def start_remote_push():
             'target': display_target,
             'engine': engine,
             'klv': carries_klv,
+            'retry': retry,
         }
 
         return jsonify({'success': True, 'target': remote_push_target})
