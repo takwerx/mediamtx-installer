@@ -84,6 +84,18 @@ apt-get update -qq
 apt-get install -y wget tar ufw curl ffmpeg > /dev/null 2>&1 || apt-get install -y wget tar ufw curl ffmpeg
 echo "✓ Dependencies installed (including FFmpeg)"
 
+# GStreamer — needed by the web console's "Send to Remote" RTSP push to carry
+# KLV metadata (FFmpeg's RTSP muxer can't packetize KLV; GStreamer's
+# rtspclientsink + rtpklvpay can). Non-fatal: the console falls back to an
+# FFmpeg RTSP push (video+audio, no KLV) if these are absent.
+#   gstreamer1.0-plugins-bad → rtpklvpay   |   gstreamer1.0-rtsp → rtspclientsink
+apt-get install -y \
+  gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-rtsp \
+  > /dev/null 2>&1 \
+  && echo "✓ GStreamer installed (RTSP+KLV remote push)" \
+  || echo "⚠ GStreamer install skipped — RTSP remote push will run without KLV"
+
 echo ""
 echo "=========================================="
 echo "Step 2: Detecting Latest MediaMTX Version"
