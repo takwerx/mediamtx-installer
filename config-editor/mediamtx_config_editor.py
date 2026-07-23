@@ -11327,14 +11327,18 @@ def apply_update():
             except Exception as oe:
                 print(f"WARNING: Failed to re-sync LDAP overlay: {oe}", flush=True)
         
-        # Step 8: Restart the web editor service
-        subprocess.run(['sudo', 'systemctl', 'restart', 'mediamtx-webeditor'], timeout=10)
-        
+        # Step 8: Restart the web editor onto the new file. Scheduled after the
+        # response goes out; unprivileged boxes restart via systemd Restart=always.
+        restarted = schedule_editor_self_restart()
+        if not restarted:
+            print("UPDATE: could not schedule editor restart — restart the service manually", flush=True)
+
         return jsonify({
             'success': True,
             'new_version': new_version,
             'backup_file': backup_file,
-            'overlay_synced': overlay_synced
+            'overlay_synced': overlay_synced,
+            'restarted': restarted
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -11432,13 +11436,14 @@ def rollback_webeditor():
         shutil.copy2(backup_path, webeditor_file)
         os.chmod(webeditor_file, 0o644)
         
-        # Restart service
-        subprocess.run(['sudo', 'systemctl', 'restart', 'mediamtx-webeditor'], timeout=10)
-        
+        # Restart onto the restored file (after the response goes out)
+        restarted = schedule_editor_self_restart()
+
         return jsonify({
             'success': True,
             'restored_version': restored_version,
-            'backup_of_current': current_backup
+            'backup_of_current': current_backup,
+            'restarted': restarted
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -11683,6 +11688,93 @@ def check_mediamtx_version():
             'error': str(e)
         })
 
+# --- Privileged-operation helpers ---------------------------------------
+# Standard installs run the editor as root, so binary swaps and systemctl
+# work in-process. Hardened installs (infra-TAK) run it as an unprivileged
+# user: there, privileged steps must go through the provisioned sudo helper
+# (root-owned /usr/local/sbin/mediamtx-upgrade-helper + a NOPASSWD sudoers
+# rule — see config-editor/mediamtx-upgrade-helper.sh). With neither, binary
+# upgrade/rollback must refuse cleanly BEFORE touching the running service.
+
+MTX_UPGRADE_HELPER = '/usr/local/sbin/mediamtx-upgrade-helper'
+
+MTX_PRIV_ERROR = ('This editor runs unprivileged and the MediaMTX upgrade helper is not '
+                  'provisioned on this box. An administrator must install '
+                  'mediamtx-upgrade-helper (from the installer repo) root-owned at '
+                  + MTX_UPGRADE_HELPER + ' with its matching NOPASSWD sudoers rule, then retry. '
+                  'Nothing was changed.')
+
+
+def mtx_priv_mode():
+    """'root' = privileged ops work in-process; 'helper' = the sudo helper is
+    provisioned; None = neither, binary upgrade/rollback is impossible here."""
+    if os.geteuid() == 0:
+        return 'root'
+    try:
+        r = subprocess.run(['sudo', '-n', MTX_UPGRADE_HELPER, 'check'],
+                           capture_output=True, timeout=5)
+        if r.returncode == 0:
+            return 'helper'
+    except Exception:
+        pass
+    return None
+
+
+def mtx_systemctl(action):
+    """Run systemctl <action> mediamtx via whatever privilege path exists.
+    Returns the CompletedProcess; check .returncode."""
+    if os.geteuid() == 0:
+        return subprocess.run(['systemctl', action, 'mediamtx'],
+                              capture_output=True, timeout=20)
+    return subprocess.run(['sudo', '-n', MTX_UPGRADE_HELPER, action],
+                          capture_output=True, timeout=25)
+
+
+def mtx_install_binary(src_path):
+    """Back up the current MediaMTX binary and install src_path over it.
+    Returns the backup path ('' if there was nothing to back up). Raises on
+    failure. Does NOT stop/start the service."""
+    if os.geteuid() == 0:
+        backup = ''
+        if os.path.exists(MEDIAMTX_BINARY):
+            backup = MEDIAMTX_BINARY + '.backup_' + datetime.now().strftime('%Y%m%d_%H%M%S')
+            shutil.copy2(MEDIAMTX_BINARY, backup)
+        shutil.copy2(src_path, MEDIAMTX_BINARY)
+        os.chmod(MEDIAMTX_BINARY, 0o755)
+        return backup
+    r = subprocess.run(['sudo', '-n', MTX_UPGRADE_HELPER, 'install', src_path],
+                       capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        raise RuntimeError(((r.stderr or r.stdout) or 'helper install failed').strip()[:300])
+    backup = ''
+    for line in (r.stdout or '').splitlines():
+        if line.startswith('BACKUP='):
+            backup = line.split('=', 1)[1].strip()
+    return backup
+
+
+def schedule_editor_self_restart(delay=1.5):
+    """Restart the editor shortly after the current response is sent. As root,
+    via systemctl; unprivileged under systemd (Restart=always), by exiting so
+    systemd respawns us on the freshly written file. Returns True if scheduled."""
+    import threading
+    if os.geteuid() == 0:
+        def _restart():
+            time.sleep(delay)
+            subprocess.run(['systemctl', 'restart', 'mediamtx-webeditor'], timeout=10)
+        threading.Thread(target=_restart, daemon=True).start()
+        return True
+    if os.environ.get('INVOCATION_ID'):
+        def _exit():
+            time.sleep(delay)
+            os._exit(0)
+        threading.Thread(target=_exit, daemon=True).start()
+        return True
+    return False
+
+# --- End privileged-operation helpers ------------------------------------
+
+
 @app.route('/api/mediamtx/version/upgrade', methods=['POST'])
 @admin_required
 def upgrade_mediamtx():
@@ -11717,34 +11809,20 @@ def upgrade_mediamtx():
         if not download_url:
             return jsonify({'success': False, 'error': 'Could not find linux_amd64 download URL'}), 400
         
-        # Step 2: Stop MediaMTX
-        print(f"UPGRADE: Stopping MediaMTX for upgrade to {remote_version}...", flush=True)
-        
-        # Get current version before stopping
+        # Refuse up-front if this box gives us no way to swap the binary —
+        # better than stopping the service and failing halfway through.
+        if mtx_priv_mode() is None:
+            return jsonify({'success': False, 'error': MTX_PRIV_ERROR}), 403
+
+        # Get current version
         previous_version = ''
         try:
             ver_result = subprocess.run([MEDIAMTX_BINARY, '--version'], capture_output=True, text=True, timeout=5)
             previous_version = ver_result.stdout.strip() if ver_result.returncode == 0 else ''
         except:
             pass
-        
-        subprocess.run(['sudo', 'systemctl', 'stop', 'mediamtx'], timeout=15)
-        time.sleep(2)
-        
-        # Step 3: Backup current binary AND config YAML
-        backup_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = f'{MEDIAMTX_BINARY}.backup_{backup_timestamp}'
-        yaml_backup_path = f'{CONFIG_FILE}.backup_{backup_timestamp}'
-        
-        if os.path.exists(MEDIAMTX_BINARY):
-            shutil.copy2(MEDIAMTX_BINARY, backup_path)
-            print(f"UPGRADE: Binary backed up to {backup_path}", flush=True)
-        
-        if os.path.exists(CONFIG_FILE):
-            shutil.copy2(CONFIG_FILE, yaml_backup_path)
-            print(f"UPGRADE: YAML config backed up to {yaml_backup_path}", flush=True)
-        
-        # Step 4: Download new version
+
+        # Step 2: Download new version (service keeps running until the swap)
         print(f"UPGRADE: Downloading {download_url}...", flush=True)
         tmp_tar = '/tmp/mediamtx_upgrade.tar.gz'
         tmp_dir = '/tmp/mediamtx_upgrade'
@@ -11775,37 +11853,44 @@ def upgrade_mediamtx():
                     break
         
         if not os.path.exists(new_binary):
-            # Rollback binary and YAML
-            if os.path.exists(backup_path):
-                shutil.copy2(backup_path, MEDIAMTX_BINARY)
-            if os.path.exists(yaml_backup_path):
-                shutil.copy2(yaml_backup_path, CONFIG_FILE)
-            subprocess.run(['sudo', 'systemctl', 'start', 'mediamtx'], timeout=15)
-            return jsonify({'success': False, 'error': 'Binary not found in download', 'rollback': True}), 400
-        
-        # Step 6: Replace binary (NOT the yaml)
-        shutil.copy2(new_binary, MEDIAMTX_BINARY)
-        os.chmod(MEDIAMTX_BINARY, 0o755)
-        print(f"UPGRADE: Binary replaced with {remote_version}", flush=True)
-        
-        # Step 7: Clean up
+            return jsonify({'success': False, 'error': 'Binary not found in download'}), 400
+
+        # Step 6: Stop MediaMTX — abort with nothing changed if we can't
+        print(f"UPGRADE: Stopping MediaMTX for upgrade to {remote_version}...", flush=True)
+        stop_res = mtx_systemctl('stop')
+        if stop_res.returncode != 0:
+            err = (stop_res.stderr or b'').decode(errors='replace').strip()
+            return jsonify({'success': False, 'error': 'Could not stop MediaMTX: ' + (err or 'systemctl stop failed')}), 500
+        time.sleep(2)
+
+        # Step 7: Backup config YAML (binary backup happens inside mtx_install_binary)
+        yaml_backup_path = f'{CONFIG_FILE}.backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+        if os.path.exists(CONFIG_FILE):
+            shutil.copy2(CONFIG_FILE, yaml_backup_path)
+            print(f"UPGRADE: YAML config backed up to {yaml_backup_path}", flush=True)
+
+        # Step 8: Replace binary (NOT the yaml)
+        backup_path = mtx_install_binary(new_binary)
+        print(f"UPGRADE: Binary replaced with {remote_version} (backup: {backup_path})", flush=True)
+
+        # Step 9: Clean up
         os.remove(tmp_tar)
         shutil.rmtree(tmp_dir)
-        
-        # Step 8: Start MediaMTX with existing config
-        subprocess.run(['sudo', 'systemctl', 'start', 'mediamtx'], timeout=15)
+
+        # Step 10: Start MediaMTX with existing config
+        mtx_systemctl('start')
         time.sleep(2)
-        
+
         # Verify it started
         result = subprocess.run(['systemctl', 'is-active', 'mediamtx'], capture_output=True, text=True)
         if result.stdout.strip() != 'active':
             # Rollback binary and YAML
             print(f"UPGRADE: MediaMTX failed to start, rolling back...", flush=True)
-            shutil.copy2(backup_path, MEDIAMTX_BINARY)
-            os.chmod(MEDIAMTX_BINARY, 0o755)
+            if backup_path:
+                mtx_install_binary(backup_path)
             if os.path.exists(yaml_backup_path):
                 shutil.copy2(yaml_backup_path, CONFIG_FILE)
-            subprocess.run(['sudo', 'systemctl', 'start', 'mediamtx'], timeout=15)
+            mtx_systemctl('start')
             return jsonify({'success': False, 'error': 'MediaMTX failed to start with new version. Rolled back to previous version.', 'rollback': True}), 400
         
         print(f"UPGRADE: MediaMTX successfully upgraded to {remote_version}", flush=True)
@@ -11819,7 +11904,7 @@ def upgrade_mediamtx():
     except Exception as e:
         # Try to restart MediaMTX in case it was stopped
         try:
-            subprocess.run(['sudo', 'systemctl', 'start', 'mediamtx'], timeout=15)
+            mtx_systemctl('start')
         except:
             pass
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -12008,18 +12093,24 @@ def rollback_mediamtx():
         except:
             pass
         
+        # Refuse up-front if this box gives us no way to swap the binary
+        if mtx_priv_mode() is None:
+            return jsonify({'success': False, 'error': MTX_PRIV_ERROR}), 403
+
         # Stop MediaMTX
         print(f"ROLLBACK: Stopping MediaMTX...", flush=True)
-        subprocess.run(['sudo', 'systemctl', 'stop', 'mediamtx'], timeout=15)
+        stop_res = mtx_systemctl('stop')
+        if stop_res.returncode != 0:
+            err = (stop_res.stderr or b'').decode(errors='replace').strip()
+            return jsonify({'success': False, 'error': 'Could not stop MediaMTX: ' + (err or 'systemctl stop failed')}), 500
         time.sleep(2)
-        
+
         # Backup current YAML before we modify anything (so we can undo rollback)
         pre_rollback_yaml = f'{CONFIG_FILE}.pre_rollback'
         shutil.copy2(CONFIG_FILE, pre_rollback_yaml)
-        
+
         # Restore binary
-        shutil.copy2(latest_backup, MEDIAMTX_BINARY)
-        os.chmod(MEDIAMTX_BINARY, 0o755)
+        mtx_install_binary(latest_backup)
         print(f"ROLLBACK: Binary restored from {latest_backup}", flush=True)
         
         # Restore YAML if backup exists
@@ -12032,7 +12123,7 @@ def rollback_mediamtx():
         max_fix_attempts = 5
         
         for attempt in range(max_fix_attempts + 1):
-            subprocess.run(['sudo', 'systemctl', 'start', 'mediamtx'], timeout=15)
+            mtx_systemctl('start')
             time.sleep(3)
             
             result = subprocess.run(['systemctl', 'is-active', 'mediamtx'], capture_output=True, text=True)
@@ -12074,7 +12165,7 @@ def rollback_mediamtx():
                         f.write(line)
                 
                 # Stop before retry
-                subprocess.run(['sudo', 'systemctl', 'stop', 'mediamtx'], timeout=15)
+                mtx_systemctl('stop')
                 time.sleep(1)
             else:
                 # Unknown error, not a field issue
@@ -12102,7 +12193,7 @@ def rollback_mediamtx():
     except Exception as e:
         # Try to start MediaMTX
         try:
-            subprocess.run(['sudo', 'systemctl', 'start', 'mediamtx'], timeout=15)
+            mtx_systemctl('start')
         except:
             pass
         return jsonify({'success': False, 'error': str(e)}), 500
