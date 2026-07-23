@@ -11698,18 +11698,73 @@ def check_mediamtx_version():
 
 MTX_UPGRADE_HELPER = '/usr/local/sbin/mediamtx-upgrade-helper'
 
-MTX_PRIV_ERROR = ('This editor runs unprivileged and the MediaMTX upgrade helper is not '
-                  'provisioned on this box. An administrator must install '
-                  'mediamtx-upgrade-helper (from the installer repo) root-owned at '
-                  + MTX_UPGRADE_HELPER + ' with its matching NOPASSWD sudoers rule, then retry. '
-                  'Nothing was changed.')
+# infra-TAK hardened boxes run this editor as the unprivileged console user
+# (takwerx) but provide a root PRIVILEGE BROKER (a Unix socket that mediates a
+# tightly allowlisted set of root operations, with an audit log). The editor's
+# uid is authorized to talk to it, and the broker already permits exactly what a
+# binary swap needs — write /usr/local/bin/mediamtx and systemctl the mediamtx
+# service. Routing through it needs NO sudoers rule and NO new root grant (the
+# editor gains nothing the broker doesn't already grant the console), which is
+# strictly better than a NOPASSWD helper. Prefer it when present; fall back to
+# the sudo helper for standalone (non-infra-TAK) installs.
+MTX_BROKER_SOCKET = os.environ.get('TAKWERX_BROKER_SOCKET', '/run/takwerx-broker.sock')
+# Broker-mode binary backups can't live at /usr/local/bin/mediamtx.backup_* (the
+# broker allows writing ONLY the exact mediamtx path there, by design), so they
+# go in this editor-owned dir (the module dir, which the broker allowlists for
+# writes), which rollback also scans.
+MTX_BIN_BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'binbackups')
+
+MTX_PRIV_ERROR = ('This editor runs unprivileged and has no privileged path (no infra-TAK '
+                  'broker socket at ' + MTX_BROKER_SOCKET + ', and the sudo helper '
+                  + MTX_UPGRADE_HELPER + ' is not provisioned). An administrator must '
+                  'provide one, then retry. Nothing was changed.')
+
+
+def _mtx_broker_exec(argv, timeout=90):
+    """Run one allowlisted command as root via the infra-TAK broker socket.
+    Returns (returncode, stdout_bytes, stderr_bytes), or None if the broker is
+    unreachable / errors at the protocol level (caller treats None as 'no broker')."""
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect(MTX_BROKER_SOCKET)
+    except OSError:
+        return None
+    try:
+        s.sendall(json.dumps({'op': 'exec', 'argv': list(argv), 'timeout': timeout}).encode())
+        s.shutdown(socket.SHUT_WR)
+        buf = bytearray()
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf.extend(chunk)
+        resp = json.loads(bytes(buf).decode())
+    except Exception:
+        return None
+    finally:
+        s.close()
+    if not resp.get('ok'):
+        # A DENIED/ERROR from the broker: surface as a non-zero rc with the reason
+        # so callers report it rather than silently falling back to another path.
+        return (1, b'', (resp.get('error') or 'broker denied').encode())
+    import base64 as _b64
+    return (int(resp.get('returncode', 1)),
+            _b64.b64decode(resp.get('stdout_b64', '') or ''),
+            _b64.b64decode(resp.get('stderr_b64', '') or ''))
 
 
 def mtx_priv_mode():
-    """'root' = privileged ops work in-process; 'helper' = the sudo helper is
-    provisioned; None = neither, binary upgrade/rollback is impossible here."""
+    """'root' = privileged ops work in-process; 'broker' = infra-TAK broker
+    socket is reachable; 'helper' = the sudo helper is provisioned; None = no
+    privileged path, binary upgrade/rollback is impossible here."""
     if os.geteuid() == 0:
         return 'root'
+    probe = _mtx_broker_exec(['systemctl', 'is-enabled', 'mediamtx'], timeout=5)
+    if probe is not None:
+        # Reached the broker and it accepted a mediamtx systemctl call (rc is the
+        # unit's enabled-state, not an auth error) — the swap path is available.
+        return 'broker'
     try:
         r = subprocess.run(['sudo', '-n', MTX_UPGRADE_HELPER, 'check'],
                            capture_output=True, timeout=5)
@@ -11722,10 +11777,14 @@ def mtx_priv_mode():
 
 def mtx_systemctl(action):
     """Run systemctl <action> mediamtx via whatever privilege path exists.
-    Returns the CompletedProcess; check .returncode."""
+    Returns an object with .returncode/.stdout/.stderr (bytes)."""
     if os.geteuid() == 0:
         return subprocess.run(['systemctl', action, 'mediamtx'],
                               capture_output=True, timeout=20)
+    br = _mtx_broker_exec(['systemctl', action, 'mediamtx'], timeout=25)
+    if br is not None:
+        rc, out, err = br
+        return subprocess.CompletedProcess(['broker', 'systemctl', action], rc, out, err)
     return subprocess.run(['sudo', '-n', MTX_UPGRADE_HELPER, action],
                           capture_output=True, timeout=25)
 
@@ -11742,6 +11801,32 @@ def mtx_install_binary(src_path):
         shutil.copy2(src_path, MEDIAMTX_BINARY)
         os.chmod(MEDIAMTX_BINARY, 0o755)
         return backup
+
+    # Broker path: stage the candidate into an editor-owned, broker-writable dir
+    # (the broker won't cp from /tmp), then have the broker back up + swap + chmod.
+    # The candidate is NEVER executed as root anywhere in this path — the broker
+    # only cp's it into place; the mediamtx service then runs it as takwerx.
+    if _mtx_broker_exec(['true'], timeout=5) is not None:
+        stage_dir = os.path.join(os.path.dirname(MTX_BIN_BACKUP_DIR), 'binstage')
+        os.makedirs(stage_dir, exist_ok=True)
+        staged = os.path.join(stage_dir, 'mediamtx')
+        shutil.copy2(src_path, staged)          # editor-owned dirs — no privilege needed
+        os.chmod(staged, 0o755)
+        backup = ''
+        if os.path.exists(MEDIAMTX_BINARY):
+            os.makedirs(MTX_BIN_BACKUP_DIR, exist_ok=True)
+            backup = os.path.join(MTX_BIN_BACKUP_DIR,
+                                  'mediamtx.backup_' + datetime.now().strftime('%Y%m%d_%H%M%S'))
+            rc, _o, err = _mtx_broker_exec(['cp', MEDIAMTX_BINARY, backup])
+            if rc != 0:
+                raise RuntimeError('broker backup failed: ' + (err.decode(errors="replace").strip() or 'cp')[:200])
+        rc, _o, err = _mtx_broker_exec(['cp', staged, MEDIAMTX_BINARY])
+        if rc != 0:
+            raise RuntimeError('broker install failed: ' + (err.decode(errors="replace").strip() or 'cp')[:200])
+        _mtx_broker_exec(['chmod', '755', MEDIAMTX_BINARY])
+        _mtx_broker_exec(['restorecon', MEDIAMTX_BINARY], timeout=10)  # best-effort SELinux relabel
+        return backup
+
     r = subprocess.run(['sudo', '-n', MTX_UPGRADE_HELPER, 'install', src_path],
                        capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
@@ -12074,7 +12159,12 @@ def rollback_mediamtx():
         import glob
         
         # Find most recent binary backup
-        backups = sorted(glob.glob(f'{MEDIAMTX_BINARY}.backup_*'), reverse=True)
+        # Search both legacy in-place backups (root/helper mode) and the
+        # broker-mode backup dir; newest first regardless of location.
+        backups = sorted(
+            glob.glob(f'{MEDIAMTX_BINARY}.backup_*')
+            + glob.glob(os.path.join(MTX_BIN_BACKUP_DIR, 'mediamtx.backup_*')),
+            key=lambda p: os.path.basename(p), reverse=True)
         
         if not backups:
             return jsonify({'success': False, 'error': 'No backup found to rollback to'}), 400
@@ -12205,7 +12295,12 @@ def rollback_status():
     try:
         import glob
         
-        backups = sorted(glob.glob(f'{MEDIAMTX_BINARY}.backup_*'), reverse=True)
+        # Search both legacy in-place backups (root/helper mode) and the
+        # broker-mode backup dir; newest first regardless of location.
+        backups = sorted(
+            glob.glob(f'{MEDIAMTX_BINARY}.backup_*')
+            + glob.glob(os.path.join(MTX_BIN_BACKUP_DIR, 'mediamtx.backup_*')),
+            key=lambda p: os.path.basename(p), reverse=True)
         
         if not backups:
             return jsonify({'available': False})
