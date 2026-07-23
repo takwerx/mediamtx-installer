@@ -3913,45 +3913,6 @@ HTML_TEMPLATE = '''
                 });
         }
         
-        // View stream in popup
-        function viewStream(url, name) {
-            const popup = window.open('', 'Stream: ' + name, 'width=800,height=600');
-            if (!popup) return;
-            popup.document.open();
-            popup.document.write(`
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <title>Stream: ${name}</title>
-                    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"><\/script>
-                </head>
-                <body style="margin: 0; background: #000;">
-                    <video id="video" controls style="width: 100%; height: 100%;"></video>
-                    <script>
-                        const video = document.getElementById('video');
-                        const url = '${url}';
-                        
-                        if (Hls.isSupported()) {
-                            const hls = new Hls({
-                                enableWorker: true,
-                                lowLatencyMode: false,
-                                maxBufferLength: 30,
-                                maxMaxBufferLength: 60,
-                                liveSyncDurationCount: 5,
-                                liveMaxLatencyDurationCount: 7,
-                                liveBackBufferLength: -1
-                            });
-                            hls.loadSource(url);
-                            hls.attachMedia(video);
-                        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                            video.src = url;
-                        }
-                    <\/script>
-                </body>
-                </html>
-            `);
-        }
-        
         // HLS Tuning presets
         function applyHlsPreset(preset) {
             const presets = {
@@ -5695,8 +5656,10 @@ HTML_TEMPLATE = '''
             console.log('[HLS] watchStream called with URL:', streamUrl);
 
             // Proxied mode: /hls-proxy/ URLs are routed by Caddy to MediaMTX on localhost.
-            // Auth is handled server-side — no credentials needed in the browser.
-            // Direct mode: full https://domain:8888 URL, requires Basic Auth via xhrSetup.
+            // MediaMTX still enforces per-path read auth on proxied requests, so the
+            // hlsviewer credential is attached whenever it's available — anonymous
+            // paths ignore it, authenticated paths need it.
+            // Direct mode: full https://domain:8888 URL, credential is required.
             const isProxied = streamUrl.startsWith('/hls-proxy/');
 
             if (!isProxied && !hlsViewerCredential) {
@@ -5704,11 +5667,16 @@ HTML_TEMPLATE = '''
                 return;
             }
 
+            const useAuth = !!hlsViewerCredential;
             const username = hlsViewerCredential ? hlsViewerCredential.username : '';
             const password = hlsViewerCredential ? hlsViewerCredential.password : '';
 
             // Resolve relative URL to absolute so the popup (about:blank) can fetch it
             const absoluteUrl = isProxied ? (window.location.origin + streamUrl) : streamUrl;
+
+            // Stream name = second-to-last path segment (.../<name>/index.m3u8)
+            const urlParts = absoluteUrl.split('/');
+            const streamName = urlParts.length >= 2 ? urlParts[urlParts.length - 2] : 'stream';
 
             console.log('[HLS] Resolved URL:', absoluteUrl, '| proxied:', isProxied);
 
@@ -5718,9 +5686,12 @@ HTML_TEMPLATE = '''
             const left = (screen.width - width) / 2;
             const top = (screen.height - height) / 2;
 
+            // Unique window name per stream: window.open with a reused name returns the
+            // existing popup, whose global scope survives document.open() — a re-run
+            // top-level const there throws "Identifier has already been declared".
             const popup = window.open(
                 '',
-                'streamViewer_teststream',
+                'streamViewer_' + streamName.replace(/[^a-zA-Z0-9_-]/g, '_'),
                 `width=${width},height=${height},left=${left},top=${top},` +
                 'toolbar=no,location=no,directories=no,status=no,menubar=no,scrollbars=no,resizable=yes'
             );
@@ -5731,7 +5702,7 @@ HTML_TEMPLATE = '''
                     <!DOCTYPE html>
                     <html>
                     <head>
-                        <title>Stream - Live</title>
+                        <title>Stream - ${streamName}</title>
                         <style>
                             body { margin: 0; padding: 0; background: #000; overflow: hidden; }
                             #player { width: 100vw; height: 100vh; }
@@ -5741,43 +5712,52 @@ HTML_TEMPLATE = '''
                     <body>
                         <video id="player" controls autoplay muted></video>
                         <script>
-                            const video = document.getElementById('player');
-                            const streamUrl = '${absoluteUrl}';
-                            const isProxied = ${isProxied};
-                            const username = '${username}';
-                            const password = '${password}';
-
-                            if (Hls.isSupported()) {
-                                const hlsConfig = {
-                                    enableWorker: true,
-                                    lowLatencyMode: false,
-                                    maxBufferLength: 30,
-                                    maxMaxBufferLength: 60,
-                                    liveSyncDurationCount: 5,
-                                    liveMaxLatencyDurationCount: 7,
-                                    liveBackBufferLength: -1,
-                                };
-                                if (!isProxied) {
-                                    hlsConfig.xhrSetup = function(xhr, url) {
-                                        const credentials = btoa(username + ':' + password);
-                                        xhr.setRequestHeader('Authorization', 'Basic ' + credentials);
-                                    };
+                            (function() {
+                                // Re-watching the same stream reuses this window: destroy the
+                                // old player, and keep all declarations function-scoped so a
+                                // re-run script can't collide with the previous one.
+                                if (window.__streamViewerHls) {
+                                    try { window.__streamViewerHls.destroy(); } catch (e) {}
+                                    window.__streamViewerHls = null;
                                 }
-                                const hls = new Hls(hlsConfig);
-                                hls.loadSource(streamUrl);
-                                hls.attachMedia(video);
-                                hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                                    video.play().catch(e => console.log('Autoplay blocked:', e));
-                                });
-                                hls.on(Hls.Events.ERROR, (event, data) => {
-                                    console.error('HLS error:', data);
-                                });
-                            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                                video.src = streamUrl;
-                                video.addEventListener('loadedmetadata', () => {
-                                    video.play().catch(e => console.log('Autoplay blocked:', e));
-                                });
-                            }
+                                var video = document.getElementById('player');
+                                var streamUrl = '${absoluteUrl}';
+                                var useAuth = ${useAuth};
+                                var username = '${username}';
+                                var password = '${password}';
+
+                                if (Hls.isSupported()) {
+                                    var hlsConfig = {
+                                        enableWorker: true,
+                                        lowLatencyMode: false,
+                                        maxBufferLength: 30,
+                                        maxMaxBufferLength: 60,
+                                        liveSyncDurationCount: 5,
+                                        liveMaxLatencyDurationCount: 7,
+                                        liveBackBufferLength: -1,
+                                    };
+                                    if (useAuth) {
+                                        hlsConfig.xhrSetup = function(xhr, url) {
+                                            xhr.setRequestHeader('Authorization', 'Basic ' + btoa(username + ':' + password));
+                                        };
+                                    }
+                                    var hls = new Hls(hlsConfig);
+                                    window.__streamViewerHls = hls;
+                                    hls.loadSource(streamUrl);
+                                    hls.attachMedia(video);
+                                    hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                                        video.play().catch(function(e) { console.log('Autoplay blocked:', e); });
+                                    });
+                                    hls.on(Hls.Events.ERROR, function(event, data) {
+                                        console.error('HLS error:', data);
+                                    });
+                                } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                                    video.src = streamUrl;
+                                    video.addEventListener('loadedmetadata', function() {
+                                        video.play().catch(function(e) { console.log('Autoplay blocked:', e); });
+                                    });
+                                }
+                            })();
                         <\/script>
                     </body>
                     </html>
