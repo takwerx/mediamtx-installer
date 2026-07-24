@@ -33,7 +33,7 @@ def add_no_cache_headers(response):
     return response
 
 # Version - used by auto-update checker
-CURRENT_VERSION = "v2.1.1-dev"
+CURRENT_VERSION = "v2.1.2-dev"
 GITHUB_REPO = "takwerx/mediamtx-installer"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/config-editor/mediamtx_config_editor.py"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -11754,6 +11754,23 @@ def _mtx_broker_exec(argv, timeout=90):
             _b64.b64decode(resp.get('stderr_b64', '') or ''))
 
 
+def mtx_copy_priv(src, dst):
+    """Copy src→dst when dst lives in a root-owned dir the editor can't write
+    directly (e.g. /usr/local/etc/ for the YAML config backup/restore). Uses the
+    broker when unprivileged — that dir is broker-allowlisted, so this needs no
+    sudoers. Falls back to a direct copy (root, or a genuinely writable dir)."""
+    if os.geteuid() == 0:
+        shutil.copy2(src, dst)
+        return
+    br = _mtx_broker_exec(['cp', src, dst], timeout=25)
+    if br is None:
+        shutil.copy2(src, dst)   # no broker (standalone) — dir perms decide
+        return
+    rc, _o, err = br
+    if rc != 0:
+        raise RuntimeError('broker cp failed: ' + (err.decode(errors='replace').strip() or 'cp')[:200])
+
+
 def mtx_priv_mode():
     """'root' = privileged ops work in-process; 'broker' = infra-TAK broker
     socket is reachable; 'helper' = the sudo helper is provisioned; None = no
@@ -11951,7 +11968,7 @@ def upgrade_mediamtx():
         # Step 7: Backup config YAML (binary backup happens inside mtx_install_binary)
         yaml_backup_path = f'{CONFIG_FILE}.backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
         if os.path.exists(CONFIG_FILE):
-            shutil.copy2(CONFIG_FILE, yaml_backup_path)
+            mtx_copy_priv(CONFIG_FILE, yaml_backup_path)
             print(f"UPGRADE: YAML config backed up to {yaml_backup_path}", flush=True)
 
         # Step 8: Replace binary (NOT the yaml)
@@ -11974,7 +11991,7 @@ def upgrade_mediamtx():
             if backup_path:
                 mtx_install_binary(backup_path)
             if os.path.exists(yaml_backup_path):
-                shutil.copy2(yaml_backup_path, CONFIG_FILE)
+                mtx_copy_priv(yaml_backup_path, CONFIG_FILE)
             mtx_systemctl('start')
             return jsonify({'success': False, 'error': 'MediaMTX failed to start with new version. Rolled back to previous version.', 'rollback': True}), 400
         
@@ -12197,7 +12214,7 @@ def rollback_mediamtx():
 
         # Backup current YAML before we modify anything (so we can undo rollback)
         pre_rollback_yaml = f'{CONFIG_FILE}.pre_rollback'
-        shutil.copy2(CONFIG_FILE, pre_rollback_yaml)
+        mtx_copy_priv(CONFIG_FILE, pre_rollback_yaml)
 
         # Restore binary
         mtx_install_binary(latest_backup)
@@ -12205,7 +12222,7 @@ def rollback_mediamtx():
         
         # Restore YAML if backup exists
         if yaml_backup and os.path.exists(yaml_backup):
-            shutil.copy2(yaml_backup, CONFIG_FILE)
+            mtx_copy_priv(yaml_backup, CONFIG_FILE)
             print(f"ROLLBACK: YAML config restored from {yaml_backup}", flush=True)
         
         # Try to start — if it fails, auto-fix unknown fields
@@ -12225,7 +12242,7 @@ def rollback_mediamtx():
             if attempt >= max_fix_attempts:
                 # Give up — restore the pre-rollback state
                 print(f"ROLLBACK: Failed after {max_fix_attempts} fix attempts, restoring pre-rollback state", flush=True)
-                shutil.copy2(pre_rollback_yaml, CONFIG_FILE)
+                mtx_copy_priv(pre_rollback_yaml, CONFIG_FILE)
                 # We need to restore the newer binary too since old one won't start
                 # Find the newest non-backup mediamtx or re-download
                 return jsonify({'success': False, 'error': f'MediaMTX failed to start after rollback. Removed fields {fields_removed} but still failing.'}), 500
