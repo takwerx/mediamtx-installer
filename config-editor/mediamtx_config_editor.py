@@ -14015,33 +14015,6 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"Warning: Could not auto-patch IPv6 loopback: {e}")
 
-    # Auto-patch (security): earlier builds' Public Access toggle wrote a # PUBLIC block
-    # granting anonymous PUBLISH — an open internet broadcast relay on the RTSP port.
-    # Strip `- action: publish` from any existing # PUBLIC any-user block; view-only stays.
-    try:
-        with open(CONFIG_FILE, 'r') as f:
-            lines = f.readlines()
-        in_public = False
-        cleaned = []
-        changed = False
-        for line in lines:
-            if '# PUBLIC' in line:
-                in_public = True
-            elif in_public and line.strip().startswith('- user:'):
-                in_public = False  # next user block ends the PUBLIC section
-            if in_public and line.strip() == '- action: publish':
-                changed = True
-                continue
-            cleaned.append(line)
-        if changed:
-            with open(CONFIG_FILE, 'w') as f:
-                f.writelines(cleaned)
-            print("✓ SECURITY auto-patch: removed anonymous publish from the # PUBLIC block (view-only preserved)")
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], timeout=10)
-            time.sleep(3)
-    except Exception as e:
-        print(f"Warning: Could not auto-patch PUBLIC publish removal: {e}")
-
     # Auto-patch: Remove legacy FFmpeg /live re-publish path and any leftover
     # fragments from earlier incomplete removals.
     try:
