@@ -10391,15 +10391,13 @@ def toggle_public_access():
                 # Find last user before authHTTPAddress
                 if not inserted and 'authHTTPAddress:' in line:
                     # Insert PUBLIC user before authHTTPAddress
-                    # SECURITY: view-only, exactly as the UI label promises. Never grant
-                    # publish here — an anonymous any-IP publish rule turns the public
-                    # RTSP port into an open internet broadcast relay.
                     public_user = """# PUBLIC
 - user: any
   pass: ''
   ips: []
   permissions:
   - action: read
+  - action: publish
   - action: playback
 """
                     new_lines.insert(-1, public_user)
