@@ -13995,29 +13995,56 @@ z-index:100;justify-content:center;align-items:center;flex-direction:column;text
 <script src="/static/hls.min.js"></script></head><body>
 <video id="v" controls autoplay muted playsinline></video>
 <div id="err"><h2>Stream Offline</h2><p>Waiting for stream\u2026 auto-reconnecting.</p></div>
+<div id="dbg" style="display:none;position:fixed;left:0;bottom:0;z-index:200;background:rgba(0,0,0,.85);color:#0f0;font:11px/1.4 monospace;padding:8px;max-height:45%;overflow:auto;width:100%;white-space:pre-wrap"></div>
 <script>
 var video=document.getElementById("v"),err=document.getElementById("err"),url={url_js};
 var whep={whep_js},pc=null;
+// ?debug=1 prints what the player is doing on the page itself. Phones have no
+// usable console, and the server cannot tell browsers apart once signalling is
+// proxied (every session reports the proxy's user agent), so without this an
+// iOS failure is pure guesswork.
+var dbgOn=location.search.indexOf("debug=1")>=0,dbgEl=document.getElementById("dbg");
+function dbg(m){{if(!dbgOn)return;dbgEl.style.display="block";
+dbgEl.textContent+=(new Date().toISOString().substr(11,8))+" "+m+"\\n";
+dbgEl.scrollTop=dbgEl.scrollHeight;console.log("[dbg]",m);}}
+if(dbgOn){{dbg("ua="+navigator.userAgent);dbg("whep="+(whep||"(none)"));
+dbg("hls.js supported="+(window.Hls&&Hls.isSupported()));
+dbg("native hls="+video.canPlayType("application/vnd.apple.mpegurl"));
+dbg("RTCPeerConnection="+(typeof RTCPeerConnection));
+setInterval(function(){{dbg("video "+video.videoWidth+"x"+video.videoHeight+
+" ready="+video.readyState+" paused="+video.paused+" t="+video.currentTime.toFixed(1)+
+(pc?(" ice="+pc.iceConnectionState+" conn="+pc.connectionState):""));}},3000);}}
 function start(){{
-if(Hls.isSupported()){{var hls=new Hls({hls_tuning});
+if(Hls.isSupported()){{dbg("HLS via hls.js");var hls=new Hls({hls_tuning});
 hls.loadSource(url);hls.attachMedia(video);
-hls.on(Hls.Events.MANIFEST_PARSED,function(){{err.style.display="none";video.play().catch(function(){{}});}});
-hls.on(Hls.Events.ERROR,function(ev,data){{if(data.fatal){{err.style.display="flex";setTimeout(function(){{hls.destroy();start();}},5000);}}}});
-}}else if(video.canPlayType("application/vnd.apple.mpegurl")){{video.src=url;video.addEventListener("loadedmetadata",function(){{video.play().catch(function(){{}});}});}}
+hls.on(Hls.Events.MANIFEST_PARSED,function(){{dbg("hls.js manifest parsed");err.style.display="none";video.play().catch(function(e){{dbg("play() BLOCKED: "+(e.name||e));}});}});
+hls.on(Hls.Events.ERROR,function(ev,data){{dbg("hls.js error "+data.type+"/"+data.details+" fatal="+data.fatal);if(data.fatal){{err.style.display="flex";setTimeout(function(){{hls.destroy();start();}},5000);}}}});
+}}else if(video.canPlayType("application/vnd.apple.mpegurl")){{
+// iPhone Safari has no MSE, so hls.js cannot run and playback falls to the
+// native player. Native iOS HLS is strict about EXT-X-PART-TARGET, which
+// MediaMTX warns about ("part duration changed ... will cause an error in
+// iOS clients") whenever the publisher's frame timing drifts - so this path
+// can fail on a Low-Latency playlist that hls.js plays without complaint.
+dbg("HLS via native player (no MSE)");video.src=url;
+video.addEventListener("loadedmetadata",function(){{dbg("native metadata loaded");video.play().catch(function(e){{dbg("play() BLOCKED: "+(e.name||e));}});}});
+video.addEventListener("error",function(){{var me=video.error;dbg("native video error code="+(me?me.code:"?")+" "+(me&&me.message?me.message:""));}});
+}}else{{dbg("no HLS playback method available");}}
 }}
 // WebRTC first when the server offers it. A 2xx from WHEP is not proof of
 // playback - MediaMTX accepts the offer then drops the session on B-frame
 // sources - so fall back unless frames actually arrive.
 function startWebRTC(onFail){{
 var done=false;
-function fail(why){{if(done)return;done=true;console.log("[WebRTC] fallback:",why);
+function fail(why){{if(done)return;done=true;dbg("WebRTC FAILED: "+why+" -> falling back to HLS");
 try{{if(pc)pc.close();}}catch(e){{}}pc=null;video.srcObject=null;onFail();}}
 try{{
 pc=new RTCPeerConnection({{iceServers:[]}});
 var ms=new MediaStream();
 pc.addTransceiver("video",{{direction:"recvonly"}});
 pc.addTransceiver("audio",{{direction:"recvonly"}});
-pc.ontrack=function(ev){{if(ev.streams&&ev.streams[0]){{if(video.srcObject!==ev.streams[0])video.srcObject=ev.streams[0];}}else{{ms.addTrack(ev.track);if(video.srcObject!==ms)video.srcObject=ms;}}err.style.display="none";video.play().catch(function(){{}});}};
+pc.ontrack=function(ev){{dbg("ontrack kind="+ev.track.kind+" streams="+((ev.streams&&ev.streams.length)||0));
+if(ev.streams&&ev.streams[0]){{if(video.srcObject!==ev.streams[0])video.srcObject=ev.streams[0];}}else{{ms.addTrack(ev.track);if(video.srcObject!==ms)video.srcObject=ms;}}err.style.display="none";
+video.play().then(function(){{dbg("play() ok");}}).catch(function(e){{dbg("play() BLOCKED: "+(e.name||e)+" - tap the video");}});}};
 pc.onconnectionstatechange=function(){{if(pc&&(pc.connectionState==="failed"||pc.connectionState==="closed"))fail("connection "+pc.connectionState);}};
 setTimeout(function(){{if(done)return;if(!video.videoWidth)fail("no video within 6s");else done=true;}},6000);
 pc.createOffer().then(function(o){{return pc.setLocalDescription(o).then(function(){{return o;}});}})
@@ -14027,7 +14054,7 @@ pc.createOffer().then(function(o){{return pc.setLocalDescription(o).then(functio
 .catch(function(e){{fail(e.message||String(e));}});
 }}catch(e){{fail(e.message||String(e));}}
 }}
-if(whep)startWebRTC(start);else start();
+if(whep){{dbg("trying WebRTC first");startWebRTC(start);}}else{{dbg("WebRTC not offered; HLS only");start();}}
 </script></body></html>'''
     return Response(html, content_type='text/html')
 
