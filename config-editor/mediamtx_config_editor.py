@@ -13982,7 +13982,9 @@ def shared_stream_page(token):
     # Empty string when WebRTC is off or the admin pinned HLS, in which case the
     # page never attempts a negotiation. The token is in the WHEP path, so the
     # same expiry/revocation checks apply as to the HLS segments.
-    whep_js = json.dumps(f'/shared-whep/{token}'
+    # Both under /shared/, the prefix infra-TAK's Caddy already lets through
+    # unauthenticated -- see serve_vendored_hls_js for why that matters.
+    whep_js = json.dumps(f'/shared/{token}/whep'
                          if (webrtc_available() and load_playback_mode() != 'hls') else '')
     html = f'''<!DOCTYPE html>
 <html><head><title>{stream_safe} - Live</title>
@@ -13992,7 +13994,7 @@ def shared_stream_page(token):
 #err{{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.95);
 z-index:100;justify-content:center;align-items:center;flex-direction:column;text-align:center;color:#fff}}
 #err h2{{font-size:1.4rem;margin-bottom:8px}}#err p{{color:#999;font-size:.9rem}}</style>
-<script src="/static/hls.min.js"></script></head><body>
+<script src="/shared/hls.min.js"></script></head><body>
 <video id="v" controls autoplay muted playsinline></video>
 <div id="err"><h2>Stream Offline</h2><p>Waiting for stream\u2026 auto-reconnecting.</p></div>
 <div id="dbg" style="display:none;position:fixed;left:0;bottom:0;z-index:200;background:rgba(0,0,0,.85);color:#0f0;font:11px/1.4 monospace;padding:8px;max-height:45%;overflow:auto;width:100%;white-space:pre-wrap"></div>
@@ -14162,10 +14164,17 @@ def whep_authenticated(stream_name):
     return Response(answer, content_type='application/sdp')
 
 
+@app.route('/shared/<token>/whep', methods=['POST'])
 @app.route('/shared-whep/<token>', methods=['POST'])
 def whep_shared(token):
     """WHEP for share links. Same checks as /shared-hls/, and the stream is
-    taken from the token record rather than the URL so it cannot be swapped."""
+    taken from the token record rather than the URL so it cannot be swapped.
+
+    Primary path is under /shared/ so it inherits the prefix infra-TAK's Caddy
+    already whitelists past forward_auth; /shared-whep/ needed its own route
+    added to every proxy or the negotiation 302'd to Authentik and the fetch
+    died as an opaque network error. Both are kept so a console updated ahead
+    of its proxy config keeps working."""
     links = prune_expired_share_links(load_share_links())
     info = links.get(token)
     if not info:
@@ -14600,9 +14609,19 @@ HLS_JS_B64 = "IWZ1bmN0aW9uIGUodCl7dmFyIHIsaTtyPXRoaXMsaT1mdW5jdGlvbigpeyJ1c2Ugc3
 _HLS_JS_CACHE = None
 
 @app.route('/static/hls.min.js')
+@app.route('/shared/hls.min.js')
 def serve_vendored_hls_js():
     """Serve the vendored hls.js. Unauthenticated by design: it is a public JS
-    library needed by viewer pages that can render before login."""
+    library needed by viewer pages that can render before login.
+
+    Also exposed under /shared/ because "unauthenticated" is only true of this
+    app. On infra-TAK, Caddy puts an Authentik forward_auth in front and
+    whitelists /shared/* and /shared-hls/* but not /static/*, so a share link
+    opened by someone with no Authentik session had its player script 302'd to
+    a login page - a silent black screen for exactly the audience share links
+    exist for. Serving it under an already-whitelisted prefix makes share links
+    work on infra-TAK and standalone alike with no Caddy change, rather than
+    depending on every deployment's proxy config being correct."""
     global _HLS_JS_CACHE
     import base64 as _hb64
     if _HLS_JS_CACHE is None:
