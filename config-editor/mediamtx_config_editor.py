@@ -396,30 +396,19 @@ def save_playback_mode(mode):
         return False
 
 
-def webrtc_base_url():
-    """Base URL browsers should use for WHEP, or None if WebRTC is unusable.
+def webrtc_available():
+    """Whether WebRTC playback can be offered at all.
 
-    Returns None when the protocol is off, so 'auto' silently stays on HLS
-    instead of every viewer paying a failed negotiation first.
-
-    Scheme follows webrtcEncryption: a page served over HTTPS cannot post an
-    SDP offer to a plain-HTTP endpoint (mixed content), so on an HTTPS console
-    with encryption off there is no usable URL and we return None rather than
-    hand back one the browser will refuse.
+    Only the protocol toggle matters now. Signalling is proxied through this
+    app at /whep/<stream>, so it inherits the console's own scheme and origin --
+    there is no mixed-content problem to avoid and no need for the WebRTC port
+    to be publicly reachable or TLS-terminated. What this cannot verify is that
+    8189/udp reaches the viewer, since that leg never touches the console.
     """
     try:
-        if read_yaml_field('webrtc', 'no') != 'yes':
-            return None
-        enc = str(read_yaml_field('webrtcEncryption', 'no')).lower() in ('yes', 'true')
-        addr = str(read_yaml_field('webrtcAddress', ':8889'))
-        port = addr.split(':')[-1] or '8889'
-        streaming = get_streaming_domain()
-        domain = streaming.get('domain')
-        if not domain:
-            return None
-        return f"{'https' if enc else 'http'}://{domain}:{port}"
+        return read_yaml_field('webrtc', 'no') == 'yes'
     except Exception:
-        return None
+        return False
 
 
 def prune_expired_share_links(links):
@@ -5924,8 +5913,11 @@ HTML_TEMPLATE = '''
             // playbackConfig is loaded once at page load; default to HLS so a
             // failed/absent fetch can never take the watch button offline.
             const playbackMode = (playbackConfig && playbackConfig.mode) || 'hls';
-            const whepUrl = (playbackConfig && playbackConfig.webrtc_base)
-                ? playbackConfig.webrtc_base + '/' + streamName + '/whep'
+            // Signalling goes through the console, never straight to :8889 —
+            // same-origin (no CORS), session-authenticated, and it lets the
+            // WebRTC port stay bound to localhost like HLS already is.
+            const whepUrl = (playbackConfig && playbackConfig.webrtc_available)
+                ? window.location.origin + '/whep/' + encodeURIComponent(streamName)
                 : '';
 
             console.log('[Watch] Resolved URL:', absoluteUrl, '| proxied:', isProxied, '| mode:', playbackMode);
@@ -13979,6 +13971,11 @@ def shared_stream_page(token):
     # URL safe for JS: overlay used url="{hls_url}", we use json.dumps so quotes in path don't break
     url_js = json.dumps(hls_url)
     hls_tuning = hls_player_tuning_js()
+    # Empty string when WebRTC is off or the admin pinned HLS, in which case the
+    # page never attempts a negotiation. The token is in the WHEP path, so the
+    # same expiry/revocation checks apply as to the HLS segments.
+    whep_js = json.dumps(f'/shared-whep/{token}'
+                         if (webrtc_available() and load_playback_mode() != 'hls') else '')
     html = f'''<!DOCTYPE html>
 <html><head><title>{stream_safe} - Live</title>
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
@@ -13992,6 +13989,7 @@ z-index:100;justify-content:center;align-items:center;flex-direction:column;text
 <div id="err"><h2>Stream Offline</h2><p>Waiting for stream\u2026 auto-reconnecting.</p></div>
 <script>
 var video=document.getElementById("v"),err=document.getElementById("err"),url={url_js};
+var whep={whep_js},pc=null;
 function start(){{
 if(Hls.isSupported()){{var hls=new Hls({hls_tuning});
 hls.loadSource(url);hls.attachMedia(video);
@@ -13999,7 +13997,29 @@ hls.on(Hls.Events.MANIFEST_PARSED,function(){{err.style.display="none";video.pla
 hls.on(Hls.Events.ERROR,function(ev,data){{if(data.fatal){{err.style.display="flex";setTimeout(function(){{hls.destroy();start();}},5000);}}}});
 }}else if(video.canPlayType("application/vnd.apple.mpegurl")){{video.src=url;video.addEventListener("loadedmetadata",function(){{video.play().catch(function(){{}});}});}}
 }}
-start();
+// WebRTC first when the server offers it. A 2xx from WHEP is not proof of
+// playback - MediaMTX accepts the offer then drops the session on B-frame
+// sources - so fall back unless frames actually arrive.
+function startWebRTC(onFail){{
+var done=false;
+function fail(why){{if(done)return;done=true;console.log("[WebRTC] fallback:",why);
+try{{if(pc)pc.close();}}catch(e){{}}pc=null;video.srcObject=null;onFail();}}
+try{{
+pc=new RTCPeerConnection({{iceServers:[]}});
+var ms=new MediaStream();
+pc.addTransceiver("video",{{direction:"recvonly"}});
+pc.addTransceiver("audio",{{direction:"recvonly"}});
+pc.ontrack=function(ev){{ms.addTrack(ev.track);video.srcObject=ms;err.style.display="none";video.play().catch(function(){{}});}};
+pc.onconnectionstatechange=function(){{if(pc&&(pc.connectionState==="failed"||pc.connectionState==="closed"))fail("connection "+pc.connectionState);}};
+setTimeout(function(){{if(done)return;if(!video.videoWidth)fail("no video within 6s");else done=true;}},6000);
+pc.createOffer().then(function(o){{return pc.setLocalDescription(o).then(function(){{return o;}});}})
+.then(function(o){{return fetch(whep,{{method:"POST",headers:{{"Content-Type":"application/sdp"}},body:o.sdp}});}})
+.then(function(r){{if(!r.ok)throw new Error("WHEP HTTP "+r.status);return r.text();}})
+.then(function(a){{return pc.setRemoteDescription({{type:"answer",sdp:a}});}})
+.catch(function(e){{fail(e.message||String(e));}});
+}}catch(e){{fail(e.message||String(e));}}
+}}
+if(whep)startWebRTC(start);else start();
 </script></body></html>'''
     return Response(html, content_type='text/html')
 
@@ -14051,15 +14071,85 @@ def api_share_mode_set():
     except Exception as e:
         return jsonify({'error': str(e)[:200]}), 500
 
+def whep_negotiate(stream, sdp_offer):
+    """Forward an SDP offer to MediaMTX's WHEP endpoint, return (answer, error).
+
+    Signalling is proxied for the same reason HLS is: MediaMTX has no notion of
+    our share tokens, so the only way to enforce them is to be the one thing
+    that can reach it. Pair this with webrtcAddress bound to 127.0.0.1 -- if
+    :8889 stays publicly reachable, anyone who knows a stream name can
+    negotiate directly and the token check is decorative.
+
+    Media itself still flows MediaMTX:8189 -> browser and never passes through
+    here, which is fine: no media is sent without a negotiated session, and a
+    session can only be negotiated through this check.
+    """
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    if not re.match(r'^[A-Za-z0-9_.-]+$', stream or ''):
+        return None, 'Invalid stream name'
+    try:
+        enc = str(read_yaml_field('webrtcEncryption', 'no')).lower() in ('yes', 'true')
+        port = str(read_yaml_field('webrtcAddress', ':8889')).split(':')[-1] or '8889'
+        url = f"{'https' if enc else 'http'}://127.0.0.1:{port}/{stream}/whep"
+        # Self-signed / hostname-mismatched certs are expected on the loopback hop.
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        req = urllib.request.Request(
+            url,
+            data=(sdp_offer or '').encode('utf-8'),
+            method='POST',
+            headers={'Content-Type': 'application/sdp', 'Accept': 'application/sdp'},
+        )
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+            return resp.read().decode('utf-8', 'replace'), None
+    except urllib.error.HTTPError as e:
+        body = ''
+        try:
+            body = e.read().decode('utf-8', 'replace')[:200]
+        except Exception:
+            pass
+        return None, f'MediaMTX refused the session (HTTP {e.code}) {body}'.strip()
+    except Exception as e:
+        return None, str(e)[:200]
+
+
+@app.route('/whep/<stream_name>', methods=['POST'])
+@login_required
+def whep_authenticated(stream_name):
+    """WHEP for logged-in console users (Active Streams watch button)."""
+    answer, err = whep_negotiate(stream_name, request.get_data(as_text=True))
+    if err:
+        return Response(err, status=502, content_type='text/plain')
+    return Response(answer, content_type='application/sdp')
+
+
+@app.route('/shared-whep/<token>', methods=['POST'])
+def whep_shared(token):
+    """WHEP for share links. Same checks as /shared-hls/, and the stream is
+    taken from the token record rather than the URL so it cannot be swapped."""
+    links = prune_expired_share_links(load_share_links())
+    info = links.get(token)
+    if not info:
+        return Response('Link expired or revoked', status=403, content_type='text/plain')
+    if info.get('expires') and info['expires'] < time.time():
+        return Response('Link expired', status=403, content_type='text/plain')
+    answer, err = whep_negotiate(info['stream'], request.get_data(as_text=True))
+    if err:
+        return Response(err, status=502, content_type='text/plain')
+    return Response(answer, content_type='application/sdp')
+
+
 @app.route('/api/playback-mode')
 @login_required
 def api_playback_mode_get():
     """Current player preference plus whether WebRTC is actually usable."""
-    base = webrtc_base_url()
     return jsonify({
         'mode': load_playback_mode(),
-        'webrtc_base': base,
-        'webrtc_available': bool(base),
+        'webrtc_available': webrtc_available(),
     })
 
 
@@ -14072,8 +14162,8 @@ def api_playback_mode_set():
         mode = (data.get('mode') or '').strip().lower()
         if mode not in ('auto', 'hls', 'webrtc'):
             return jsonify({'error': 'Mode must be auto, hls or webrtc'}), 400
-        if mode != 'hls' and not webrtc_base_url():
-            return jsonify({'error': 'WebRTC is not usable on this server. Enable it in Protocols first (and set Encryption to Yes if this console is served over HTTPS).'}), 400
+        if mode != 'hls' and not webrtc_available():
+            return jsonify({'error': 'WebRTC is not enabled on this server. Turn it on in the Protocols tab first.'}), 400
         if not save_playback_mode(mode):
             return jsonify({'error': 'Failed to save'}), 500
         return jsonify({'ok': True, 'mode': mode})
