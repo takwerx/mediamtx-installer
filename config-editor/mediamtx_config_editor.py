@@ -291,6 +291,38 @@ def is_hls_localhost_bound():
         pass
     return False
 
+def hls_player_tuning_js():
+    """hls.js constructor options as a JS object literal, matched to hlsVariant.
+
+    Player-side buffering is what actually decides live latency, and every
+    player here previously hardcoded lowLatencyMode:false with a 30s buffer
+    sitting 5 segments behind the edge. That throws away Low-Latency HLS even
+    when the server is configured for it.
+
+    But the buffer can't just be shortened for everyone: the Satellite preset
+    (mpegts, 7x3s) exists because impaired links need depth, and forcing
+    low-latency settings there trades a working picture for a stalling one.
+    So the player mirrors whatever the HLS Tuning tab selected -- pick
+    Low-Latency HLS and the player goes with it, stay on mpegts/fmp4 and
+    behaviour is unchanged from before.
+    """
+    try:
+        variant = read_yaml_field('hlsVariant', 'mpegts')
+    except Exception:
+        variant = 'mpegts'
+    if variant == 'lowLatency':
+        # Sync off the playlist's PART-HOLD-BACK; 3 segments is hls.js's floor
+        # for ordinary playlists and its fallback when parts are unavailable.
+        return ('{enableWorker:true,lowLatencyMode:true,backBufferLength:10,'
+                'maxBufferLength:10,maxMaxBufferLength:30,'
+                'liveSyncDurationCount:3,liveMaxLatencyDurationCount:5,'
+                'liveDurationInfinity:true}')
+    return ('{enableWorker:true,lowLatencyMode:false,backBufferLength:30,'
+            'maxBufferLength:30,maxMaxBufferLength:60,'
+            'liveSyncDurationCount:5,liveMaxLatencyDurationCount:7,'
+            'liveDurationInfinity:true}')
+
+
 # Share links (token-based, no-login stream access)
 def load_share_links():
     """Load share links from JSON file."""
@@ -5790,15 +5822,7 @@ HTML_TEMPLATE = '''
                                 var password = '${password}';
 
                                 if (Hls.isSupported()) {
-                                    var hlsConfig = {
-                                        enableWorker: true,
-                                        lowLatencyMode: false,
-                                        maxBufferLength: 30,
-                                        maxMaxBufferLength: 60,
-                                        liveSyncDurationCount: 5,
-                                        liveMaxLatencyDurationCount: 7,
-                                        liveBackBufferLength: -1,
-                                    };
+                                    var hlsConfig = {{ hls_tuning|safe }};
                                     if (useAuth) {
                                         hlsConfig.xhrSetup = function(xhr, url) {
                                             xhr.setRequestHeader('Authorization', 'Basic ' + btoa(username + ':' + password));
@@ -9367,7 +9391,8 @@ def index():
         theme=load_theme(),
         logo_exists=logo_exists,
         rtsp_transport_mode=rtsp_transport_mode,
-        pending_count=pending_count
+        pending_count=pending_count,
+        hls_tuning=hls_player_tuning_js()
     )
 
 @app.route('/save_basic', methods=['POST'])
@@ -13708,6 +13733,7 @@ def shared_stream_page(token):
     stream_safe = html_escape(stream, quote=True)
     # URL safe for JS: overlay used url="{hls_url}", we use json.dumps so quotes in path don't break
     url_js = json.dumps(hls_url)
+    hls_tuning = hls_player_tuning_js()
     html = f'''<!DOCTYPE html>
 <html><head><title>{stream_safe} - Live</title>
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
@@ -13722,7 +13748,7 @@ z-index:100;justify-content:center;align-items:center;flex-direction:column;text
 <script>
 var video=document.getElementById("v"),err=document.getElementById("err"),url={url_js};
 function start(){{
-if(Hls.isSupported()){{var hls=new Hls({{enableWorker:true,lowLatencyMode:false,maxBufferLength:30,maxMaxBufferLength:60,liveSyncDurationCount:5,liveMaxLatencyDurationCount:7,liveBackBufferLength:30,liveDurationInfinity:true}});
+if(Hls.isSupported()){{var hls=new Hls({hls_tuning});
 hls.loadSource(url);hls.attachMedia(video);
 hls.on(Hls.Events.MANIFEST_PARSED,function(){{err.style.display="none";video.play().catch(function(){{}});}});
 hls.on(Hls.Events.ERROR,function(ev,data){{if(data.fatal){{err.style.display="flex";setTimeout(function(){{hls.destroy();start();}},5000);}}}});
@@ -13869,7 +13895,8 @@ def _watch_stream_impl(stream_name):
         
         # Load theme for branding
         theme = load_theme()
-        
+        hls_tuning = hls_player_tuning_js()
+
         return f'''<!DOCTYPE html>
 <html>
 <head>
@@ -13943,19 +13970,12 @@ def _watch_stream_impl(stream_name):
             lastCt = -1;
             lastAdv = Date.now();
             if (Hls.isSupported()) {{
-                const hls = new Hls({{
-                    enableWorker: true,
-                    lowLatencyMode: false,
-                    maxBufferLength: 30,
-                    maxMaxBufferLength: 60,
-                    liveSyncDurationCount: 5,
-                    liveMaxLatencyDurationCount: 7,
-                    liveBackBufferLength: -1,
+                const hls = new Hls(Object.assign({{}}, {hls_tuning}, {{
                     xhrSetup: function(xhr, url) {{
                         const credentials = btoa(username + ':' + password);
                         xhr.setRequestHeader('Authorization', 'Basic ' + credentials);
                     }}
-                }});
+                }}));
                 hlsRef = hls;
                 hls.loadSource(streamUrl);
                 hls.attachMedia(video);
