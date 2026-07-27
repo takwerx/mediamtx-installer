@@ -7292,7 +7292,11 @@ HTML_TEMPLATE = '''
             note.style.display = 'none';
             if (state === 'none') return;  // up to date / KLV-ready → no action, no button
             var labels = { install: '⬇ Install ' + label, update: '⟳ Update ' + label, klv: '⬇ Install KLV support' };
-            if (canInstall) {
+            // 'klv' means GStreamer is present and only rtspclientsink is missing.
+            // That plugin isn't packaged for RHEL at all, so no deploy can supply
+            // it — but it installs into our own plugin dir with no privileges, so
+            // offer it even on a managed box where everything else is hands-off.
+            if (canInstall || (state === 'klv' && prefix === 'gs')) {
                 btn.textContent = labels[state] || ('Install ' + label);
                 btn.style.display = 'inline-block';
             } else {
@@ -10563,10 +10567,14 @@ def start_remote_push():
             except Exception:
                 pass
         remote_push_log_handle = open(REMOTE_PUSH_LOG_FILE, 'wb')
+        # gst_env() puts our editor-owned plugin dir on GST_PLUGIN_PATH so a
+        # locally-installed rtspclientsink is found. Harmless for the FFmpeg
+        # branch, which ignores the variable.
         remote_push_process = subprocess.Popen(
             cmd,
             stdout=remote_push_log_handle,
-            stderr=remote_push_log_handle
+            stderr=remote_push_log_handle,
+            env=gst_env()
         )
         remote_push_target = {
             'filename': filename,
@@ -12884,6 +12892,32 @@ def rollback_status():
 GST_PLUGIN_DIR_RHEL = '/usr/lib64/gstreamer-1.0'
 GST_RTSPSINK_SO_REPO_PATH = 'config-editor/assets/gst/el{el}/libgstrtspclientsink.so'
 
+# Editor-owned plugin dir, used when /usr/lib64/gstreamer-1.0 isn't writable.
+# infra-TAK hardened boxes run this editor as an unprivileged user with no sudo,
+# so the RHEL system plugin dir is off limits and the in-UI install was simply
+# hidden -- leaving RTSP+KLV permanently unavailable there, since rtspclientsink
+# is not packaged for EL9 by anyone and cannot be dnf'd either.
+# GStreamer scans GST_PLUGIN_PATH in addition to its system path, so dropping the
+# vendored .so here and exporting that variable makes it load with no root, no
+# sudoers rule and no broker allowlist change. The dnf packages (gst-launch
+# itself, rtpklvpay) still need a privileged install, but those are ordinary
+# packages any deploy can handle -- the unpackageable piece is the one this
+# solves.
+GST_LOCAL_PLUGIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gst-plugins')
+
+
+def gst_env(base=None):
+    """Environment for GStreamer subprocesses, with our plugin dir on the path.
+
+    Prepends GST_LOCAL_PLUGIN_DIR to any existing GST_PLUGIN_PATH so a
+    system-installed plugin still wins if one is present.
+    """
+    env = dict(base or os.environ)
+    if os.path.isdir(GST_LOCAL_PLUGIN_DIR):
+        existing = env.get('GST_PLUGIN_PATH', '')
+        env['GST_PLUGIN_PATH'] = (GST_LOCAL_PLUGIN_DIR + os.pathsep + existing) if existing else GST_LOCAL_PLUGIN_DIR
+    return env
+
 DEPS_PACKAGES = {
     'apt': {
         'ffmpeg': ['ffmpeg'],
@@ -12958,8 +12992,14 @@ def _detect_gstreamer():
     def _has(el):
         if not insp:
             return False
-        c, _o = _run_quiet([insp, el], timeout=10)
-        return c == 0
+        # Inspect with our plugin dir on the path, or a locally-installed
+        # rtspclientsink reports missing and the UI claims KLV is unavailable
+        # while the push pipeline would actually have worked.
+        try:
+            r = subprocess.run([insp, el], capture_output=True, timeout=10, env=gst_env())
+            return r.returncode == 0
+        except Exception:
+            return False
     klv = _has('rtpklvpay')
     sink = _has('rtspclientsink')
     return {'installed': True, 'version': m.group(1) if m else 'unknown',
@@ -13035,23 +13075,54 @@ def deps_update():
             return jsonify({'success': False, 'error': 'No supported package manager (apt/dnf) found'}), 500
         pkgs = DEPS_PACKAGES[pm][component]
 
-        if pm == 'apt':
-            _run_quiet(['apt-get', 'update', '-qq'], timeout=180, use_sudo=True)
-            env_args = ['env', 'DEBIAN_FRONTEND=noninteractive']
-            code, out = _run_quiet(env_args + ['apt-get', 'install', '-y'] + pkgs,
-                                   timeout=900, use_sudo=True)
-        else:  # dnf
-            code, out = _run_quiet(['dnf', 'install', '-y'] + pkgs, timeout=900, use_sudo=True)
+        # Unprivileged boxes (infra-TAK hardened: console runs as a normal user
+        # with no sudo) can't run the package manager. That used to make the
+        # whole feature unreachable, but only the DISTRO packages actually need
+        # root -- the piece RHEL cannot supply at all, rtspclientsink, installs
+        # fine into our own plugin dir. So when the packages are already present
+        # and only that plugin is missing, carry on and install just the plugin.
+        privileged = (os.geteuid() == 0)
+        if not privileged:
+            try:
+                privileged = subprocess.run(['sudo', '-n', 'true'], capture_output=True, timeout=5).returncode == 0
+            except Exception:
+                privileged = False
 
-        if code != 0:
-            return jsonify({'success': False, 'error': f'Package install failed: {out.strip()[-400:]}'}), 500
+        if privileged:
+            if pm == 'apt':
+                _run_quiet(['apt-get', 'update', '-qq'], timeout=180, use_sudo=True)
+                env_args = ['env', 'DEBIAN_FRONTEND=noninteractive']
+                code, out = _run_quiet(env_args + ['apt-get', 'install', '-y'] + pkgs,
+                                       timeout=900, use_sudo=True)
+            else:  # dnf
+                code, out = _run_quiet(['dnf', 'install', '-y'] + pkgs, timeout=900, use_sudo=True)
+
+            if code != 0:
+                return jsonify({'success': False, 'error': f'Package install failed: {out.strip()[-400:]}'}), 500
+        else:
+            if component != 'gstreamer' or pm != 'dnf' or not shutil.which('gst-launch-1.0'):
+                return jsonify({'success': False, 'error':
+                                'This console runs unprivileged and cannot install system packages. '
+                                'Have the platform install them at deploy time '
+                                f'({pm} install {" ".join(pkgs)}), then run this again to add the '
+                                'rtspclientsink plugin, which is not packaged for RHEL and installs '
+                                'without root.'}), 400
+            # GStreamer is present; fall through to install the plugin only.
 
         # On RHEL, rtspclientsink isn't packaged — fetch the prebuilt .so (keyed by
         # EL major so it matches the box's GStreamer) and drop it in, then verify it
         # actually loads (ABI check) so version drift fails loudly, not silently.
         so_note = ''
         if component == 'gstreamer' and pm == 'dnf':
-            if not shutil.which('gst-inspect-1.0') or _run_quiet(['gst-inspect-1.0', 'rtspclientsink'])[0] != 0:
+            insp_bin = shutil.which('gst-inspect-1.0')
+            already = False
+            if insp_bin:
+                try:
+                    already = subprocess.run([insp_bin, 'rtspclientsink'], capture_output=True,
+                                             timeout=15, env=gst_env()).returncode == 0
+                except Exception:
+                    already = False
+            if not already:
                 el = _el_major() or '9'
                 branch = get_update_channel()
                 rel_path = GST_RTSPSINK_SO_REPO_PATH.format(el=el)
@@ -13066,13 +13137,28 @@ def deps_update():
                         so_bytes = resp.read()
                     if len(so_bytes) < 10000:
                         raise ValueError('downloaded .so too small')
-                    tmp_so = '/tmp/libgstrtspclientsink.so'
-                    with open(tmp_so, 'wb') as f:
-                        f.write(so_bytes)
-                    _run_quiet(['install', '-m', '644', tmp_so,
-                                f'{GST_PLUGIN_DIR_RHEL}/libgstrtspclientsink.so'],
-                               timeout=30, use_sudo=True)
-                    os.remove(tmp_so)
+                    # Prefer the system dir when we can write it (standalone,
+                    # running as root) so every GStreamer process on the box
+                    # picks it up. Otherwise use our own dir, which needs no
+                    # privileges and is on GST_PLUGIN_PATH for the processes we
+                    # spawn -- the difference that makes this work at all on a
+                    # hardened infra-TAK box.
+                    if privileged:
+                        tmp_so = '/tmp/libgstrtspclientsink.so'
+                        with open(tmp_so, 'wb') as f:
+                            f.write(so_bytes)
+                        _run_quiet(['install', '-m', '644', tmp_so,
+                                    f'{GST_PLUGIN_DIR_RHEL}/libgstrtspclientsink.so'],
+                                   timeout=30, use_sudo=True)
+                        os.remove(tmp_so)
+                        so_note = ''
+                    else:
+                        os.makedirs(GST_LOCAL_PLUGIN_DIR, exist_ok=True)
+                        dest = os.path.join(GST_LOCAL_PLUGIN_DIR, 'libgstrtspclientsink.so')
+                        with open(dest, 'wb') as f:
+                            f.write(so_bytes)
+                        os.chmod(dest, 0o644)
+                        so_note = f' (installed to {GST_LOCAL_PLUGIN_DIR}, loaded via GST_PLUGIN_PATH)'
                 except urllib.error.HTTPError as he:
                     if he.code == 404:
                         return jsonify({'success': False,
@@ -13082,7 +13168,11 @@ def deps_update():
                     return jsonify({'success': False,
                                     'error': f'Packages installed, but fetching rtspclientsink.so failed: {e}'}), 500
                 # ABI check: confirm the dropped .so registers against this GStreamer.
-                vcode, _vout = _run_quiet(['gst-inspect-1.0', 'rtspclientsink'], timeout=15)
+                try:
+                    vcode = subprocess.run(['gst-inspect-1.0', 'rtspclientsink'], capture_output=True,
+                                           timeout=15, env=gst_env()).returncode
+                except Exception:
+                    vcode = 1
                 if vcode != 0:
                     gsv = (_detect_gstreamer() or {}).get('version')
                     return jsonify({'success': False,
