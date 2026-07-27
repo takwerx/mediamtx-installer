@@ -2323,7 +2323,7 @@ HTML_TEMPLATE = '''
                 
                 <!-- Netbird link for KLV->CoT aggregator (box-level, set once) -->
                 <div style="margin-top: 20px; padding: 16px; background: rgba(255,255,255,0.03); border: 1px solid #404040; border-radius: 8px;">
-                    <h3 style="margin: 0 0 6px 0; font-size: 15px;">🔗 KLV Aggregator Link (Netbird)</h3>
+                    <h3 style="margin: 0 0 6px 0; font-size: 15px;">🔗 KLV Aggregator Link (Netbird) <span style="padding: 2px 8px; font-size: 11px; font-weight: bold; border-radius: 4px; background: #b45309; color: #fff; vertical-align: middle;">BETA</span></h3>
                     <p class="help-text" style="margin-top: 0;">Connect this box to your CoT aggregator's Netbird network <strong>once</strong>. After that, any source's <strong>KLV → CoT</strong> can target the aggregator over the mesh. Get the management URL + setup key from the aggregator operator.</p>
                     <div id="netbird-status" style="margin: 8px 0; font-size: 13px; color: #999;">Checking Netbird…</div>
                     <div id="netbird-form" style="display: none; margin-top: 10px;">
@@ -2554,7 +2554,9 @@ HTML_TEMPLATE = '''
                             <label style="cursor: pointer; font-weight: bold; display: inline-block;">
                                 <input type="checkbox" id="source-klv-enable" onchange="toggleKlvFields()" style="width: auto; vertical-align: middle; margin-right: 8px;"> Extract KLV &rarr; CoT (send sensor metadata to an aggregator)
                             </label>
+                            <span style="margin-left: 8px; padding: 2px 8px; font-size: 11px; font-weight: bold; border-radius: 4px; background: #b45309; color: #fff; vertical-align: middle;">BETA</span>
                             <p class="help-text">Taps MISB ST0601 KLV from this stream and forwards decoded platform / sensor / frame-center to a CoT aggregator over the mesh. Does not affect video playback. Connect this box to the aggregator's NetBird network first (panel above).</p>
+                            <p class="help-text" style="color: #fbbf24;"><strong>BETA &mdash; not finished end to end.</strong> This side is complete and verified: KLV is extracted and sent, and the SPI point renders in ATAK. The aggregator-side merge that drives the aircraft marker from the KLV position is still outstanding, so the platform track may not move yet. Everything else in this release is unaffected &mdash; enabling or ignoring this changes nothing about video playback.</p>
                         </div>
                         <div id="klv-fields" style="display: none; margin-top: 4px; padding: 14px; background: #1e1e1e; border-radius: 6px; border: 1px solid #404040;">
                             <div class="form-row">
@@ -5140,7 +5142,7 @@ HTML_TEMPLATE = '''
                     data.sources.forEach(source => {
                         const shareMode = shareModeMap[source.name] || 'private';
                         html += '<tr style="border-bottom: 1px solid #4a4a4a;">';
-                        html += '<td style="padding: 12px;"><strong>' + escapeHtml(source.name) + '</strong> <button class="share-mode-badge-ext" data-stream-name="' + escapeHtml(source.name).replace(/"/g, '&quot;') + '" data-mode="' + shareMode + '" style="margin-left:8px;padding:2px 8px;font-size:11px;font-weight:bold;border-radius:4px;border:none;cursor:pointer;background:' + (shareMode === 'public' ? '#16a34a' : '#dc2626') + ';color:#fff;" title="Link sharing: ' + (shareMode === 'public' ? 'Static' : 'Token') + '. Click to toggle (admin).">' + (shareMode === 'public' ? 'Public' : 'Private') + '</button>' + (source.klv && source.klv.to_cot ? ' <span style="padding:2px 8px;font-size:11px;font-weight:bold;border-radius:4px;background:#0e7490;color:#fff;" title="KLV &rarr; CoT to ' + escapeHtml(source.klv.target || '') + '">📡 KLV&rarr;CoT</span>' : '') + '</td>';
+                        html += '<td style="padding: 12px;"><strong>' + escapeHtml(source.name) + '</strong> <button class="share-mode-badge-ext" data-stream-name="' + escapeHtml(source.name).replace(/"/g, '&quot;') + '" data-mode="' + shareMode + '" style="margin-left:8px;padding:2px 8px;font-size:11px;font-weight:bold;border-radius:4px;border:none;cursor:pointer;background:' + (shareMode === 'public' ? '#16a34a' : '#dc2626') + ';color:#fff;" title="Link sharing: ' + (shareMode === 'public' ? 'Static' : 'Token') + '. Click to toggle (admin).">' + (shareMode === 'public' ? 'Public' : 'Private') + '</button>' + (source.klv && source.klv.to_cot ? ' <span style="padding:2px 8px;font-size:11px;font-weight:bold;border-radius:4px;background:#0e7490;color:#fff;" title="KLV &rarr; CoT to ' + escapeHtml(source.klv.target || '') + ' — BETA: our side is verified, the aggregator-side merge that moves the aircraft marker is still outstanding">📡 KLV&rarr;CoT <span style="opacity:.85;font-size:10px;">BETA</span></span>' : '') + '</td>';
                         
                         // Clean URL display: mask passphrase and strip SRT tuning params
                         let displayUrl = source.source_url || '';
