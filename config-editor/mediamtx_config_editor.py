@@ -120,6 +120,7 @@ THEME_CONFIG_FILE = '/opt/mediamtx-webeditor/theme_config.json'
 LOGO_FILE = '/opt/mediamtx-webeditor/agency_logo'
 SHARE_LINKS_FILE = '/opt/mediamtx-webeditor/share_links.json'
 SHARE_MODE_FILE = '/opt/mediamtx-webeditor/share_mode.json'
+PLAYBACK_MODE_FILE = '/opt/mediamtx-webeditor/playback_mode.json'
 # Ku-band simulator scripts (run on receiver to impair incoming stream traffic)
 SIMULATOR_DIR = os.environ.get('MEDIAMTX_SIMULATOR_DIR', '/opt/mediamtx-webeditor/ku-band-simulator')
 
@@ -364,6 +365,62 @@ def save_share_mode(data):
             json.dump(data, f, indent=2)
     except Exception:
         pass
+
+def load_playback_mode():
+    """Which player the Active Streams watch button uses. Server-wide, admin-set.
+
+    'auto'   - try WebRTC, fall back to HLS if it is refused or stalls
+    'hls'    - always HLS (only path that carries audio)
+    'webrtc' - always WebRTC, fail visibly rather than hiding a problem
+    """
+    try:
+        if os.path.exists(PLAYBACK_MODE_FILE):
+            with open(PLAYBACK_MODE_FILE, 'r') as f:
+                mode = (json.load(f) or {}).get('mode', 'auto')
+                if mode in ('auto', 'hls', 'webrtc'):
+                    return mode
+    except Exception:
+        pass
+    return 'auto'
+
+
+def save_playback_mode(mode):
+    """Persist the playback mode."""
+    try:
+        os.makedirs(os.path.dirname(PLAYBACK_MODE_FILE), exist_ok=True)
+        with open(PLAYBACK_MODE_FILE, 'w') as f:
+            json.dump({'mode': mode}, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"ERROR saving playback mode: {e}", flush=True)
+        return False
+
+
+def webrtc_base_url():
+    """Base URL browsers should use for WHEP, or None if WebRTC is unusable.
+
+    Returns None when the protocol is off, so 'auto' silently stays on HLS
+    instead of every viewer paying a failed negotiation first.
+
+    Scheme follows webrtcEncryption: a page served over HTTPS cannot post an
+    SDP offer to a plain-HTTP endpoint (mixed content), so on an HTTPS console
+    with encryption off there is no usable URL and we return None rather than
+    hand back one the browser will refuse.
+    """
+    try:
+        if read_yaml_field('webrtc', 'no') != 'yes':
+            return None
+        enc = str(read_yaml_field('webrtcEncryption', 'no')).lower() in ('yes', 'true')
+        addr = str(read_yaml_field('webrtcAddress', ':8889'))
+        port = addr.split(':')[-1] or '8889'
+        streaming = get_streaming_domain()
+        domain = streaming.get('domain')
+        if not domain:
+            return None
+        return f"{'https' if enc else 'http'}://{domain}:{port}"
+    except Exception:
+        return None
+
 
 def prune_expired_share_links(links):
     """Remove expired links in-place, return pruned dict."""
@@ -3060,7 +3117,26 @@ HTML_TEMPLATE = '''
             <div id="streams" class="tab-content {% if role == 'viewer' %}active{% endif %}">
                 <h2 class="section-title">Active Streams</h2>
                 <p class="help-text">View and monitor all active streams on this MediaMTX server</p>
-                
+
+                {% if role == 'admin' %}
+                <div id="playback-mode-box" style="margin-top: 15px; padding: 15px; background: #2d2d2d; border-radius: 8px; border: 2px solid #444; display: none;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+                        <div>
+                            <strong>Watch button uses:</strong>
+                            <select id="playback-mode-select" onchange="setPlaybackMode(this.value)" style="margin-left: 10px; background: #1a1a1a; border: 1px solid #404040; color: #e5e5e5; padding: 6px 10px; border-radius: 4px;">
+                                <option value="auto">Auto &mdash; WebRTC, fall back to HLS</option>
+                                <option value="hls">HLS only</option>
+                                <option value="webrtc">WebRTC only</option>
+                            </select>
+                            <span id="playback-mode-status" style="margin-left: 10px; font-size: 13px; color: #999;"></span>
+                        </div>
+                    </div>
+                    <p class="help-text" style="margin: 10px 0 0 0;">
+                        <strong>WebRTC is near-instant but carries video only</strong> &mdash; audio is dropped (WebRTC has no AAC), and sources encoded with B-frames are refused outright, which includes most aircraft downlinks. Auto handles that for you: anything WebRTC will not take falls back to HLS automatically. Choose <strong>HLS only</strong> when audio matters.
+                    </p>
+                </div>
+                {% endif %}
+
                 <div id="streams-container" style="margin-top: 20px;">
                     <p style="color: #999;">Loading streams...</p>
                 </div>
@@ -4040,6 +4116,9 @@ HTML_TEMPLATE = '''
         
         // Load streams when streams tab is shown
         document.addEventListener('DOMContentLoaded', () => {
+            // Unconditional: the watch button needs playbackConfig regardless of
+            // which tab opened first, and the mode box hides itself for viewers.
+            loadPlaybackMode();
             const streamsTab = document.getElementById('streams');
             if (streamsTab && streamsTab.classList.contains('active')) {
                 loadStreams();
@@ -5761,8 +5840,63 @@ HTML_TEMPLATE = '''
             })
             .catch(err => console.error('[HLS] Failed to load viewer credential:', err));
         
+        // Player preference + WHEP base, fetched once. Null until loaded, and the
+        // watch button treats null as "HLS", so this never blocks playback.
+        var playbackConfig = null;
+
+        function loadPlaybackMode() {
+            fetch('/api/playback-mode')
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    playbackConfig = d;
+                    var box = document.getElementById('playback-mode-box');
+                    var sel = document.getElementById('playback-mode-select');
+                    var status = document.getElementById('playback-mode-status');
+                    if (!box || !sel) return;
+                    box.style.display = 'block';
+                    sel.value = d.mode || 'auto';
+                    if (!d.webrtc_available) {
+                        sel.value = 'hls';
+                        sel.disabled = true;
+                        if (status) {
+                            status.textContent = 'WebRTC unavailable — enable it in Protocols first';
+                            status.style.color = '#fbbf24';
+                        }
+                    } else if (status) {
+                        status.textContent = '';
+                    }
+                })
+                .catch(function() { playbackConfig = { mode: 'hls', webrtc_base: null }; });
+        }
+
+        function setPlaybackMode(mode) {
+            var status = document.getElementById('playback-mode-status');
+            fetch('/api/playback-mode', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: mode })
+            })
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    if (d.error) {
+                        if (status) { status.textContent = d.error; status.style.color = '#dc2626'; }
+                        loadPlaybackMode();
+                        return;
+                    }
+                    if (playbackConfig) playbackConfig.mode = d.mode;
+                    if (status) {
+                        status.textContent = 'Saved';
+                        status.style.color = '#4ade80';
+                        setTimeout(function() { status.textContent = ''; }, 2000);
+                    }
+                })
+                .catch(function(e) {
+                    if (status) { status.textContent = 'Failed to save'; status.style.color = '#dc2626'; }
+                });
+        }
+
         function watchStream(streamUrl) {
-            console.log('[HLS] watchStream called with URL:', streamUrl);
+            console.log('[Watch] watchStream called with URL:', streamUrl);
 
             // Proxied mode: /hls-proxy/ URLs are routed by Caddy to MediaMTX on localhost.
             // MediaMTX still enforces per-path read auth on proxied requests, so the
@@ -5787,7 +5921,14 @@ HTML_TEMPLATE = '''
             const urlParts = absoluteUrl.split('/');
             const streamName = urlParts.length >= 2 ? urlParts[urlParts.length - 2] : 'stream';
 
-            console.log('[HLS] Resolved URL:', absoluteUrl, '| proxied:', isProxied);
+            // playbackConfig is loaded once at page load; default to HLS so a
+            // failed/absent fetch can never take the watch button offline.
+            const playbackMode = (playbackConfig && playbackConfig.mode) || 'hls';
+            const whepUrl = (playbackConfig && playbackConfig.webrtc_base)
+                ? playbackConfig.webrtc_base + '/' + streamName + '/whep'
+                : '';
+
+            console.log('[Watch] Resolved URL:', absoluteUrl, '| proxied:', isProxied, '| mode:', playbackMode);
 
             // Open chromeless popup
             const width = 1280;
@@ -5829,34 +5970,111 @@ HTML_TEMPLATE = '''
                                     try { window.__streamViewerHls.destroy(); } catch (e) {}
                                     window.__streamViewerHls = null;
                                 }
+                                if (window.__streamViewerPc) {
+                                    try { window.__streamViewerPc.close(); } catch (e) {}
+                                    window.__streamViewerPc = null;
+                                }
                                 var video = document.getElementById('player');
                                 var streamUrl = '${absoluteUrl}';
                                 var useAuth = ${useAuth};
                                 var username = '${username}';
                                 var password = '${password}';
+                                var whepUrl = '${whepUrl}';
+                                var playbackMode = '${playbackMode}';
 
-                                if (Hls.isSupported()) {
-                                    var hlsConfig = {{ hls_tuning|safe }};
-                                    if (useAuth) {
-                                        hlsConfig.xhrSetup = function(xhr, url) {
-                                            xhr.setRequestHeader('Authorization', 'Basic ' + btoa(username + ':' + password));
-                                        };
+                                function startHls() {
+                                    if (Hls.isSupported()) {
+                                        var hlsConfig = {{ hls_tuning|safe }};
+                                        if (useAuth) {
+                                            hlsConfig.xhrSetup = function(xhr, url) {
+                                                xhr.setRequestHeader('Authorization', 'Basic ' + btoa(username + ':' + password));
+                                            };
+                                        }
+                                        var hls = new Hls(hlsConfig);
+                                        window.__streamViewerHls = hls;
+                                        hls.loadSource(streamUrl);
+                                        hls.attachMedia(video);
+                                        hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                                            video.play().catch(function(e) { console.log('Autoplay blocked:', e); });
+                                        });
+                                        hls.on(Hls.Events.ERROR, function(event, data) {
+                                            console.error('HLS error:', data);
+                                        });
+                                    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                                        video.src = streamUrl;
+                                        video.addEventListener('loadedmetadata', function() {
+                                            video.play().catch(function(e) { console.log('Autoplay blocked:', e); });
+                                        });
                                     }
-                                    var hls = new Hls(hlsConfig);
-                                    window.__streamViewerHls = hls;
-                                    hls.loadSource(streamUrl);
-                                    hls.attachMedia(video);
-                                    hls.on(Hls.Events.MANIFEST_PARSED, function() {
-                                        video.play().catch(function(e) { console.log('Autoplay blocked:', e); });
+                                }
+
+                                // Minimal WHEP client. MediaMTX accepts an SDP offer by POST
+                                // and answers with SDP; no library needed, which keeps this
+                                // airgap-safe like the vendored hls.js.
+                                function startWebRTC(onFail) {
+                                    var settled = false;
+                                    function fail(why) {
+                                        if (settled) return;
+                                        settled = true;
+                                        console.log('[WebRTC] falling back:', why);
+                                        try { if (window.__streamViewerPc) window.__streamViewerPc.close(); } catch (e) {}
+                                        window.__streamViewerPc = null;
+                                        video.srcObject = null;
+                                        onFail();
+                                    }
+                                    try {
+                                        var pc = new RTCPeerConnection({ iceServers: [] });
+                                        window.__streamViewerPc = pc;
+                                        var ms = new MediaStream();
+                                        pc.addTransceiver('video', { direction: 'recvonly' });
+                                        pc.addTransceiver('audio', { direction: 'recvonly' });
+                                        pc.ontrack = function(ev) {
+                                            ms.addTrack(ev.track);
+                                            video.srcObject = ms;
+                                            video.play().catch(function(e) { console.log('Autoplay blocked:', e); });
+                                        };
+                                        pc.onconnectionstatechange = function() {
+                                            if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+                                                fail('connection ' + pc.connectionState);
+                                            }
+                                        };
+                                        // MediaMTX accepts the offer and only then closes the
+                                        // session on an incompatible stream (B-frames), so a
+                                        // 2xx is not proof of playback. Require actual frames.
+                                        setTimeout(function() {
+                                            if (settled) return;
+                                            if (!video.videoWidth) fail('no video within 6s');
+                                            else settled = true;
+                                        }, 6000);
+                                        pc.createOffer().then(function(offer) {
+                                            return pc.setLocalDescription(offer).then(function() { return offer; });
+                                        }).then(function(offer) {
+                                            return fetch(whepUrl, {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/sdp' },
+                                                body: offer.sdp
+                                            });
+                                        }).then(function(res) {
+                                            if (!res.ok) throw new Error('WHEP HTTP ' + res.status);
+                                            return res.text();
+                                        }).then(function(answer) {
+                                            return pc.setRemoteDescription({ type: 'answer', sdp: answer });
+                                        }).catch(function(e) { fail(e.message || String(e)); });
+                                    } catch (e) {
+                                        fail(e.message || String(e));
+                                    }
+                                }
+
+                                if (playbackMode === 'hls' || !whepUrl) {
+                                    startHls();
+                                } else if (playbackMode === 'webrtc') {
+                                    // Explicit choice: surface the failure instead of masking it
+                                    startWebRTC(function() {
+                                        document.title = 'WebRTC failed - ${streamName}';
+                                        console.error('[WebRTC] failed and mode is webrtc-only; not falling back');
                                     });
-                                    hls.on(Hls.Events.ERROR, function(event, data) {
-                                        console.error('HLS error:', data);
-                                    });
-                                } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                                    video.src = streamUrl;
-                                    video.addEventListener('loadedmetadata', function() {
-                                        video.play().catch(function(e) { console.log('Autoplay blocked:', e); });
-                                    });
+                                } else {
+                                    startWebRTC(startHls);
                                 }
                             })();
                         <\/script>
@@ -13832,6 +14050,36 @@ def api_share_mode_set():
         return jsonify({'ok': True, 'stream': stream, 'mode': mode})
     except Exception as e:
         return jsonify({'error': str(e)[:200]}), 500
+
+@app.route('/api/playback-mode')
+@login_required
+def api_playback_mode_get():
+    """Current player preference plus whether WebRTC is actually usable."""
+    base = webrtc_base_url()
+    return jsonify({
+        'mode': load_playback_mode(),
+        'webrtc_base': base,
+        'webrtc_available': bool(base),
+    })
+
+
+@app.route('/api/playback-mode', methods=['POST'])
+@admin_required
+def api_playback_mode_set():
+    """Set the player preference (admin only)."""
+    try:
+        data = request.get_json() or {}
+        mode = (data.get('mode') or '').strip().lower()
+        if mode not in ('auto', 'hls', 'webrtc'):
+            return jsonify({'error': 'Mode must be auto, hls or webrtc'}), 400
+        if mode != 'hls' and not webrtc_base_url():
+            return jsonify({'error': 'WebRTC is not usable on this server. Enable it in Protocols first (and set Encryption to Yes if this console is served over HTTPS).'}), 400
+        if not save_playback_mode(mode):
+            return jsonify({'error': 'Failed to save'}), 500
+        return jsonify({'ok': True, 'mode': mode})
+    except Exception as e:
+        return jsonify({'error': str(e)[:200]}), 500
+
 
 @app.route('/api/share-links')
 @login_required
