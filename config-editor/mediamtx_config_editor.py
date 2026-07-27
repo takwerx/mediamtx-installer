@@ -6021,8 +6021,16 @@ HTML_TEMPLATE = '''
                                         pc.addTransceiver('video', { direction: 'recvonly' });
                                         pc.addTransceiver('audio', { direction: 'recvonly' });
                                         pc.ontrack = function(ev) {
-                                            ms.addTrack(ev.track);
-                                            video.srcObject = ms;
+                                            // iOS Safari renders a black frame if srcObject is
+                                            // reassigned as tracks arrive; it wants the stream
+                                            // the negotiation produced, set once. Fall back to
+                                            // assembling one only when the browser gives none.
+                                            if (ev.streams && ev.streams[0]) {
+                                                if (video.srcObject !== ev.streams[0]) video.srcObject = ev.streams[0];
+                                            } else {
+                                                ms.addTrack(ev.track);
+                                                if (video.srcObject !== ms) video.srcObject = ms;
+                                            }
                                             video.play().catch(function(e) { console.log('Autoplay blocked:', e); });
                                         };
                                         pc.onconnectionstatechange = function() {
@@ -14009,7 +14017,7 @@ pc=new RTCPeerConnection({{iceServers:[]}});
 var ms=new MediaStream();
 pc.addTransceiver("video",{{direction:"recvonly"}});
 pc.addTransceiver("audio",{{direction:"recvonly"}});
-pc.ontrack=function(ev){{ms.addTrack(ev.track);video.srcObject=ms;err.style.display="none";video.play().catch(function(){{}});}};
+pc.ontrack=function(ev){{if(ev.streams&&ev.streams[0]){{if(video.srcObject!==ev.streams[0])video.srcObject=ev.streams[0];}}else{{ms.addTrack(ev.track);if(video.srcObject!==ms)video.srcObject=ms;}}err.style.display="none";video.play().catch(function(){{}});}};
 pc.onconnectionstatechange=function(){{if(pc&&(pc.connectionState==="failed"||pc.connectionState==="closed"))fail("connection "+pc.connectionState);}};
 setTimeout(function(){{if(done)return;if(!video.videoWidth)fail("no video within 6s");else done=true;}},6000);
 pc.createOffer().then(function(o){{return pc.setLocalDescription(o).then(function(){{return o;}});}})
