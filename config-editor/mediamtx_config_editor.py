@@ -311,11 +311,18 @@ def hls_player_tuning_js():
     except Exception:
         variant = 'mpegts'
     if variant == 'lowLatency':
-        # Sync off the playlist's PART-HOLD-BACK; 3 segments is hls.js's floor
-        # for ordinary playlists and its fallback when parts are unavailable.
+        # liveSyncDurationCount is deliberately ABSENT here. hls.js only honours
+        # the playlist's PART-HOLD-BACK when the user has set neither
+        # liveSyncDuration nor liveSyncDurationCount; setting either makes it
+        # use liveSyncDurationCount * EXT-X-TARGETDURATION instead and ignore
+        # parts entirely. That is a trap, because TARGETDURATION follows the
+        # source's keyframe interval, not hlsSegmentDuration -- MediaMTX can
+        # only cut a segment on a keyframe. A drone sending a keyframe every 2s
+        # yields TARGETDURATION:2 no matter that hlsSegmentDuration is 500ms, so
+        # liveSyncDurationCount:3 parked the player 6s behind live while the
+        # server was offering PART-HOLD-BACK of 0.66s.
         return ('{enableWorker:true,lowLatencyMode:true,backBufferLength:10,'
                 'maxBufferLength:10,maxMaxBufferLength:30,'
-                'liveSyncDurationCount:3,liveMaxLatencyDurationCount:5,'
                 'liveDurationInfinity:true}')
     return ('{enableWorker:true,lowLatencyMode:false,backBufferLength:30,'
             'maxBufferLength:30,maxMaxBufferLength:60,'
