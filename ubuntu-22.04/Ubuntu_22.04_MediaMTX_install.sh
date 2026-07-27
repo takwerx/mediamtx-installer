@@ -504,7 +504,7 @@ hlsMuxerCloseAfter: 60s
 # Enable publishing and reading streams with the WebRTC protocol.
 webrtc: no
 # Address of the WebRTC HTTP listener.
-webrtcAddress: :8889
+webrtcAddress: 127.0.0.1:8889
 # Enable TLS/HTTPS on the WebRTC server.
 webrtcEncryption: no
 # Path to the server key.

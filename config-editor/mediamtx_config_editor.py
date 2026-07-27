@@ -11151,14 +11151,38 @@ def toggle_protocol():
         
         value = 'yes' if enabled else 'no'
         subprocess.run(['sed', '-i', f's/^{protocol}: .*/{protocol}: {value}/', CONFIG_FILE], check=True)
-        
+
+        # Turning WebRTC on also pins its signalling to loopback. Installs made
+        # before WebRTC was exposed still carry `webrtcAddress: :8889` from the
+        # old template, and left as-is the listener would come up on every
+        # interface. That is the token-bypass case: MediaMTX has no concept of
+        # our share tokens, so a reachable 8889 lets anyone who knows a stream
+        # name negotiate directly. Playback is unaffected - the console proxies
+        # WHEP over loopback either way.
+        if protocol == 'webrtc' and enabled:
+            try:
+                current = str(read_yaml_field('webrtcAddress', ':8889') or ':8889')
+                port = current.rsplit(':', 1)[-1] or '8889'
+                if not current.startswith('127.0.0.1'):
+                    subprocess.run(['sed', '-i', f's/^webrtcAddress: .*/webrtcAddress: 127.0.0.1:{port}/', CONFIG_FILE], check=True)
+                    print(f"✓ WebRTC signalling bound to 127.0.0.1:{port} (was {current})", flush=True)
+            except Exception as e:
+                print(f"Warning: could not pin webrtcAddress to loopback: {e}", flush=True)
+
         # Auto-manage UFW for protocol ports
         protocol_ports = {
             'rtsp': [('8554', 'tcp')],
             'rtmp': [('1935', 'tcp')],
             'hls': [('8888', 'tcp')],
             'srt': [('8890', 'udp')],
-            'webrtc': [('8889', 'tcp'), ('8189', 'udp')],
+            # 8189/udp only. WHEP signalling is proxied via /whep/<stream> and
+            # /shared/<token>/whep, so 8889 is reached over loopback and must
+            # NOT be published: MediaMTX knows nothing about share tokens, so a
+            # public 8889 lets anyone who guesses a stream name negotiate a
+            # session directly and read it, making the token check decorative.
+            # 8189 carries media only and is safe - no media flows without a
+            # negotiated session, and negotiating requires passing the proxy.
+            'webrtc': [('8189', 'udp')],
         }
         
         if protocol in protocol_ports:
