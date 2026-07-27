@@ -1830,7 +1830,19 @@ HTML_TEMPLATE = '''
                                 </label>
                             </div>
                         </div>
+
+                        <div style="padding: 15px; background: #1a1a1a; border-radius: 6px;">
+                            <div style="display: flex; align-items: center; justify-content: space-between;">
+                                <strong>WebRTC</strong>
+                                <label class="switch">
+                                    <input type="checkbox" id="protocol-webrtc-toggle" onchange="toggleProtocol('webrtc')">
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <p class="help-text" style="margin: 8px 0 0 0;">Sub-second browser viewing. Video only &mdash; audio and KLV are not carried over WebRTC, so ATAK and CoT keep using RTSP/SRT.</p>
+                        </div>
                     </div>
+                    <p class="help-text" style="margin-top: 15px;">Opens 8889/tcp (signalling) and 8189/udp (media). On a cloud box behind NAT, also set <strong>webrtcAdditionalHosts</strong> to the public IP in Advanced YAML, or viewers will be handed the private address and fail to connect.</p>
                 </div>
                 
                 <form method="POST" action="/save_protocols">
@@ -7416,6 +7428,8 @@ HTML_TEMPLATE = '''
                     document.getElementById('protocol-hls-toggle').checked = data.hls;
                     document.getElementById('protocol-srt-toggle').checked = data.srt;
                     document.getElementById('protocol-rtmp-toggle').checked = data.rtmp;
+                    const webrtcToggle = document.getElementById('protocol-webrtc-toggle');
+                    if (webrtcToggle) webrtcToggle.checked = data.webrtc;
                 });
         }
         
@@ -10271,9 +10285,13 @@ def get_stream_urls():
     urls = {
         'rtsp': f'rtsp://{domain}:8554/teststream',
         'srt': f'srt://{domain}:8890?streamid=read:teststream',
-        'hls': '/hls-proxy/teststream/index.m3u8' if is_hls_localhost_bound() else f'{protocol}://{domain}:8888/teststream/index.m3u8'
+        'hls': '/hls-proxy/teststream/index.m3u8' if is_hls_localhost_bound() else f'{protocol}://{domain}:8888/teststream/index.m3u8',
+        # Browser-only, video without audio/KLV. MediaMTX serves its own player at
+        # this path and the WHEP endpoint at <path>/whep. Only surfaced when the
+        # protocol is actually enabled, so the UI never shows a dead link.
+        'webrtc': f'{protocol}://{domain}:8889/teststream' if read_yaml_field('webrtc', 'no') == 'yes' else None
     }
-    
+
     return jsonify(urls)
 
 
@@ -10668,6 +10686,7 @@ def toggle_protocol():
             'rtmp': [('1935', 'tcp')],
             'hls': [('8888', 'tcp')],
             'srt': [('8890', 'udp')],
+            'webrtc': [('8889', 'tcp'), ('8189', 'udp')],
         }
         
         if protocol in protocol_ports:
