@@ -2070,7 +2070,48 @@ HTML_TEMPLATE = '''
                     <div class="alert alert-info">
                         <strong>💡 Tip:</strong> Use the same passphrase for both, or different ones for publish vs. read. Passphrase must be 10-79 characters. After saving, MediaMTX will automatically restart.
                     </div>
-                    
+
+                    <h3 style="margin-top: 30px;">WebRTC Settings</h3>
+                    <div class="alert alert-info" style="margin-bottom: 20px;">
+                        <strong>🌐 Browser viewing.</strong> WebRTC carries <strong>video only</strong> &mdash; audio and KLV metadata are not transported. ATAK and the KLV&rarr;CoT forwarder must keep using RTSP or SRT.
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>WebRTC Port</label>
+                            <input type="number" name="webrtcAddress" value="{{ config.get('webrtcAddress', ':8889').split(':')[1] if ':' in config.get('webrtcAddress', ':8889') else '8889' }}" placeholder="8889">
+                            <p class="help-text">HTTP port for signalling (WHEP). Media flows over UDP 8189.</p>
+                        </div>
+
+                        <div class="form-group">
+                            <label>Encryption</label>
+                            <select name="webrtcEncryption">
+                                <option value="no" {% if config.get('webrtcEncryption', 'no') in ['no', False] %}selected{% endif %}>No (http://)</option>
+                                <option value="yes" {% if config.get('webrtcEncryption') in ['yes', True] %}selected{% endif %}>Yes (https://)</option>
+                            </select>
+                            <p class="help-text" style="margin-top: 8px; margin-bottom: 0;">
+                                <strong>Required if your console is served over HTTPS</strong> &mdash; a secure page cannot signal to a plain-HTTP WebRTC endpoint, and the browser blocks it as mixed content. Alternatively let Caddy reverse-proxy <code>/webrtc/*</code> and leave this off.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Additional Hosts (public IP / hostname)</label>
+                        <input type="text" name="webrtcAdditionalHosts" value="{{ config.get('webrtcAdditionalHosts', []) | join(', ') if config.get('webrtcAdditionalHosts') else '' }}" placeholder="e.g. 203.0.113.10, stream.example.com">
+                        <p class="help-text">Comma-separated. <strong>Required on cloud boxes behind NAT (AWS, Azure, GCP).</strong> Without it ICE advertises the machine's private address and every external viewer fails to connect. Leave blank on a box with a directly-attached public IP.</p>
+                    </div>
+
+                    {% if config.get('webrtcServerCert') and config.get('webrtcServerCert', '').strip() %}
+                    <div class="alert alert-success" style="padding-left: 15px; white-space: nowrap; overflow-x: auto;">
+                        <strong>✓ Certificates Configured:</strong><br>
+                        <small>Cert: {{ config.webrtcServerCert }}</small>
+                    </div>
+                    {% else %}
+                    <div class="alert alert-warning">
+                        <strong>⚠ Certificates Not Configured:</strong> Needed only if WebRTC Encryption is set to Yes. Run the Caddy installer to configure Let's Encrypt certificates, or proxy <code>/webrtc/*</code> through Caddy instead.
+                    </div>
+                    {% endif %}
+
                     <button type="submit" class="btn btn-primary">Save Protocol Settings & Restart MediaMTX</button>
                 </form>
             </div>
@@ -9289,6 +9330,9 @@ def save_protocols():
         srt_port = request.form.get('srtAddress')
         srt_publish = request.form.get('srtPublishPassphrase', '').strip()
         srt_read = request.form.get('srtReadPassphrase', '').strip()
+        webrtc_port = request.form.get('webrtcAddress')
+        webrtc_encryption = request.form.get('webrtcEncryption')
+        webrtc_hosts = request.form.get('webrtcAdditionalHosts', '').strip()
         
         # Validate RTSP encryption
         if rtsp_encryption in ['optional', 'strict']:
@@ -9303,6 +9347,20 @@ def save_protocols():
             if not os.path.exists(cert_key) or not os.path.exists(cert_file):
                 return redirect(f'/?message=Cannot enable RTSP encryption: Certificate files not found!&message_type=danger&tab={tab}')
         
+        # Validate WebRTC encryption the same way as RTSP: refuse to turn it on
+        # without usable certs, otherwise MediaMTX fails to start and the box
+        # loses every protocol, not just WebRTC.
+        if webrtc_encryption == 'yes':
+            config = load_config()
+            wrtc_key = config.get('webrtcServerKey', '').strip()
+            wrtc_cert = config.get('webrtcServerCert', '').strip()
+
+            if not wrtc_key or not wrtc_cert:
+                return redirect(f'/?message=Cannot enable WebRTC encryption: Certificate paths not configured!&message_type=danger&tab={tab}')
+
+            if not os.path.exists(wrtc_key) or not os.path.exists(wrtc_cert):
+                return redirect(f'/?message=Cannot enable WebRTC encryption: Certificate files not found!&message_type=danger&tab={tab}')
+
         # Validate SRT passphrases
         if srt_publish and (len(srt_publish) < 10 or len(srt_publish) > 79):
             return redirect(f'/?message=SRT Publish Passphrase must be 10-79 characters&message_type=danger&tab={tab}')
@@ -9338,6 +9396,24 @@ def save_protocols():
             subprocess.run(['sed', '-i', f's/^hlsAddress: .*/hlsAddress: :{hls_port}/', CONFIG_FILE], check=True)
         if srt_port:
             subprocess.run(['sed', '-i', f's/^srtAddress: .*/srtAddress: :{srt_port}/', CONFIG_FILE], check=True)
+        if webrtc_port:
+            subprocess.run(['sed', '-i', f's/^webrtcAddress: .*/webrtcAddress: :{webrtc_port}/', CONFIG_FILE], check=True)
+        # webrtcEncryption is a real YAML bool here, unlike rtsp/rtmp which take
+        # quoted "no"/"optional"/"strict" strings.
+        if webrtc_encryption in ['yes', 'no']:
+            subprocess.run(['sed', '-i', f's/^webrtcEncryption: .*/webrtcEncryption: {webrtc_encryption}/', CONFIG_FILE], check=True)
+        # webrtcAdditionalHosts is a YAML list. Sanitise before it reaches sed:
+        # only hostname/IP characters survive, so a stray quote or slash can't
+        # break out of the expression and corrupt the config.
+        if webrtc_hosts is not None:
+            cleaned = [re.sub(r'[^A-Za-z0-9._:-]', '', h.strip()) for h in webrtc_hosts.split(',')]
+            cleaned = [h for h in cleaned if h]
+            host_list = '[' + ', '.join(f"'{h}'" for h in cleaned) + ']'
+            result = subprocess.run(['grep', '-c', '^webrtcAdditionalHosts:', CONFIG_FILE], capture_output=True, text=True)
+            if result.stdout.strip() != '0':
+                subprocess.run(['sed', '-i', f's/^webrtcAdditionalHosts: .*/webrtcAdditionalHosts: {host_list}/', CONFIG_FILE], check=True)
+            elif cleaned:
+                subprocess.run(['sed', '-i', f'/^webrtcAddress:/a webrtcAdditionalHosts: {host_list}', CONFIG_FILE], check=True)
         
         # Handle SRT passphrases - use sed to update, insert if line doesn't exist
         if srt_publish:
