@@ -14252,7 +14252,14 @@ def api_share_links_generate():
             'ttl_label': ttl_label,
         }
         save_share_links(links)
-        share_url = f'{request.scheme}://{request.host}/shared/{token}'
+        # Caddy terminates TLS and proxies to us over plain HTTP on loopback, so
+        # request.scheme is always 'http' and share links came out as http://
+        # links. Caddy 308s them back to https, so playback survives, but the
+        # link looks insecure when copied to another agency and anything that
+        # does not follow redirects lands on a non-secure origin - where Safari
+        # refuses WebRTC outright. Trust the proxy's X-Forwarded-Proto instead.
+        scheme = request.headers.get('X-Forwarded-Proto', request.scheme).split(',')[0].strip()
+        share_url = f'{scheme}://{request.host}/shared/{token}'
         return jsonify({'ok': True, 'token': token, 'url': share_url, 'stream': stream, 'ttl_label': ttl_label})
     except Exception as e:
         return jsonify({'error': str(e)[:200]}), 500
