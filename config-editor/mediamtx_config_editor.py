@@ -8196,6 +8196,31 @@ def read_yaml_users():
         traceback.print_exc()
         return []
 
+def set_listen_address(field, port):
+    """Change a listener's port while preserving whatever host it is bound to.
+
+    save_protocols used to rebuild these lines from the port alone, writing
+    `hlsAddress: :8888` and silently discarding a deliberate `127.0.0.1`
+    binding. On infra-TAK that binding is load-bearing: HLS listens on loopback
+    so the only route to it is through this app, which is what enforces share
+    tokens. Flattening it published the port, so every stream became readable
+    by anyone who knew its name, with no token -- triggered by a Protocols save
+    that had nothing to do with HLS. It also flipped is_hls_localhost_bound(),
+    so the console stopped using /hls-proxy/ and started handing out direct
+    :8888 URLs.
+    """
+    try:
+        current = str(read_yaml_field(field, '') or '')
+        host = current.rsplit(':', 1)[0] if ':' in current else ''
+        if '/' in host:
+            host = ''
+        subprocess.run(['sed', '-i', f's/^{field}: .*/{field}: {host}:{port}/', CONFIG_FILE], check=True)
+        return True
+    except Exception as e:
+        print(f"ERROR in set_listen_address({field}): {e}", flush=True)
+        return False
+
+
 def save_config_sed(field, value):
     """Save a single field using sed - avoids YAML corruption"""
     try:
@@ -9713,7 +9738,7 @@ def save_protocols():
         
         # Use sed to update protocol settings directly - only write values that exist in the form
         if rtsp_port:
-            subprocess.run(['sed', '-i', f's/^rtspAddress: .*/rtspAddress: :{rtsp_port}/', CONFIG_FILE], check=True)
+            set_listen_address('rtspAddress', rtsp_port)
         # RTSP transport protocols (list format)
         if rtsp_transports:
             # Convert comma-separated to YAML list format: [tcp] or [udp, tcp] or [udp, multicast, tcp]
@@ -9728,19 +9753,19 @@ def save_protocols():
         if rtsp_encryption and rtsp_encryption in ['no', 'optional', 'strict']:
             subprocess.run(['sed', '-i', f's/^rtspEncryption: .*/rtspEncryption: "{rtsp_encryption}"/', CONFIG_FILE], check=True)
         if rtsps_port:
-            subprocess.run(['sed', '-i', f's/^rtspsAddress: .*/rtspsAddress: :{rtsps_port}/', CONFIG_FILE], check=True)
+            set_listen_address('rtspsAddress', rtsps_port)
         if rtmp_port:
-            subprocess.run(['sed', '-i', f's/^rtmpAddress: .*/rtmpAddress: :{rtmp_port}/', CONFIG_FILE], check=True)
+            set_listen_address('rtmpAddress', rtmp_port)
         if rtmps_port:
-            subprocess.run(['sed', '-i', f's/^rtmpsAddress: .*/rtmpsAddress: :{rtmps_port}/', CONFIG_FILE], check=True)
+            set_listen_address('rtmpsAddress', rtmps_port)
         if rtmp_encryption and rtmp_encryption in ['no', 'optional', 'strict']:
             subprocess.run(['sed', '-i', f's/^rtmpEncryption: .*/rtmpEncryption: "{rtmp_encryption}"/', CONFIG_FILE], check=True)
         if hls_port:
-            subprocess.run(['sed', '-i', f's/^hlsAddress: .*/hlsAddress: :{hls_port}/', CONFIG_FILE], check=True)
+            set_listen_address('hlsAddress', hls_port)
         if srt_port:
-            subprocess.run(['sed', '-i', f's/^srtAddress: .*/srtAddress: :{srt_port}/', CONFIG_FILE], check=True)
+            set_listen_address('srtAddress', srt_port)
         if webrtc_port:
-            subprocess.run(['sed', '-i', f's/^webrtcAddress: .*/webrtcAddress: :{webrtc_port}/', CONFIG_FILE], check=True)
+            set_listen_address('webrtcAddress', webrtc_port)
         # webrtcEncryption is a real YAML bool here, unlike rtsp/rtmp which take
         # quoted "no"/"optional"/"strict" strings.
         if webrtc_encryption in ['yes', 'no']:
