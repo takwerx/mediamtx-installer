@@ -178,7 +178,6 @@ systemctl enable --now firewalld
 firewall-cmd --zone=public --permanent --add-port=8554/tcp   # RTSP
 firewall-cmd --zone=public --permanent --add-port=1935/tcp   # RTMP
 firewall-cmd --zone=public --permanent --add-port=8888/tcp   # HLS
-firewall-cmd --zone=public --permanent --add-port=8889/tcp   # WebRTC HTTP
 firewall-cmd --zone=public --permanent --add-port=8189/udp   # WebRTC UDP
 firewall-cmd --zone=public --permanent --add-port=8000/udp   # RTP
 firewall-cmd --zone=public --permanent --add-port=8001/udp   # RTCP
@@ -212,7 +211,6 @@ echo "Ports Opened:"
 echo "  - 8554/tcp  (RTSP)"
 echo "  - 1935/tcp  (RTMP)"
 echo "  - 8888/tcp  (HLS)"
-echo "  - 8889/tcp  (WebRTC HTTP)"
 echo "  - 8189/udp  (WebRTC UDP)"
 echo "  - 8000/udp  (RTP)"
 echo "  - 8001/udp  (RTCP)"

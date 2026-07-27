@@ -103,6 +103,19 @@ fi
 
 chmod 755 "$WEB_EDITOR_DIR/mediamtx_config_editor.py"
 
+# Copy KLV->CoT sidecar (v2.1.0) if present
+if [ -f "./config-editor/klv-to-cot.py" ]; then
+    cp ./config-editor/klv-to-cot.py "$WEB_EDITOR_DIR/"
+    chmod 755 "$WEB_EDITOR_DIR/klv-to-cot.py"
+    echo "✓ KLV->CoT sidecar (klv-to-cot.py) installed"
+elif [ -f "./klv-to-cot.py" ]; then
+    cp ./klv-to-cot.py "$WEB_EDITOR_DIR/"
+    chmod 755 "$WEB_EDITOR_DIR/klv-to-cot.py"
+    echo "✓ KLV->CoT sidecar (klv-to-cot.py) installed"
+else
+    echo "ℹ  No KLV->CoT sidecar found (KLV extraction unavailable until present)"
+fi
+
 # Copy test video file if present
 if [ -f "./config-editor/truck_60.ts" ]; then
     cp ./config-editor/truck_60.ts "$WEB_EDITOR_DIR/test_videos/"
