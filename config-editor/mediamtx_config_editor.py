@@ -3089,13 +3089,19 @@ HTML_TEMPLATE = '''
                 
                 <div style="margin: 15px 0; padding: 15px; background: #1a4d6d; border-left: 4px solid #2196F3; border-radius: 4px;">
                     <p style="margin: 0 0 10px 0; color: #fff; font-size: 14px; line-height: 1.6;">
-                        💡 <strong>Tip:</strong> Test videos loop continuously. Watch all the way through - if you see freezing, 
-                        stuttering, or playback issues, click "Optimize" to create a compatible version. 
+                        💡 <strong>Tip:</strong> Test videos loop continuously. Watch all the way through - if you see freezing,
+                        stuttering, or playback issues, click "Optimize" to create a compatible version.
                         You can then delete the original if needed.
+                    </p>
+                    <p style="margin: 0 0 10px 0; color: #fff; font-size: 14px; line-height: 1.6;">
+                        🌐 <strong>WebRTC:</strong> Optimize also strips B-frames and forces 4:2:0, which WebRTC requires. A source
+                        recorded with B-frames (most High-profile aircraft footage) will play fine over RTSP, SRT and HLS but is
+                        rejected by WebRTC with <em>"doesn't support H264 streams with B-frames"</em>. Optimize it first to test WebRTC.
                     </p>
                     <p style="margin: 0; color: #b3e5fc; font-size: 13px; line-height: 1.5;">
                         ⏱️ <strong>Optimization time:</strong> ~5 minutes per 100MB (varies by server). Only optimize one file at a time.<br>
-                        ⚠️ <strong>Note:</strong> Optimization fixes most encoding issues but cannot repair corrupted frames or damaged video files.
+                        ⚠️ <strong>Note:</strong> Optimization fixes most encoding issues but cannot repair corrupted frames or damaged video files.<br>
+                        ♻️ <strong>Re-optimizing:</strong> delete the existing <code>_optimized.ts</code> file first - the optimizer will not overwrite one that already exists.
                     </p>
                 </div>
                 
@@ -9817,6 +9823,13 @@ def optimize_test_file(filename):
         # Re-encode to H.264/AAC for maximum compatibility
         # Preserve all streams including KLV metadata from drone footage
         # Fix timestamp issues that cause freezing on loop
+        #
+        # -bf 0 is what makes the result playable over WebRTC. The RTP H264
+        # payload format has no way to express B-frame reordering, so MediaMTX
+        # refuses the session outright: "WebRTC doesn't support H264 streams
+        # with B-frames". libx264 emits B-frames by default, so without this
+        # flag "optimizing" actually made a file LESS compatible than the
+        # source (observed: Thomas_Fire_Video 1 B-frame -> optimized 2).
         cmd = [
             'ffmpeg', '-i', input_path,
             '-map', '0',                    # Map all streams (video, audio, data/KLV)
@@ -9824,6 +9837,8 @@ def optimize_test_file(filename):
             '-preset', 'fast',              # Encoding speed
             '-crf', '23',                   # Quality (lower = better, 23 is good)
             '-g', '30',                     # Keyframe every 30 frames (1 sec at 30fps)
+            '-bf', '0',                     # No B-frames - required for WebRTC playback
+            '-pix_fmt', 'yuv420p',          # 4:2:0 chroma - the only format WebRTC carries
             '-c:a', 'aac',                  # AAC audio codec
             '-b:a', '128k',                 # Audio bitrate
             '-c:d', 'copy',                 # Copy data streams (KLV metadata) without re-encoding
