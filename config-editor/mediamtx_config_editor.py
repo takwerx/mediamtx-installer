@@ -2181,7 +2181,7 @@ HTML_TEMPLATE = '''
                         <div class="form-group">
                             <label>Segment Count</label>
                             <input type="number" name="hlsSegmentCount" value="{{ config.get('hlsSegmentCount', 7) }}" min="1" max="20" placeholder="7">
-                            <p class="help-text">Number of segments in the playlist. Higher = more buffer for impaired links. <strong>Recommended:</strong> 3 (LAN), 5-7 (Internet), 7-10 (Satellite).</p>
+                            <p class="help-text">Number of segments in the playlist. Higher = more buffer for impaired links. <strong>Recommended:</strong> 3 (LAN), 5-7 (Internet), 7-10 (Satellite). <strong style="color:#fbbf24;">Low-Latency HLS requires 7 or more</strong> &mdash; below that MediaMTX refuses to start the HLS muxer and playback fails entirely. Segment count doesn't drive Low-Latency delay anyway; Part Duration does.</p>
                         </div>
                         <div class="form-group">
                             <label>Segment Duration</label>
@@ -4011,7 +4011,14 @@ HTML_TEMPLATE = '''
         // HLS Tuning presets
         function applyHlsPreset(preset) {
             const presets = {
-                lan: { hlsVariant: 'lowLatency', hlsSegmentCount: 3, hlsSegmentDuration: '500ms', hlsPartDuration: '200ms', hlsAlwaysRemux: 'no', hlsMuxerCloseAfter: '60s', writeQueueSize: 512 },
+                // 7 segments is a hard MediaMTX requirement for Low-Latency HLS:
+                // below it the muxer is created and instantly destroyed with
+                // "Low-Latency HLS requires at least 7 segments", so HLS dies
+                // completely rather than merely running slow. This preset used to
+                // set 3 and was therefore always broken. Segment count does not
+                // drive LL-HLS latency anyway - the part hold-back (~3x
+                // hlsPartDuration) does - so 7 costs nothing here.
+                lan: { hlsVariant: 'lowLatency', hlsSegmentCount: 7, hlsSegmentDuration: '500ms', hlsPartDuration: '200ms', hlsAlwaysRemux: 'no', hlsMuxerCloseAfter: '60s', writeQueueSize: 512 },
                 internet: { hlsVariant: 'fmp4', hlsSegmentCount: 5, hlsSegmentDuration: '1s', hlsPartDuration: '200ms', hlsAlwaysRemux: 'no', hlsMuxerCloseAfter: '60s', writeQueueSize: 512 },
                 satellite: { hlsVariant: 'mpegts', hlsSegmentCount: 7, hlsSegmentDuration: '3s', hlsPartDuration: '200ms', hlsAlwaysRemux: 'yes', hlsMuxerCloseAfter: '120s', writeQueueSize: 1024 }
             };
@@ -9599,6 +9606,19 @@ def save_hls():
         hls_always_remux = request.form.get('hlsAlwaysRemux', 'no')
         hls_muxer_close_after = request.form.get('hlsMuxerCloseAfter', '60s')
         write_queue_size = request.form.get('writeQueueSize', '512')
+
+        # MediaMTX hard-requires >=7 segments for Low-Latency HLS. Below that the
+        # muxer is created then instantly destroyed ("Low-Latency HLS requires at
+        # least 7 segments") on every request, so HLS stops working entirely
+        # instead of degrading. Nothing surfaces in the UI - the page saves fine
+        # and the player just fails - which makes it read as "LL-HLS is broken"
+        # rather than "this combination is invalid". Refuse it up front.
+        if hls_variant == 'lowLatency':
+            try:
+                if int(hls_segment_count) < 7:
+                    return redirect(f'/?message=Low-Latency HLS requires at least 7 segments (you set {hls_segment_count}). MediaMTX would refuse to start the HLS muxer and playback would fail completely. Raise Segment Count to 7 or more, or pick a different variant.&message_type=danger&tab={tab}')
+            except (TypeError, ValueError):
+                return redirect(f'/?message=Segment Count must be a whole number&message_type=danger&tab={tab}')
 
         fields = {
             'hlsVariant': hls_variant,
