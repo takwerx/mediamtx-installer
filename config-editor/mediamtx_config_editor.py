@@ -2106,9 +2106,13 @@ HTML_TEMPLATE = '''
                         <strong>✓ Certificates Configured:</strong><br>
                         <small>Cert: {{ config.webrtcServerCert }}</small>
                     </div>
+                    {% elif config.get('hlsServerCert') or config.get('rtspServerCert') or config.get('rtmpServerCert') %}
+                    <div class="alert alert-info">
+                        <strong>🔑 Certificate will be reused:</strong> Setting Encryption to Yes adopts the same Let's Encrypt certificate already configured for your other protocols. Nothing to paste.
+                    </div>
                     {% else %}
                     <div class="alert alert-warning">
-                        <strong>⚠ Certificates Not Configured:</strong> Needed only if WebRTC Encryption is set to Yes. Run the Caddy installer to configure Let's Encrypt certificates, or proxy <code>/webrtc/*</code> through Caddy instead.
+                        <strong>⚠ No certificate on this server:</strong> Encryption cannot be enabled until one exists. Run the Caddy installer to configure Let's Encrypt, or proxy <code>/webrtc/*</code> through Caddy and leave encryption off.
                     </div>
                     {% endif %}
 
@@ -7943,6 +7947,83 @@ def save_config_sed(field, value):
         print(f"ERROR in save_config_sed: {e}", flush=True)
         return False
 
+def set_scalar_field(field, value, after_field=None):
+    """Set a top-level scalar field, tolerating the next-line value style.
+
+    The Caddy installer writes cert paths as a continuation line:
+
+        hlsServerCert:
+          /var/lib/caddy/.../stream.example.com.crt
+
+    which is valid YAML but means a naive `sed s/^field: .*/field: v/` would
+    rewrite the key inline and leave the old path orphaned on the line below,
+    corrupting the file. This rewrites the key inline AND drops the orphan.
+    Falls back to inserting after `after_field` when the key is absent (the
+    webrtc cert keys don't exist at all on older boxes). Avoids sed entirely so
+    paths full of slashes need no escaping.
+    """
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            lines = f.readlines()
+
+        out = []
+        i = 0
+        found = False
+        while i < len(lines):
+            line = lines[i]
+            if not found and line.startswith(field + ':'):
+                out.append(f'{field}: {value}\n')
+                found = True
+                i += 1
+                # Swallow a continuation line holding the previous value.
+                if i < len(lines):
+                    nxt = lines[i]
+                    if nxt.strip() and nxt[0] in ' \t' and not nxt.strip().startswith('#'):
+                        i += 1
+                continue
+            out.append(line)
+            i += 1
+
+        if not found:
+            if not after_field:
+                return False
+            out2, inserted = [], False
+            for line in out:
+                out2.append(line)
+                if not inserted and line.startswith(after_field + ':'):
+                    out2.append(f'{field}: {value}\n')
+                    inserted = True
+            if not inserted:
+                return False
+            out = out2
+
+        with open(CONFIG_FILE, 'w') as f:
+            f.writelines(out)
+        return True
+    except Exception as e:
+        print(f"ERROR in set_scalar_field({field}): {e}", flush=True)
+        return False
+
+
+def resolve_existing_cert():
+    """Find a TLS cert/key already configured for any protocol on this box.
+
+    Caddy points every protocol at the same Let's Encrypt pair, so WebRTC can
+    reuse whatever RTSP/HLS/RTMP already has instead of asking the user to
+    hunt down paths. Returns (cert, key) or (None, None).
+    """
+    try:
+        config = load_config() or {}
+    except Exception:
+        return (None, None)
+    for proto in ['webrtc', 'hls', 'rtsp', 'rtmp']:
+        cert = (config.get(f'{proto}ServerCert') or '').strip()
+        key = (config.get(f'{proto}ServerKey') or '').strip()
+        if cert and key and os.path.exists(cert) and os.path.exists(key):
+            return (cert, key)
+    return (None, None)
+
+
 def save_config(config):
     """Save MediaMTX configuration using ruamel.yaml - FIX for user management"""
     try:
@@ -9347,19 +9428,18 @@ def save_protocols():
             if not os.path.exists(cert_key) or not os.path.exists(cert_file):
                 return redirect(f'/?message=Cannot enable RTSP encryption: Certificate files not found!&message_type=danger&tab={tab}')
         
-        # Validate WebRTC encryption the same way as RTSP: refuse to turn it on
-        # without usable certs, otherwise MediaMTX fails to start and the box
-        # loses every protocol, not just WebRTC.
+        # WebRTC encryption: reuse the cert Caddy already configured for the
+        # other protocols rather than making the user paste paths. The webrtc
+        # cert keys are absent entirely on boxes installed before WebRTC was
+        # exposed, so they get inserted after webrtcEncryption. Only refuse if
+        # the box has no usable cert anywhere - enabling it without one makes
+        # MediaMTX fail to start, taking every protocol down, not just WebRTC.
+        webrtc_cert_adopted = None
         if webrtc_encryption == 'yes':
-            config = load_config()
-            wrtc_key = config.get('webrtcServerKey', '').strip()
-            wrtc_cert = config.get('webrtcServerCert', '').strip()
-
-            if not wrtc_key or not wrtc_cert:
-                return redirect(f'/?message=Cannot enable WebRTC encryption: Certificate paths not configured!&message_type=danger&tab={tab}')
-
-            if not os.path.exists(wrtc_key) or not os.path.exists(wrtc_cert):
-                return redirect(f'/?message=Cannot enable WebRTC encryption: Certificate files not found!&message_type=danger&tab={tab}')
+            cert, key = resolve_existing_cert()
+            if not cert:
+                return redirect(f'/?message=Cannot enable WebRTC encryption: no TLS certificate is configured on this server. Run the Caddy installer first.&message_type=danger&tab={tab}')
+            webrtc_cert_adopted = (cert, key)
 
         # Validate SRT passphrases
         if srt_publish and (len(srt_publish) < 10 or len(srt_publish) > 79):
@@ -9402,6 +9482,10 @@ def save_protocols():
         # quoted "no"/"optional"/"strict" strings.
         if webrtc_encryption in ['yes', 'no']:
             subprocess.run(['sed', '-i', f's/^webrtcEncryption: .*/webrtcEncryption: {webrtc_encryption}/', CONFIG_FILE], check=True)
+        if webrtc_cert_adopted:
+            adopted_cert, adopted_key = webrtc_cert_adopted
+            set_scalar_field('webrtcServerCert', adopted_cert, after_field='webrtcEncryption')
+            set_scalar_field('webrtcServerKey', adopted_key, after_field='webrtcEncryption')
         # webrtcAdditionalHosts is a YAML list. Sanitise before it reaches sed:
         # only hostname/IP characters survive, so a stray quote or slash can't
         # break out of the expression and corrupt the config.
