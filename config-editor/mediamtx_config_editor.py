@@ -12920,8 +12920,16 @@ DEPS_PACKAGES = {
     },
     'dnf': {
         'ffmpeg': ['ffmpeg'],
+        # gstreamer1-rtsp-server supplies libgstrtspserver-1.0.so.0, which the
+        # vendored rtspclientsink links against. EL9 packages that LIBRARY but
+        # not the plugin, so without it the .so drops in and then fails to load
+        # with "Opening module failed: libgstrtspserver-1.0.so.0: cannot open
+        # shared object file" -- which reads like a bad build rather than a
+        # missing dependency. Verified on a Rocky 9.8 box: installing this one
+        # package took the plugin from unloadable to working.
         'gstreamer': ['gstreamer1-plugins-good', 'gstreamer1-plugins-bad-free',
-                      'gstreamer1-plugins-bad-freeworld', 'gstreamer1-plugin-libav'],
+                      'gstreamer1-plugins-bad-freeworld', 'gstreamer1-plugin-libav',
+                      'gstreamer1-rtsp-server'],
     },
 }
 
