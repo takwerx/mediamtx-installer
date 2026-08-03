@@ -33,7 +33,7 @@ def add_no_cache_headers(response):
     return response
 
 # Version - used by auto-update checker
-CURRENT_VERSION = "v2.1.1"
+CURRENT_VERSION = "v2.1.2"
 GITHUB_REPO = "takwerx/mediamtx-installer"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/config-editor/mediamtx_config_editor.py"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -7292,7 +7292,11 @@ HTML_TEMPLATE = '''
             note.style.display = 'none';
             if (state === 'none') return;  // up to date / KLV-ready → no action, no button
             var labels = { install: '⬇ Install ' + label, update: '⟳ Update ' + label, klv: '⬇ Install KLV support' };
-            if (canInstall) {
+            // 'klv' means GStreamer is present and only rtspclientsink is missing.
+            // That plugin isn't packaged for RHEL at all, so no deploy can supply
+            // it — but it installs into our own plugin dir with no privileges, so
+            // offer it even on a managed box where everything else is hands-off.
+            if (canInstall || (state === 'klv' && prefix === 'gs')) {
                 btn.textContent = labels[state] || ('Install ' + label);
                 btn.style.display = 'inline-block';
             } else {
@@ -9450,7 +9454,7 @@ def api_add_mediamtx_user():
     
     # Restart MediaMTX
     try:
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+        mtx_restart_checked()
         time.sleep(3)
     except:
         pass
@@ -9530,7 +9534,7 @@ def api_update_mediamtx_user():
     if save_config(config):
         # Restart MediaMTX to apply changes
         try:
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+            mtx_restart_checked()
             time.sleep(3)
         except:
             pass
@@ -9578,7 +9582,7 @@ def api_revoke_mediamtx_user():
     if save_config(config):
         # Restart MediaMTX to apply changes
         try:
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+            mtx_restart_checked()
             time.sleep(3)
         except:
             pass
@@ -9834,7 +9838,7 @@ def save_protocols():
             print(f"WARNING: UFW update failed: {e}", flush=True)
         
         # Restart MediaMTX
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True)
+        mtx_restart_checked()
         time.sleep(3)
         return redirect(f'/?message=Protocol settings saved and MediaMTX restarted successfully!&message_type=success&tab={tab}')
         
@@ -9903,7 +9907,7 @@ def save_hls():
         else:
             subprocess.run(['sed', '-i', f'/^paths:/i pathDefaults:\\n  rtspDemuxMpegts: {demux_value}\\n', CONFIG_FILE], check=True)
 
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True)
+        mtx_restart_checked()
         time.sleep(3)
         return redirect(f'/?message=HLS settings saved and MediaMTX restarted!&message_type=success&tab={tab}')
 
@@ -9998,7 +10002,7 @@ def restore_backup(backup_name):
         subprocess.run(['cp', backup_file, CONFIG_FILE], check=True)
         
         # Restart service
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True)
+        mtx_restart_checked()
         
         return redirect(f'/?message=Backup restored and service restarted&message_type=success&tab={tab}')
     except Exception as e:
@@ -10563,10 +10567,14 @@ def start_remote_push():
             except Exception:
                 pass
         remote_push_log_handle = open(REMOTE_PUSH_LOG_FILE, 'wb')
+        # gst_env() puts our editor-owned plugin dir on GST_PLUGIN_PATH so a
+        # locally-installed rtspclientsink is found. Harmless for the FFmpeg
+        # branch, which ignores the variable.
         remote_push_process = subprocess.Popen(
             cmd,
             stdout=remote_push_log_handle,
-            stderr=remote_push_log_handle
+            stderr=remote_push_log_handle,
+            env=gst_env()
         )
         remote_push_target = {
             'filename': filename,
@@ -10856,7 +10864,7 @@ def toggle_public_access():
                 del group_metadata['any']
                 save_group_metadata(group_metadata)
             
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+            mtx_restart_checked()
             return jsonify({'success': True, 'enabled': False, 'message': 'Public access disabled'})
             
         else:
@@ -10895,7 +10903,7 @@ def toggle_public_access():
             group_metadata['any'] = 'PUBLIC'
             save_group_metadata(group_metadata)
             
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+            mtx_restart_checked()
             return jsonify({'success': True, 'enabled': True, 'message': 'Public access enabled'})
             
     except Exception as e:
@@ -10967,7 +10975,7 @@ def toggle_teststream_viewer():
                         any(p.get('path') == 'teststream' for p in u.get('permissions', [])))]
             
             save_config(config)
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+            mtx_restart_checked()
             
             return jsonify({'success': True, 'enabled': False, 'message': 'Test stream viewer disabled'})
         else:
@@ -10989,7 +10997,7 @@ def toggle_teststream_viewer():
             # Don't add to group_names.json - keep it hidden!
             
             save_config(config)
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+            mtx_restart_checked()
             
             return jsonify({'success': True, 'enabled': True, 'message': 'Test stream viewer enabled'})
             
@@ -11105,7 +11113,7 @@ def toggle_srt_passphrase():
         if not save_config(config):
             return jsonify({'success': False, 'error': 'Failed to save config'}), 500
             
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+        mtx_restart_checked()
         
         return jsonify({'success': True, 'enabled': enabled, 'message': message})
             
@@ -11190,7 +11198,7 @@ def toggle_protocol():
             except:
                 pass
         
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+        mtx_restart_checked()
         time.sleep(3)
         
         message = f'{protocol.upper()} {"enabled" if enabled else "disabled"}'
@@ -11277,7 +11285,7 @@ def save_recording_settings():
             subprocess.run(cmd, shell=True, check=True)
         
         # Restart MediaMTX to apply changes
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+        mtx_restart_checked()
         
         return jsonify({'success': True})
     except Exception as e:
@@ -12314,6 +12322,25 @@ def mtx_systemctl(action):
                           capture_output=True, timeout=25)
 
 
+def mtx_restart_checked(timeout=25):
+    """Restart MediaMTX via whatever privilege path exists, raising on failure.
+
+    Drop-in for the `subprocess.run(['sudo','systemctl','restart',SERVICE_NAME],
+    check=True)` calls that were scattered through the save handlers. Those hard-
+    coded sudo, so on a hardened infra-TAK box -- console running unprivileged,
+    root reached through the broker -- every one of them failed with
+    "user NOT in sudoers", taking the whole request down with it. That is most of
+    the console: saving protocols, HLS tuning, auth, external sources, recording
+    settings. It went unnoticed because the boxes it was developed on run the
+    console privileged, where sudo just works.
+    """
+    res = mtx_systemctl('restart')
+    if res.returncode != 0:
+        err = res.stderr.decode('utf-8', 'replace').strip() if isinstance(res.stderr, bytes) else str(res.stderr or '')
+        raise RuntimeError(f'Failed to restart MediaMTX: {err[:200] or "unknown error"}')
+    return res
+
+
 def mtx_install_binary(src_path):
     """Back up the current MediaMTX binary and install src_path over it.
     Returns the backup path ('' if there was nothing to back up). Raises on
@@ -12877,6 +12904,32 @@ def rollback_status():
 GST_PLUGIN_DIR_RHEL = '/usr/lib64/gstreamer-1.0'
 GST_RTSPSINK_SO_REPO_PATH = 'config-editor/assets/gst/el{el}/libgstrtspclientsink.so'
 
+# Editor-owned plugin dir, used when /usr/lib64/gstreamer-1.0 isn't writable.
+# infra-TAK hardened boxes run this editor as an unprivileged user with no sudo,
+# so the RHEL system plugin dir is off limits and the in-UI install was simply
+# hidden -- leaving RTSP+KLV permanently unavailable there, since rtspclientsink
+# is not packaged for EL9 by anyone and cannot be dnf'd either.
+# GStreamer scans GST_PLUGIN_PATH in addition to its system path, so dropping the
+# vendored .so here and exporting that variable makes it load with no root, no
+# sudoers rule and no broker allowlist change. The dnf packages (gst-launch
+# itself, rtpklvpay) still need a privileged install, but those are ordinary
+# packages any deploy can handle -- the unpackageable piece is the one this
+# solves.
+GST_LOCAL_PLUGIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gst-plugins')
+
+
+def gst_env(base=None):
+    """Environment for GStreamer subprocesses, with our plugin dir on the path.
+
+    Prepends GST_LOCAL_PLUGIN_DIR to any existing GST_PLUGIN_PATH so a
+    system-installed plugin still wins if one is present.
+    """
+    env = dict(base or os.environ)
+    if os.path.isdir(GST_LOCAL_PLUGIN_DIR):
+        existing = env.get('GST_PLUGIN_PATH', '')
+        env['GST_PLUGIN_PATH'] = (GST_LOCAL_PLUGIN_DIR + os.pathsep + existing) if existing else GST_LOCAL_PLUGIN_DIR
+    return env
+
 DEPS_PACKAGES = {
     'apt': {
         'ffmpeg': ['ffmpeg'],
@@ -12886,8 +12939,16 @@ DEPS_PACKAGES = {
     },
     'dnf': {
         'ffmpeg': ['ffmpeg'],
+        # gstreamer1-rtsp-server supplies libgstrtspserver-1.0.so.0, which the
+        # vendored rtspclientsink links against. EL9 packages that LIBRARY but
+        # not the plugin, so without it the .so drops in and then fails to load
+        # with "Opening module failed: libgstrtspserver-1.0.so.0: cannot open
+        # shared object file" -- which reads like a bad build rather than a
+        # missing dependency. Verified on a Rocky 9.8 box: installing this one
+        # package took the plugin from unloadable to working.
         'gstreamer': ['gstreamer1-plugins-good', 'gstreamer1-plugins-bad-free',
-                      'gstreamer1-plugins-bad-freeworld', 'gstreamer1-plugin-libav'],
+                      'gstreamer1-plugins-bad-freeworld', 'gstreamer1-plugin-libav',
+                      'gstreamer1-rtsp-server'],
     },
 }
 
@@ -12951,8 +13012,14 @@ def _detect_gstreamer():
     def _has(el):
         if not insp:
             return False
-        c, _o = _run_quiet([insp, el], timeout=10)
-        return c == 0
+        # Inspect with our plugin dir on the path, or a locally-installed
+        # rtspclientsink reports missing and the UI claims KLV is unavailable
+        # while the push pipeline would actually have worked.
+        try:
+            r = subprocess.run([insp, el], capture_output=True, timeout=10, env=gst_env())
+            return r.returncode == 0
+        except Exception:
+            return False
     klv = _has('rtpklvpay')
     sink = _has('rtspclientsink')
     return {'installed': True, 'version': m.group(1) if m else 'unknown',
@@ -13010,6 +13077,12 @@ def deps_status():
             can_install = subprocess.run(['sudo', '-n', 'true'], capture_output=True, timeout=5).returncode == 0
         except Exception:
             can_install = False
+    # infra-TAK hardened boxes have no sudo but do have the privilege broker,
+    # which mediates package installs. Without this the button stayed hidden and
+    # the deps were unreachable from the UI on exactly the boxes that most need
+    # a one-click path, since nobody can ssh in and dnf on a managed host.
+    if not can_install:
+        can_install = _mtx_broker_exec(['true'], timeout=5) is not None
     return jsonify({'pkg_mgr': pm, 'can_install': can_install, 'ffmpeg': ff, 'gstreamer': gs})
 
 
@@ -13028,23 +13101,72 @@ def deps_update():
             return jsonify({'success': False, 'error': 'No supported package manager (apt/dnf) found'}), 500
         pkgs = DEPS_PACKAGES[pm][component]
 
-        if pm == 'apt':
-            _run_quiet(['apt-get', 'update', '-qq'], timeout=180, use_sudo=True)
-            env_args = ['env', 'DEBIAN_FRONTEND=noninteractive']
-            code, out = _run_quiet(env_args + ['apt-get', 'install', '-y'] + pkgs,
-                                   timeout=900, use_sudo=True)
-        else:  # dnf
-            code, out = _run_quiet(['dnf', 'install', '-y'] + pkgs, timeout=900, use_sudo=True)
+        # Three ways to reach root, in order of preference:
+        #   1. we already are root, or have passwordless sudo (standalone)
+        #   2. the infra-TAK privilege broker (hardened boxes: console runs as an
+        #      unprivileged user with no sudo, but the broker mediates root ops)
+        #   3. neither -- install only what needs no privileges
+        # The broker is what makes this a one-click operation on infra-TAK rather
+        # than something the platform has to pre-stage at deploy time. Verified on
+        # a Rocky 9.8 box that it permits `dnf install` and writes into
+        # /usr/lib64/gstreamer-1.0.
+        privileged = (os.geteuid() == 0)
+        if not privileged:
+            try:
+                privileged = subprocess.run(['sudo', '-n', 'true'], capture_output=True, timeout=5).returncode == 0
+            except Exception:
+                privileged = False
 
-        if code != 0:
-            return jsonify({'success': False, 'error': f'Package install failed: {out.strip()[-400:]}'}), 500
+        use_broker = False
+        if not privileged:
+            use_broker = _mtx_broker_exec(['true'], timeout=5) is not None
+
+        if use_broker:
+            br = _mtx_broker_exec(['dnf' if pm == 'dnf' else 'apt-get', 'install', '-y'] + pkgs, timeout=900)
+            if br is None:
+                return jsonify({'success': False, 'error': 'Privilege broker went away mid-install'}), 500
+            code, _o, berr = br
+            if code != 0:
+                return jsonify({'success': False,
+                                'error': f'Package install via privilege broker failed: {berr.decode("utf-8", "replace").strip()[-400:]}'}), 500
+        elif privileged:
+            if pm == 'apt':
+                _run_quiet(['apt-get', 'update', '-qq'], timeout=180, use_sudo=True)
+                env_args = ['env', 'DEBIAN_FRONTEND=noninteractive']
+                code, out = _run_quiet(env_args + ['apt-get', 'install', '-y'] + pkgs,
+                                       timeout=900, use_sudo=True)
+            else:  # dnf
+                code, out = _run_quiet(['dnf', 'install', '-y'] + pkgs, timeout=900, use_sudo=True)
+
+            if code != 0:
+                return jsonify({'success': False, 'error': f'Package install failed: {out.strip()[-400:]}'}), 500
+        else:
+            # No root by any route. The distro packages are out of reach, but the
+            # vendored plugin still installs into our own dir, so if GStreamer is
+            # otherwise present this is still worth doing.
+            if component != 'gstreamer' or pm != 'dnf' or not shutil.which('gst-launch-1.0'):
+                return jsonify({'success': False, 'error':
+                                'This console runs unprivileged and has no privilege broker, so it '
+                                'cannot install system packages. Have an administrator run '
+                                f'"{pm} install -y {" ".join(pkgs)}", then run this again to add the '
+                                'rtspclientsink plugin, which is not packaged for RHEL and installs '
+                                'without root.'}), 400
+            # GStreamer is present; fall through to install the plugin only.
 
         # On RHEL, rtspclientsink isn't packaged — fetch the prebuilt .so (keyed by
         # EL major so it matches the box's GStreamer) and drop it in, then verify it
         # actually loads (ABI check) so version drift fails loudly, not silently.
         so_note = ''
         if component == 'gstreamer' and pm == 'dnf':
-            if not shutil.which('gst-inspect-1.0') or _run_quiet(['gst-inspect-1.0', 'rtspclientsink'])[0] != 0:
+            insp_bin = shutil.which('gst-inspect-1.0')
+            already = False
+            if insp_bin:
+                try:
+                    already = subprocess.run([insp_bin, 'rtspclientsink'], capture_output=True,
+                                             timeout=15, env=gst_env()).returncode == 0
+                except Exception:
+                    already = False
+            if not already:
                 el = _el_major() or '9'
                 branch = get_update_channel()
                 rel_path = GST_RTSPSINK_SO_REPO_PATH.format(el=el)
@@ -13059,13 +13181,45 @@ def deps_update():
                         so_bytes = resp.read()
                     if len(so_bytes) < 10000:
                         raise ValueError('downloaded .so too small')
-                    tmp_so = '/tmp/libgstrtspclientsink.so'
-                    with open(tmp_so, 'wb') as f:
-                        f.write(so_bytes)
-                    _run_quiet(['install', '-m', '644', tmp_so,
-                                f'{GST_PLUGIN_DIR_RHEL}/libgstrtspclientsink.so'],
-                               timeout=30, use_sudo=True)
-                    os.remove(tmp_so)
+                    # Prefer the system dir when we can write it (standalone,
+                    # running as root) so every GStreamer process on the box
+                    # picks it up. Otherwise use our own dir, which needs no
+                    # privileges and is on GST_PLUGIN_PATH for the processes we
+                    # spawn -- the difference that makes this work at all on a
+                    # hardened infra-TAK box.
+                    if privileged or use_broker:
+                        tmp_so = os.path.join(GST_LOCAL_PLUGIN_DIR, '.staged-rtspclientsink.so')
+                        os.makedirs(GST_LOCAL_PLUGIN_DIR, exist_ok=True)
+                        with open(tmp_so, 'wb') as f:
+                            f.write(so_bytes)
+                        os.chmod(tmp_so, 0o644)
+                        dest = f'{GST_PLUGIN_DIR_RHEL}/libgstrtspclientsink.so'
+                        if use_broker:
+                            br = _mtx_broker_exec(['cp', tmp_so, dest], timeout=30)
+                            ok = br is not None and br[0] == 0
+                            _mtx_broker_exec(['restorecon', dest], timeout=15)  # SELinux relabel
+                        else:
+                            ok = _run_quiet(['install', '-m', '644', tmp_so, dest],
+                                            timeout=30, use_sudo=True)[0] == 0
+                        try:
+                            os.remove(tmp_so)
+                        except Exception:
+                            pass
+                        if not ok:
+                            # Couldn't reach the system dir after all — keep the copy
+                            # we already have rather than failing outright.
+                            with open(os.path.join(GST_LOCAL_PLUGIN_DIR, 'libgstrtspclientsink.so'), 'wb') as f:
+                                f.write(so_bytes)
+                            so_note = f' (system dir unavailable; installed to {GST_LOCAL_PLUGIN_DIR})'
+                        else:
+                            so_note = ''
+                    else:
+                        os.makedirs(GST_LOCAL_PLUGIN_DIR, exist_ok=True)
+                        dest = os.path.join(GST_LOCAL_PLUGIN_DIR, 'libgstrtspclientsink.so')
+                        with open(dest, 'wb') as f:
+                            f.write(so_bytes)
+                        os.chmod(dest, 0o644)
+                        so_note = f' (installed to {GST_LOCAL_PLUGIN_DIR}, loaded via GST_PLUGIN_PATH)'
                 except urllib.error.HTTPError as he:
                     if he.code == 404:
                         return jsonify({'success': False,
@@ -13075,7 +13229,11 @@ def deps_update():
                     return jsonify({'success': False,
                                     'error': f'Packages installed, but fetching rtspclientsink.so failed: {e}'}), 500
                 # ABI check: confirm the dropped .so registers against this GStreamer.
-                vcode, _vout = _run_quiet(['gst-inspect-1.0', 'rtspclientsink'], timeout=15)
+                try:
+                    vcode = subprocess.run(['gst-inspect-1.0', 'rtspclientsink'], capture_output=True,
+                                           timeout=15, env=gst_env()).returncode
+                except Exception:
+                    vcode = 1
                 if vcode != 0:
                     gsv = (_detect_gstreamer() or {}).get('version')
                     return jsonify({'success': False,
@@ -13525,7 +13683,7 @@ def api_add_external_source():
                 print(f"Warning: Could not create UFW rule: {e}", flush=True)
         
         # Restart MediaMTX
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+        mtx_restart_checked()
         time.sleep(3)
         
         return jsonify({'success': True})
@@ -13619,7 +13777,7 @@ def api_delete_external_source():
         save_external_sources_metadata(sources_metadata)
         
         # Restart MediaMTX
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+        mtx_restart_checked()
         time.sleep(3)
         
         return jsonify({'success': True})
@@ -13728,7 +13886,7 @@ def api_toggle_external_source():
             save_external_sources_metadata(sources_metadata)
         
         # Restart MediaMTX
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+        mtx_restart_checked()
         time.sleep(3)
         
         new_state = not currently_enabled
@@ -13784,7 +13942,7 @@ def api_switch_srt_mode():
                 f.write(content)
             
             # Restart MediaMTX
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+            mtx_restart_checked()
             time.sleep(3)
         
         return jsonify({'success': True, 'mode': new_mode})
@@ -13869,7 +14027,7 @@ def api_edit_external_source():
         
         # Restart MediaMTX if enabled
         if is_enabled:
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+            mtx_restart_checked()
             time.sleep(3)
         
         return jsonify({'success': True})
@@ -14692,7 +14850,7 @@ if __name__ == '__main__':
                 f.write(content)
             print("✓ Patched mediamtx.yml: Added IPv6 loopback (::1) to localhost API user")
             # Restart MediaMTX to pick up the change
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], timeout=10)
+            mtx_systemctl('restart')
             time.sleep(3)
     except Exception as e:
         print(f"Warning: Could not auto-patch IPv6 loopback: {e}")
