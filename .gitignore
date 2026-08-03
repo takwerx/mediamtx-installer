@@ -8,3 +8,7 @@ memory-bank/
 
 # Claude Code project guidance — local only, full copy mirrored in the private notes repo.
 CLAUDE.md
+
+# Python bytecode — never commit
+__pycache__/
+*.pyc
