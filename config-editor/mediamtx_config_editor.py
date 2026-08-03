@@ -9454,7 +9454,7 @@ def api_add_mediamtx_user():
     
     # Restart MediaMTX
     try:
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+        mtx_restart_checked()
         time.sleep(3)
     except:
         pass
@@ -9534,7 +9534,7 @@ def api_update_mediamtx_user():
     if save_config(config):
         # Restart MediaMTX to apply changes
         try:
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+            mtx_restart_checked()
             time.sleep(3)
         except:
             pass
@@ -9582,7 +9582,7 @@ def api_revoke_mediamtx_user():
     if save_config(config):
         # Restart MediaMTX to apply changes
         try:
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+            mtx_restart_checked()
             time.sleep(3)
         except:
             pass
@@ -9838,7 +9838,7 @@ def save_protocols():
             print(f"WARNING: UFW update failed: {e}", flush=True)
         
         # Restart MediaMTX
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True)
+        mtx_restart_checked()
         time.sleep(3)
         return redirect(f'/?message=Protocol settings saved and MediaMTX restarted successfully!&message_type=success&tab={tab}')
         
@@ -9907,7 +9907,7 @@ def save_hls():
         else:
             subprocess.run(['sed', '-i', f'/^paths:/i pathDefaults:\\n  rtspDemuxMpegts: {demux_value}\\n', CONFIG_FILE], check=True)
 
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True)
+        mtx_restart_checked()
         time.sleep(3)
         return redirect(f'/?message=HLS settings saved and MediaMTX restarted!&message_type=success&tab={tab}')
 
@@ -10002,7 +10002,7 @@ def restore_backup(backup_name):
         subprocess.run(['cp', backup_file, CONFIG_FILE], check=True)
         
         # Restart service
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True)
+        mtx_restart_checked()
         
         return redirect(f'/?message=Backup restored and service restarted&message_type=success&tab={tab}')
     except Exception as e:
@@ -10864,7 +10864,7 @@ def toggle_public_access():
                 del group_metadata['any']
                 save_group_metadata(group_metadata)
             
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+            mtx_restart_checked()
             return jsonify({'success': True, 'enabled': False, 'message': 'Public access disabled'})
             
         else:
@@ -10903,7 +10903,7 @@ def toggle_public_access():
             group_metadata['any'] = 'PUBLIC'
             save_group_metadata(group_metadata)
             
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+            mtx_restart_checked()
             return jsonify({'success': True, 'enabled': True, 'message': 'Public access enabled'})
             
     except Exception as e:
@@ -10975,7 +10975,7 @@ def toggle_teststream_viewer():
                         any(p.get('path') == 'teststream' for p in u.get('permissions', [])))]
             
             save_config(config)
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+            mtx_restart_checked()
             
             return jsonify({'success': True, 'enabled': False, 'message': 'Test stream viewer disabled'})
         else:
@@ -10997,7 +10997,7 @@ def toggle_teststream_viewer():
             # Don't add to group_names.json - keep it hidden!
             
             save_config(config)
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+            mtx_restart_checked()
             
             return jsonify({'success': True, 'enabled': True, 'message': 'Test stream viewer enabled'})
             
@@ -11113,7 +11113,7 @@ def toggle_srt_passphrase():
         if not save_config(config):
             return jsonify({'success': False, 'error': 'Failed to save config'}), 500
             
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+        mtx_restart_checked()
         
         return jsonify({'success': True, 'enabled': enabled, 'message': message})
             
@@ -11198,7 +11198,7 @@ def toggle_protocol():
             except:
                 pass
         
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+        mtx_restart_checked()
         time.sleep(3)
         
         message = f'{protocol.upper()} {"enabled" if enabled else "disabled"}'
@@ -11285,7 +11285,7 @@ def save_recording_settings():
             subprocess.run(cmd, shell=True, check=True)
         
         # Restart MediaMTX to apply changes
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+        mtx_restart_checked()
         
         return jsonify({'success': True})
     except Exception as e:
@@ -12320,6 +12320,25 @@ def mtx_systemctl(action):
         return subprocess.CompletedProcess(['broker', 'systemctl', action], rc, out, err)
     return subprocess.run(['sudo', '-n', MTX_UPGRADE_HELPER, action],
                           capture_output=True, timeout=25)
+
+
+def mtx_restart_checked(timeout=25):
+    """Restart MediaMTX via whatever privilege path exists, raising on failure.
+
+    Drop-in for the `subprocess.run(['sudo','systemctl','restart',SERVICE_NAME],
+    check=True)` calls that were scattered through the save handlers. Those hard-
+    coded sudo, so on a hardened infra-TAK box -- console running unprivileged,
+    root reached through the broker -- every one of them failed with
+    "user NOT in sudoers", taking the whole request down with it. That is most of
+    the console: saving protocols, HLS tuning, auth, external sources, recording
+    settings. It went unnoticed because the boxes it was developed on run the
+    console privileged, where sudo just works.
+    """
+    res = mtx_systemctl('restart')
+    if res.returncode != 0:
+        err = res.stderr.decode('utf-8', 'replace').strip() if isinstance(res.stderr, bytes) else str(res.stderr or '')
+        raise RuntimeError(f'Failed to restart MediaMTX: {err[:200] or "unknown error"}')
+    return res
 
 
 def mtx_install_binary(src_path):
@@ -13664,7 +13683,7 @@ def api_add_external_source():
                 print(f"Warning: Could not create UFW rule: {e}", flush=True)
         
         # Restart MediaMTX
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+        mtx_restart_checked()
         time.sleep(3)
         
         return jsonify({'success': True})
@@ -13758,7 +13777,7 @@ def api_delete_external_source():
         save_external_sources_metadata(sources_metadata)
         
         # Restart MediaMTX
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+        mtx_restart_checked()
         time.sleep(3)
         
         return jsonify({'success': True})
@@ -13867,7 +13886,7 @@ def api_toggle_external_source():
             save_external_sources_metadata(sources_metadata)
         
         # Restart MediaMTX
-        subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+        mtx_restart_checked()
         time.sleep(3)
         
         new_state = not currently_enabled
@@ -13923,7 +13942,7 @@ def api_switch_srt_mode():
                 f.write(content)
             
             # Restart MediaMTX
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+            mtx_restart_checked()
             time.sleep(3)
         
         return jsonify({'success': True, 'mode': new_mode})
@@ -14008,7 +14027,7 @@ def api_edit_external_source():
         
         # Restart MediaMTX if enabled
         if is_enabled:
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], check=True, timeout=10)
+            mtx_restart_checked()
             time.sleep(3)
         
         return jsonify({'success': True})
@@ -14831,7 +14850,7 @@ if __name__ == '__main__':
                 f.write(content)
             print("✓ Patched mediamtx.yml: Added IPv6 loopback (::1) to localhost API user")
             # Restart MediaMTX to pick up the change
-            subprocess.run(['sudo', 'systemctl', 'restart', SERVICE_NAME], timeout=10)
+            mtx_systemctl('restart')
             time.sleep(3)
     except Exception as e:
         print(f"Warning: Could not auto-patch IPv6 loopback: {e}")
