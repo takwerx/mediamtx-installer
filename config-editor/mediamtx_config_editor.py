@@ -10775,27 +10775,63 @@ def get_stream_urls():
     return jsonify(urls)
 
 
+def find_public_any_block(lines):
+    """Locate the genuinely-public `user: any` entry in authInternalUsers.
+
+    Returns (start, end) line indices covering the entry and any comment line
+    immediately above it, or None.
+
+    Matching on the `# PUBLIC` comment alone was a trap: configs carry TWO
+    `user: any` entries, and both were labelled `# PUBLIC`. The first grants the
+    console API access and is restricted to loopback:
+
+        - user: any
+          ips: ['127.0.0.1', '::1']
+          permissions: [read, publish, api]
+
+    Taking the first match meant disabling public access deleted the console's
+    own API grant instead -- /v3/paths/list started returning 401, Active
+    Streams rendered empty, and public access stayed on. Two failures at once,
+    neither obviously connected to the button that was pressed.
+
+    So identify it structurally rather than by label: `user: any`, no `ips:`
+    restriction, no `path:` scope. Anything holding `action: api` is never a
+    candidate -- that is infrastructure, not a sharing setting.
+    """
+    n = len(lines)
+    i = 0
+    while i < n:
+        if lines[i].startswith('- user:'):
+            start = i
+            j = i + 1
+            while j < n and (lines[j].startswith(' ') or lines[j].startswith('  -')):
+                j += 1
+            entry = lines[start:j]
+            body = '\n'.join(entry)
+            is_any = entry[0].split(':', 1)[1].strip() == 'any'
+            ips_restricted = any(
+                ln.strip().startswith('ips:') and ln.split(':', 1)[1].strip() not in ('[]', '')
+                for ln in entry)
+            has_path = any(ln.strip().startswith('path:') for ln in entry)
+            has_api = 'action: api' in body
+            if is_any and not ips_restricted and not has_path and not has_api:
+                if start > 0 and lines[start - 1].lstrip().startswith('#'):
+                    start -= 1
+                return (start, j)
+            i = j
+        else:
+            i += 1
+    return None
+
+
 @app.route('/api/public-access/status')
 @login_required
 def get_public_access_status():
     """Check if PUBLIC access is enabled - reads directly from YAML file"""
     try:
         with open(CONFIG_FILE, 'r') as f:
-            content = f.read()
-        
-        # Look for the PUBLIC comment marker followed by user: any
-        lines = content.split('\n')
-        for i, line in enumerate(lines):
-            if '# PUBLIC' in line:
-                # Check next lines for user: any with no path restrictions
-                for j in range(i + 1, min(i + 10, len(lines))):
-                    if 'user: any' in lines[j]:
-                        # Found PUBLIC user block
-                        return jsonify({'enabled': True})
-                    if lines[j].strip() and not lines[j].startswith(' ') and not lines[j].startswith('-') and not lines[j].startswith('#'):
-                        break
-        
-        return jsonify({'enabled': False})
+            lines = f.read().split('\n')
+        return jsonify({'enabled': find_public_any_block(lines) is not None})
     except Exception as e:
         print(f"ERROR in get_public_access_status: {e}", flush=True)
         return jsonify({'enabled': False})
@@ -10807,63 +10843,20 @@ def toggle_public_access():
         # Read YAML file directly to check current state
         with open(CONFIG_FILE, 'r') as f:
             yaml_content = f.read()
-        
-        # Check if PUBLIC user exists (any user with no path restrictions)
-        public_exists = False
+
+        # Locate the genuinely-public entry structurally. See
+        # find_public_any_block() for why matching the "# PUBLIC" comment was
+        # wrong: it also matched the loopback-restricted API grant the console
+        # depends on, and removed that instead.
         lines = yaml_content.split('\n')
-        in_public_user = False
-        
-        for i, line in enumerate(lines):
-            if '# PUBLIC' in line:
-                # Check next few lines for the any user
-                if i + 1 < len(lines) and 'user: any' in lines[i + 1]:
-                    # Check if this any user has no path restrictions
-                    has_path = False
-                    for j in range(i + 1, min(i + 10, len(lines))):
-                        if 'path:' in lines[j]:
-                            has_path = True
-                            break
-                        if lines[j].strip() and lines[j][0] not in [' ', '\t', '-', '#']:
-                            break
-                    
-                    if not has_path:
-                        public_exists = True
-                        break
-        
+        block = find_public_any_block(lines)
+        public_exists = block is not None
+
         if public_exists:
-            # DISABLE: Remove PUBLIC user section using sed
-            # This is complex, so we'll use Python to rewrite the file
-            with open(CONFIG_FILE, 'r') as f:
-                lines = f.readlines()
-            
-            new_lines = []
-            skip_until_next_user = False
-            found_public = False
-            
-            for i, line in enumerate(lines):
-                if '# PUBLIC' in line and not found_public:
-                    # Start skipping from PUBLIC comment
-                    skip_until_next_user = True
-                    found_public = True
-                    continue
-                
-                if skip_until_next_user:
-                    # Skip until we hit next comment or top-level key
-                    if line.strip() and line[0] == '#' and '# PUBLIC' not in line:
-                        # Hit another comment, stop skipping
-                        skip_until_next_user = False
-                        new_lines.append(line)
-                    elif line.strip() and line[0].isalpha():
-                        # Hit top-level key, stop skipping
-                        skip_until_next_user = False
-                        new_lines.append(line)
-                    # Otherwise keep skipping
-                else:
-                    new_lines.append(line)
-            
-            # Write back
+            start, end = block
+            new_lines = lines[:start] + lines[end:]
             with open(CONFIG_FILE, 'w') as f:
-                f.writelines(new_lines)
+                f.write('\n'.join(new_lines))
             
             # Remove from group metadata
             group_metadata = load_group_metadata()
