@@ -7036,7 +7036,25 @@ HTML_TEMPLATE = '''
             fetch('/api/update/apply', { method: 'POST' })
             .then(res => res.json())
             .then(data => {
-                if (data.success) {
+                if (data.success && data.manual_restart_required) {
+                    // Downloaded, but the old process is still serving. Saying
+                    // "updated" here is how a box ends up offering the same
+                    // update forever with nothing explaining why — the version
+                    // it reports is the OLD process's, not the file on disk.
+                    if (progressText) {
+                        progressText.innerHTML = '⚠️ <strong>' + data.new_version + ' downloaded, but NOT yet running.</strong>'
+                            + '<br><br>This editor could not restart itself, so the previous version is still serving. '
+                            + 'It will keep showing an update as available until the service is restarted:'
+                            + '<br><br><code style="display:inline-block;background:#111;padding:6px 10px;border-radius:4px;">'
+                            + (data.manual_restart_cmd || 'sudo systemctl restart mediamtx-webeditor') + '</code>'
+                            + '<br><br>Run that once on this server, then reload this page.';
+                    }
+                    if (progress) {
+                        progress.style.background = 'rgba(251, 191, 36, 0.15)';
+                        progress.style.border = '1px solid #fbbf24';
+                    }
+                    if (btn) { btn.disabled = false; btn.textContent = '⬆️ Update Web Editor'; }
+                } else if (data.success) {
                     if (progressText) {
                         progressText.innerHTML = '✅ Updated to <strong>' + data.new_version + '</strong>. Reloading...';
                     }
@@ -11854,7 +11872,12 @@ def apply_update():
             'new_version': new_version,
             'backup_file': backup_file,
             'overlay_synced': overlay_synced,
-            'restarted': restarted
+            'restarted': restarted,
+            # Reported so the UI can say the update landed but is NOT yet live.
+            # Claiming success here while the old process keeps serving is how a
+            # box ends up offering the same update indefinitely with no clue why.
+            'manual_restart_required': (not restarted),
+            'manual_restart_cmd': 'sudo systemctl restart mediamtx-webeditor'
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -12391,22 +12414,64 @@ def mtx_install_binary(src_path):
 
 
 def schedule_editor_self_restart(delay=1.5):
-    """Restart the editor shortly after the current response is sent. As root,
-    via systemctl; unprivileged under systemd (Restart=always), by exiting so
-    systemd respawns us on the freshly written file. Returns True if scheduled."""
+    """Restart the editor shortly after the current response is sent.
+    Returns True if a restart was actually scheduled, False if none was possible.
+
+    An update that writes a new file but leaves the old process running is the
+    worst failure this app has: the version string reads new, the page keeps
+    offering the same update forever, and every subsequent fix appears not to
+    work because the running code never changed. Diagnosing it means comparing
+    PIDs, which nobody thinks to do. So every avenue is tried before giving up,
+    and the caller is told the truth either way.
+
+    Order: systemctl as root -> the infra-TAK broker -> exit and let systemd
+    respawn us (Restart=always). The exit path is the universal fallback -- it
+    needs no privileges at all -- so it is used whenever the privileged routes
+    are unavailable OR fail, rather than only when we happen to be unprivileged.
+    """
     import threading
+
+    def _later(fn):
+        def _run():
+            time.sleep(delay)
+            fn()
+        threading.Thread(target=_run, daemon=True).start()
+
+    under_systemd = bool(os.environ.get('INVOCATION_ID'))
+
+    def _exit_for_respawn():
+        os._exit(0)
+
     if os.geteuid() == 0:
-        def _restart():
-            time.sleep(delay)
-            subprocess.run(['systemctl', 'restart', 'mediamtx-webeditor'], timeout=10)
-        threading.Thread(target=_restart, daemon=True).start()
+        def _root_restart():
+            try:
+                r = subprocess.run(['systemctl', 'restart', 'mediamtx-webeditor'],
+                                   capture_output=True, timeout=15)
+                if r.returncode == 0:
+                    return
+            except Exception:
+                pass
+            # systemctl didn't take. Exiting still gets us respawned on the new
+            # file, so prefer that over leaving stale code running.
+            if under_systemd:
+                _exit_for_respawn()
+        _later(_root_restart)
         return True
-    if os.environ.get('INVOCATION_ID'):
-        def _exit():
-            time.sleep(delay)
-            os._exit(0)
-        threading.Thread(target=_exit, daemon=True).start()
+
+    if _mtx_broker_exec(['true'], timeout=5) is not None:
+        def _broker_restart():
+            br = _mtx_broker_exec(['systemctl', 'restart', 'mediamtx-webeditor'], timeout=25)
+            if br is not None and br[0] == 0:
+                return
+            if under_systemd:
+                _exit_for_respawn()
+        _later(_broker_restart)
         return True
+
+    if under_systemd:
+        _later(_exit_for_respawn)
+        return True
+
     return False
 
 # --- End privileged-operation helpers ------------------------------------
