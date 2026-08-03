@@ -13058,6 +13058,12 @@ def deps_status():
             can_install = subprocess.run(['sudo', '-n', 'true'], capture_output=True, timeout=5).returncode == 0
         except Exception:
             can_install = False
+    # infra-TAK hardened boxes have no sudo but do have the privilege broker,
+    # which mediates package installs. Without this the button stayed hidden and
+    # the deps were unreachable from the UI on exactly the boxes that most need
+    # a one-click path, since nobody can ssh in and dnf on a managed host.
+    if not can_install:
+        can_install = _mtx_broker_exec(['true'], timeout=5) is not None
     return jsonify({'pkg_mgr': pm, 'can_install': can_install, 'ffmpeg': ff, 'gstreamer': gs})
 
 
@@ -13076,12 +13082,15 @@ def deps_update():
             return jsonify({'success': False, 'error': 'No supported package manager (apt/dnf) found'}), 500
         pkgs = DEPS_PACKAGES[pm][component]
 
-        # Unprivileged boxes (infra-TAK hardened: console runs as a normal user
-        # with no sudo) can't run the package manager. That used to make the
-        # whole feature unreachable, but only the DISTRO packages actually need
-        # root -- the piece RHEL cannot supply at all, rtspclientsink, installs
-        # fine into our own plugin dir. So when the packages are already present
-        # and only that plugin is missing, carry on and install just the plugin.
+        # Three ways to reach root, in order of preference:
+        #   1. we already are root, or have passwordless sudo (standalone)
+        #   2. the infra-TAK privilege broker (hardened boxes: console runs as an
+        #      unprivileged user with no sudo, but the broker mediates root ops)
+        #   3. neither -- install only what needs no privileges
+        # The broker is what makes this a one-click operation on infra-TAK rather
+        # than something the platform has to pre-stage at deploy time. Verified on
+        # a Rocky 9.8 box that it permits `dnf install` and writes into
+        # /usr/lib64/gstreamer-1.0.
         privileged = (os.geteuid() == 0)
         if not privileged:
             try:
@@ -13089,7 +13098,19 @@ def deps_update():
             except Exception:
                 privileged = False
 
-        if privileged:
+        use_broker = False
+        if not privileged:
+            use_broker = _mtx_broker_exec(['true'], timeout=5) is not None
+
+        if use_broker:
+            br = _mtx_broker_exec(['dnf' if pm == 'dnf' else 'apt-get', 'install', '-y'] + pkgs, timeout=900)
+            if br is None:
+                return jsonify({'success': False, 'error': 'Privilege broker went away mid-install'}), 500
+            code, _o, berr = br
+            if code != 0:
+                return jsonify({'success': False,
+                                'error': f'Package install via privilege broker failed: {berr.decode("utf-8", "replace").strip()[-400:]}'}), 500
+        elif privileged:
             if pm == 'apt':
                 _run_quiet(['apt-get', 'update', '-qq'], timeout=180, use_sudo=True)
                 env_args = ['env', 'DEBIAN_FRONTEND=noninteractive']
@@ -13101,11 +13122,14 @@ def deps_update():
             if code != 0:
                 return jsonify({'success': False, 'error': f'Package install failed: {out.strip()[-400:]}'}), 500
         else:
+            # No root by any route. The distro packages are out of reach, but the
+            # vendored plugin still installs into our own dir, so if GStreamer is
+            # otherwise present this is still worth doing.
             if component != 'gstreamer' or pm != 'dnf' or not shutil.which('gst-launch-1.0'):
                 return jsonify({'success': False, 'error':
-                                'This console runs unprivileged and cannot install system packages. '
-                                'Have the platform install them at deploy time '
-                                f'({pm} install {" ".join(pkgs)}), then run this again to add the '
+                                'This console runs unprivileged and has no privilege broker, so it '
+                                'cannot install system packages. Have an administrator run '
+                                f'"{pm} install -y {" ".join(pkgs)}", then run this again to add the '
                                 'rtspclientsink plugin, which is not packaged for RHEL and installs '
                                 'without root.'}), 400
             # GStreamer is present; fall through to install the plugin only.
@@ -13144,15 +13168,32 @@ def deps_update():
                     # privileges and is on GST_PLUGIN_PATH for the processes we
                     # spawn -- the difference that makes this work at all on a
                     # hardened infra-TAK box.
-                    if privileged:
-                        tmp_so = '/tmp/libgstrtspclientsink.so'
+                    if privileged or use_broker:
+                        tmp_so = os.path.join(GST_LOCAL_PLUGIN_DIR, '.staged-rtspclientsink.so')
+                        os.makedirs(GST_LOCAL_PLUGIN_DIR, exist_ok=True)
                         with open(tmp_so, 'wb') as f:
                             f.write(so_bytes)
-                        _run_quiet(['install', '-m', '644', tmp_so,
-                                    f'{GST_PLUGIN_DIR_RHEL}/libgstrtspclientsink.so'],
-                                   timeout=30, use_sudo=True)
-                        os.remove(tmp_so)
-                        so_note = ''
+                        os.chmod(tmp_so, 0o644)
+                        dest = f'{GST_PLUGIN_DIR_RHEL}/libgstrtspclientsink.so'
+                        if use_broker:
+                            br = _mtx_broker_exec(['cp', tmp_so, dest], timeout=30)
+                            ok = br is not None and br[0] == 0
+                            _mtx_broker_exec(['restorecon', dest], timeout=15)  # SELinux relabel
+                        else:
+                            ok = _run_quiet(['install', '-m', '644', tmp_so, dest],
+                                            timeout=30, use_sudo=True)[0] == 0
+                        try:
+                            os.remove(tmp_so)
+                        except Exception:
+                            pass
+                        if not ok:
+                            # Couldn't reach the system dir after all — keep the copy
+                            # we already have rather than failing outright.
+                            with open(os.path.join(GST_LOCAL_PLUGIN_DIR, 'libgstrtspclientsink.so'), 'wb') as f:
+                                f.write(so_bytes)
+                            so_note = f' (system dir unavailable; installed to {GST_LOCAL_PLUGIN_DIR})'
+                        else:
+                            so_note = ''
                     else:
                         os.makedirs(GST_LOCAL_PLUGIN_DIR, exist_ok=True)
                         dest = os.path.join(GST_LOCAL_PLUGIN_DIR, 'libgstrtspclientsink.so')
