@@ -13534,6 +13534,17 @@ def klv_runon_lines(klv):
     )
 
 
+def rtsp_transport_line(source_url):
+    """YAML rtspTransport line for RTSP pulls, or '' for other protocols.
+
+    MediaMTX pulls RTSP over UDP by default; on lossy links that drops RTP
+    packets and smears the video (invalid FU-A errors), so force TCP.
+    """
+    if source_url.startswith(('rtsp://', 'rtsps://')):
+        return '    rtspTransport: tcp\n'
+    return ''
+
+
 # --- Netbird connectivity (box-level; underpins the KLV "Netbird" transport) -
 # Mike self-hosts Netbird, so joining needs his management URL + a setup key.
 # Joined once per box; every KLV source then reaches the aggregator over the mesh.
@@ -13719,7 +13730,9 @@ def api_add_external_source():
         
         # Build the path entry
         on_demand_value = 'yes' if on_demand else 'no'
-        path_entry = f"\n  {name}:\n    source: {source_url}\n    sourceOnDemand: {on_demand_value}\n"
+        path_entry = f"\n  {name}:\n    source: {source_url}\n"
+        path_entry += rtsp_transport_line(source_url)
+        path_entry += f"    sourceOnDemand: {on_demand_value}\n"
         path_entry += klv_runon_lines(klv)
         
         # Insert into YAML - find the paths section and append before the last path or at end
@@ -13948,7 +13961,9 @@ def api_toggle_external_source():
             source_url = sources_metadata[name].get('source_url', '')
             on_demand = sources_metadata[name].get('on_demand', False)
             on_demand_value = 'yes' if on_demand else 'no'
-            path_entry = f"\n  {name}:\n    source: {source_url}\n    sourceOnDemand: {on_demand_value}\n"
+            path_entry = f"\n  {name}:\n    source: {source_url}\n"
+            path_entry += rtsp_transport_line(source_url)
+            path_entry += f"    sourceOnDemand: {on_demand_value}\n"
             path_entry += klv_runon_lines(sources_metadata[name].get('klv'))
             
             with open(CONFIG_FILE, 'r') as f:
@@ -14096,15 +14111,16 @@ def api_edit_external_source():
                     # Replace source line
                     if stripped.startswith('source:'):
                         new_lines.append(f'    source: {new_source_url}\n')
+                        new_lines.append(rtsp_transport_line(new_source_url))  # '' for non-RTSP
                         continue
                     # Replace sourceOnDemand line, then (re)write KLV runOn lines after it
                     elif stripped.startswith('sourceOnDemand:'):
                         new_lines.append(f'    sourceOnDemand: {on_demand_value}\n')
                         new_lines.append(klv_runon_lines(klv))  # '' clears it when disabled
                         continue
-                    # Drop any existing KLV runOn lines — they're rewritten above
+                    # Drop any existing KLV runOn / rtspTransport lines — rewritten above
                     elif (stripped.startswith('runOnReady:') or stripped.startswith('runOnReadyRestart:')
-                          or stripped.startswith('runOnNotReady:')):
+                          or stripped.startswith('runOnNotReady:') or stripped.startswith('rtspTransport:')):
                         continue
                     # Detect end of our path block
                     elif stripped and not line.startswith('    ') and not line.startswith('\t\t'):
