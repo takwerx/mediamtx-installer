@@ -14977,6 +14977,7 @@ if __name__ == '__main__':
         # Pass 1: Remove the full ~^live/(.+)$ block using indentation
         ffmpeg_start = None
         base_indent = 0
+        removed = False
         for i, line in enumerate(lines):
             if '~^live/(.+)$' in line:
                 ffmpeg_start = i
@@ -14993,7 +14994,13 @@ if __name__ == '__main__':
                         end -= 1
                     del lines[ffmpeg_start:end]
                     changed = True
+                    removed = True
                     break
+        # Block at end of file: no following line at base indent, so the
+        # loop above never fires — delete through EOF.
+        if ffmpeg_start is not None and not removed:
+            del lines[ffmpeg_start:]
+            changed = True
 
         # Pass 2: Clean up orphaned fragments from previous bad removals
         cleaned = []
