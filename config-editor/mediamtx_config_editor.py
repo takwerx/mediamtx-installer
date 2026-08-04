@@ -7338,9 +7338,24 @@ HTML_TEMPLATE = '''
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({component: component})
             })
-            .then(function(r){ return r.json(); })
-            .then(function(d){
+            // A package install can outlast a reverse proxy's timeout, in which
+            // case the proxy answers with an HTML error page and r.json() throws
+            // "Unexpected token '<'" — which tells the operator nothing. Read the
+            // body as text and only parse it if it actually looks like JSON, so
+            // the real situation can be reported instead.
+            .then(function(r){ return r.text().then(function(t){ return {status: r.status, body: t}; }); })
+            .then(function(res){
                 if (btn) btn.disabled = false;
+                var d = null;
+                try { d = JSON.parse(res.body); } catch (e) { d = null; }
+                if (d === null) {
+                    if (prog) {
+                        prog.style.color = '#fbbf24';
+                        prog.textContent = '⚠️ The install is still running on the server (the web request timed out at ' + res.status
+                            + '). Package installs can outlast the proxy timeout — wait a minute, then reload this page to see if it completed.';
+                    }
+                    return;
+                }
                 if (d.success) {
                     if (prog) { prog.style.color = '#4ade80'; prog.textContent = '✅ ' + (d.message || 'Done'); }
                     loadDepsStatus(true);
@@ -13187,7 +13202,23 @@ def deps_update():
             use_broker = _mtx_broker_exec(['true'], timeout=5) is not None
 
         if use_broker:
-            br = _mtx_broker_exec(['dnf' if pm == 'dnf' else 'apt-get', 'install', '-y'] + pkgs, timeout=900)
+            if pm == 'apt':
+                # apt MUST be told not to prompt. Without DEBIAN_FRONTEND
+                # noninteractive it can stop on a debconf question and sit there
+                # until the timeout -- long past any reverse proxy's limit, so the
+                # browser gets an HTML gateway error instead of our JSON and the
+                # page reports "Unexpected token '<'". `env` may not be on the
+                # broker's allowlist, so fall back to apt's own non-interactive
+                # switches, which cover the common config-file prompts.
+                _mtx_broker_exec(['apt-get', 'update', '-qq'], timeout=180)
+                apt_args = ['apt-get', 'install', '-y', '-q',
+                            '-o', 'Dpkg::Options::=--force-confdef',
+                            '-o', 'Dpkg::Options::=--force-confold'] + pkgs
+                br = _mtx_broker_exec(['env', 'DEBIAN_FRONTEND=noninteractive'] + apt_args, timeout=600)
+                if br is None or br[0] != 0:
+                    br = _mtx_broker_exec(apt_args, timeout=600)
+            else:
+                br = _mtx_broker_exec(['dnf', 'install', '-y'] + pkgs, timeout=600)
             if br is None:
                 return jsonify({'success': False, 'error': 'Privilege broker went away mid-install'}), 500
             code, _o, berr = br
