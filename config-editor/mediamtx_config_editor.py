@@ -6391,7 +6391,13 @@ HTML_TEMPLATE = '''
                     box.style.background = '#4d3a00'; box.style.borderColor = '#8a6d00'; icon.textContent = '🟡';
                     tgt = '<span style="color:#ffc107;">🟡 Target:</span> connecting…';
                 }
-                text.innerHTML = ourEnd + '<br>' + tgt + '<br>' + route;
+                // What is actually going over the wire, so a dropped audio or KLV
+                // track is visible rather than silently missing at the far end.
+                var tracksLine = '';
+                if (data.target.tracks) {
+                    tracksLine = '<br><span style="color:#aaa;">Tracks: ' + escapeHtml(data.target.tracks) + '</span>';
+                }
+                text.innerHTML = ourEnd + '<br>' + tgt + '<br>' + route + tracksLine;
             } else {
                 // Not pushing. If it stopped on an error, show it IN the banner (persistent),
                 // not a popup that vanishes — so the failure reason stays visible.
@@ -6407,6 +6413,23 @@ HTML_TEMPLATE = '''
                     box.style.display = 'none';
                 }
             }
+        }
+
+        // Paint a failure into the status banner. Pre-flight rejections (bad
+        // hostname, unreachable port) explain WHY in a sentence or two, which an
+        // alert() shows once and then loses — the banner keeps it on screen.
+        function showRemotePushError(msg) {
+            var box = document.getElementById('remote-push-status');
+            var icon = document.getElementById('remote-push-icon');
+            var text = document.getElementById('remote-push-status-text');
+            var stopBtn = document.getElementById('remote-push-stop-btn');
+            if (!box) { alert('Error: ' + msg); return; }
+            if (stopBtn) stopBtn.style.display = 'none';
+            box.style.display = 'block';
+            box.style.background = '#3a1a1a';
+            box.style.borderColor = '#8a2d2d';
+            if (icon) icon.textContent = '🔴';
+            text.innerHTML = '<span style="color:#f87171;">🔴 Not started:</span> ' + escapeHtml(msg);
         }
 
         function updateRemotePushStatus() {
@@ -6451,12 +6474,11 @@ HTML_TEMPLATE = '''
                 body: JSON.stringify(payload)
             }).then(function(r) { return r.json(); }).then(function(data) {
                 if (data.success) {
-                    alert('Remote push started!');
                     updateRemotePushStatus();
                 } else {
-                    alert('Error: ' + data.error);
+                    showRemotePushError(data.error || 'Unknown error');
                 }
-            }).catch(function(err) { alert('Error: ' + err); });
+            }).catch(function(err) { showRemotePushError('' + err); });
         }
 
         function stopRemotePush() {
@@ -10284,13 +10306,21 @@ def _gst_launch_bin():
     return shutil.which('gst-launch-1.0')
 
 
+_PROBE_KINDS = {'video', 'audio', 'data', 'subtitle', 'attachment'}
+
+
 def _probe_media_tracks(filepath):
-    """Detect which track types a media file has: {'video','audio','klv'} -> bool.
+    """Detect which track types a media file has, and the codec behind each.
+
+    Returns {'video','audio','klv': bool, 'video_codec','audio_codec': str|None}.
+    The codec names matter because the GStreamer RTSP pipeline has to pick a
+    matching parser — guessing wrong makes tsdemux fail to link that branch.
 
     Order-independent: ffprobe's csv emits codec_name,codec_type (not the order
     given to -show_entries), so we scan every token rather than assume a column.
     """
-    info = {'video': False, 'audio': False, 'klv': False}
+    info = {'video': False, 'audio': False, 'klv': False,
+            'video_codec': None, 'audio_codec': None}
     try:
         out = subprocess.run(
             ['ffprobe', '-v', 'error', '-show_entries', 'stream=codec_type,codec_name',
@@ -10298,16 +10328,71 @@ def _probe_media_tracks(filepath):
             capture_output=True, text=True, timeout=15
         ).stdout
         for line in out.splitlines():
-            toks = [t.strip().lower() for t in line.split(',')]
+            toks = [t.strip().lower() for t in line.split(',') if t.strip()]
+            if not toks:
+                continue
+            # Whichever token isn't the codec_type keyword is the codec_name.
+            codec = next((t for t in toks if t not in _PROBE_KINDS), None)
             if 'video' in toks:
                 info['video'] = True
+                info['video_codec'] = info['video_codec'] or codec
             if 'audio' in toks:
                 info['audio'] = True
+                info['audio_codec'] = info['audio_codec'] or codec
             if 'data' in toks or any('klv' in t for t in toks):
                 info['klv'] = True
     except Exception:
         info['video'] = True  # assume at least a video track
     return info
+
+
+def _preflight_remote_target(host, port, protocol, timeout=6):
+    """Resolve and probe a remote target BEFORE launching the push process.
+
+    GStreamer and FFmpeg both collapse every connection failure into one generic
+    message ("Failed to connect. (Generic error)"), so a mistyped hostname, a
+    wrong port and a firewall drop all look identical to the user — after a full
+    connection-timeout wait. Checking here costs a few seconds and lets the UI
+    name the actual problem.
+
+    Returns (ok: bool, error: str|None).
+    """
+    try:
+        addrs = socket.getaddrinfo(host, int(port), type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False, ('Hostname "%s" does not resolve (DNS lookup failed). '
+                       'Check the spelling, or use an IP address.' % host)
+    except (ValueError, OSError) as e:
+        return False, 'Cannot look up %s:%s — %s' % (host, port, e)
+    if not addrs:
+        return False, 'Hostname "%s" does not resolve to any address.' % host
+
+    family, socktype, proto, _, sockaddr = addrs[0]
+    ip = sockaddr[0]
+
+    # SRT is UDP — a TCP connect() proves nothing about it, so resolving the
+    # name is as far as a pre-flight check can honestly go.
+    if protocol != 'rtsp':
+        return True, None
+
+    s = socket.socket(family, socktype, proto)
+    s.settimeout(timeout)
+    try:
+        s.connect(sockaddr)
+        return True, None
+    except socket.timeout:
+        return False, ('No response from %s:%s (%s) after %ds — the packets are being '
+                       'dropped, not refused. A firewall is blocking this port, either '
+                       'on the way out of this box or at the far end.' % (host, port, ip, timeout))
+    except ConnectionRefusedError:
+        return False, ('%s:%s (%s) refused the connection — the host is reachable but '
+                       'nothing is listening on that port. Check the port number.'
+                       % (host, port, ip))
+    except OSError as e:
+        return False, ('Cannot reach %s:%s (%s) — %s'
+                       % (host, port, ip, e.strerror or e))
+    finally:
+        s.close()
 
 @app.route('/api/test/stream/start/<filename>', methods=['POST'])
 @login_required
@@ -10445,6 +10530,16 @@ def start_remote_push():
         if not port.isdigit() or not (1 <= int(port) <= 65535):
             return jsonify({'success': False, 'error': 'Port must be a number between 1 and 65535'}), 400
 
+        # --- Pre-flight: name resolution + reachability ---
+        # Done BEFORE stopping the current push, so a typo'd target doesn't kill a
+        # working stream. Skipped when conn_timeout == 0, where "not reachable yet"
+        # is the whole point: that mode sits and retries until the target comes up.
+        if conn_timeout > 0:
+            reachable, why = _preflight_remote_target(
+                host, port, protocol, timeout=min(conn_timeout, 6))
+            if not reachable:
+                return jsonify({'success': False, 'error': why}), 400
+
         # Stop any existing remote push first (one remote target at a time)
         if remote_push_process:
             remote_push_process.terminate()
@@ -10478,6 +10573,10 @@ def start_remote_push():
         #    (video+audio, no KLV) if GStreamer isn't installed.
         #  - SRT (MPEG-TS): FFmpeg -map 0 -c copy carries everything incl. KLV.
         engine = 'ffmpeg'
+        tracks = _probe_media_tracks(filepath)
+        # Human-readable "what is actually going over the wire" descriptor, shown
+        # in the status banner so a dropped track is visible instead of silent.
+        track_bits = []
 
         if protocol == 'rtsp':
             transport = (data.get('transport') or 'tcp').strip().lower()
@@ -10489,9 +10588,8 @@ def start_remote_push():
 
             gst_bin = _gst_launch_bin()
             if gst_bin:
-                # GStreamer path: carries video + audio (re-encoded AAC) + KLV.
+                # GStreamer path: carries video + KLV, plus audio when it's AAC.
                 engine = 'gstreamer'
-                tracks = _probe_media_tracks(filepath)
                 location = f'rtsp://{host}:{port}'
                 if path:
                     location += '/' + path
@@ -10508,15 +10606,30 @@ def start_remote_push():
                     cmd.append(f'user-id={username}')
                 if password:
                     cmd.append(f'user-pw={password}')
-                # Video (assume H.264 — what the test/optimize pipeline produces): stream copy
-                cmd += ['d.', '!', 'queue', '!', 'h264parse', '!', 's.']
-                # Audio: re-encode to AAC (ADTS-from-TS has no RTP payloader as-is)
+                # Video: stream copy, with the parser matched to the actual codec.
+                # H.264 is what the test/optimize pipeline produces, but a file can
+                # arrive as H.265 and h264parse would never link to it.
+                vcodec = (tracks.get('video_codec') or 'h264').lower()
+                vparse = 'h265parse' if vcodec in ('hevc', 'h265') else 'h264parse'
+                cmd += ['d.', '!', 'queue', '!', vparse, '!', 's.']
+                track_bits.append(f'video {vcodec} → copy')
+                # Audio: ONLY AAC is forwarded (re-encoded — ADTS-from-TS has no RTP
+                # payloader as-is). Any other codec is dropped on purpose: pointing
+                # aacparse at e.g. an mp2 track makes tsdemux fail to link that
+                # branch, which stalls the whole pipeline's preroll and takes video
+                # and KLV down with it. Video + KLV are the payload that matters.
                 if tracks['audio']:
-                    cmd += ['d.', '!', 'queue', '!', 'aacparse', '!', 'avdec_aac', '!',
-                            'audioconvert', '!', 'audioresample', '!', 'avenc_aac', '!', 's.']
+                    acodec = (tracks.get('audio_codec') or 'unknown').lower()
+                    if acodec == 'aac':
+                        cmd += ['d.', '!', 'queue', '!', 'aacparse', '!', 'avdec_aac', '!',
+                                'audioconvert', '!', 'audioresample', '!', 'avenc_aac', '!', 's.']
+                        track_bits.append('audio aac → re-encoded')
+                    else:
+                        track_bits.append(f'audio {acodec} → dropped (RTSP push forwards AAC only)')
                 # KLV metadata: rtspclientsink auto-selects rtpklvpay for the data track
                 if tracks['klv']:
                     cmd += ['d.', '!', 'queue', '!', 's.']
+                    track_bits.append('KLV → forwarded')
             else:
                 # FFmpeg fallback (no KLV): video copy + audio re-encode to AAC.
                 auth = ''
@@ -10537,6 +10650,11 @@ def start_remote_push():
                     '-f', 'rtsp',
                     rtsp_url,
                 ]
+                track_bits.append(f"video {tracks.get('video_codec') or 'h264'} → copy")
+                if tracks['audio']:
+                    track_bits.append('audio → re-encoded aac')
+                if tracks['klv']:
+                    track_bits.append('KLV → dropped (needs GStreamer; FFmpeg cannot packetize KLV into RTP)')
 
             # Show creds in the status banner (password masked) so the user can confirm
             # auth is actually being applied, without leaking the password.
@@ -10570,6 +10688,12 @@ def start_remote_push():
             display_target = f'srt://{host}:{port}'
             if streamid:
                 display_target += f' (streamid: {streamid})'
+            # MPEG-TS over SRT carries every track as-is, KLV included.
+            track_bits.append(f"video {tracks.get('video_codec') or 'h264'} → copy")
+            if tracks['audio']:
+                track_bits.append(f"audio {tracks.get('audio_codec') or 'unknown'} → copy")
+            if tracks['klv']:
+                track_bits.append('KLV → forwarded')
 
         # Whether this push forwards KLV: SRT always does; RTSP only via GStreamer.
         if protocol == 'srt':
@@ -10616,6 +10740,7 @@ def start_remote_push():
             'engine': engine,
             'klv': carries_klv,
             'retry': retry,
+            'tracks': ' · '.join(track_bits),
         }
 
         return jsonify({'success': True, 'target': remote_push_target})
