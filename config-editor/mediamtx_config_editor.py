@@ -18,6 +18,7 @@ import json
 import re
 import socket
 import shutil
+import platform
 from urllib.parse import urlparse, quote
 import psutil  # For system metrics
 
@@ -12305,6 +12306,44 @@ def remove_firewall_rule():
 MEDIAMTX_GITHUB_API = 'https://api.github.com/repos/bluenviron/mediamtx/releases/latest'
 MEDIAMTX_BINARY = '/usr/local/bin/mediamtx'
 
+# Which release asset this host can actually run. Upstream names them
+# mediamtx_<ver>_linux_{amd64,arm64,armv7,armv6}.tar.gz — note arm64, NOT the
+# arm64v8 that older releases used and that the install scripts carried for
+# years. Without this the upgrade endpoint downloaded linux_amd64 everywhere;
+# on aarch64 that installs an x86 binary over /usr/local/bin/mediamtx and the
+# service dies with "Exec format error", status=203/EXEC. Mirrors what
+# infra-TAK's deploy path does.
+MEDIAMTX_ARCH_MAP = {
+    'x86_64': 'amd64',
+    'amd64': 'amd64',
+    'aarch64': 'arm64',
+    'arm64': 'arm64',
+    'armv8l': 'arm64',
+    'armv7l': 'armv7',
+    'armv6l': 'armv6',
+}
+MEDIAMTX_ARCH = MEDIAMTX_ARCH_MAP.get(platform.machine(), 'amd64')
+
+# ELF e_machine values, for checking a downloaded binary against this host
+# BEFORE it is installed. Read from the file header — the candidate is never
+# executed to test it (it is untrusted, and /tmp may be noexec).
+_ELF_MACHINE_FOR_ARCH = {'amd64': 0x3E, 'arm64': 0xB7, 'armv7': 0x28, 'armv6': 0x28}
+_ELF_MACHINE_NAMES = {0x3E: 'x86-64', 0xB7: 'aarch64', 0x28: 'ARM', 0x03: 'i386'}
+
+
+def elf_machine(path):
+    """Return the ELF e_machine of `path`, or None if it isn't a readable ELF.
+    None means 'can't tell' — callers must not treat that as a mismatch."""
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(20)
+    except OSError:
+        return None
+    if len(head) < 20 or head[:4] != b'\x7fELF':
+        return None
+    little = head[5] == 1          # EI_DATA: 1 = little-endian
+    return int.from_bytes(head[18:20], 'little' if little else 'big')
+
 @app.route('/api/mediamtx/version/check')
 @admin_required
 def check_mediamtx_version():
@@ -12485,6 +12524,39 @@ def mtx_systemctl(action):
                           capture_output=True, timeout=25)
 
 
+def mtx_unit_state():
+    """Current systemd state of the mediamtx unit ('active', 'activating',
+    'failed', ...). Read-only query, so it needs no privileged path."""
+    try:
+        r = subprocess.run(['systemctl', 'is-active', SERVICE_NAME],
+                           capture_output=True, text=True, timeout=10)
+        return (r.stdout or '').strip() or (r.stderr or '').strip() or 'unknown'
+    except Exception:
+        return 'unknown'
+
+
+def mtx_wait_active(timeout=20, settle=4.0):
+    """Wait for mediamtx to come up AND stay up. Returns (ok, last_state).
+
+    Sampling `is-active` once, a couple of seconds after `start`, is not enough
+    to tell a healthy start from a unit flapping under Restart= — which is
+    exactly what a binary the kernel can't exec (status=203/EXEC) produces. So
+    require the unit to still be active `settle` seconds after it first says it
+    is, and keep polling until `timeout` for a slow but healthy start.
+    """
+    deadline = time.time() + timeout
+    state = 'unknown'
+    while time.time() < deadline:
+        state = mtx_unit_state()
+        if state == 'active':
+            time.sleep(settle)
+            state = mtx_unit_state()
+            if state == 'active':
+                return True, state
+        time.sleep(1)
+    return False, state
+
+
 def mtx_restart_checked(timeout=25):
     """Restart MediaMTX via whatever privilege path exists, raising on failure.
 
@@ -12640,16 +12712,20 @@ def upgrade_mediamtx():
         
         remote_version = data.get('tag_name', '')
         
-        # Find the linux amd64 tar.gz asset
+        # Find the tar.gz asset for THIS host's architecture
+        asset_tag = 'linux_' + MEDIAMTX_ARCH
         download_url = None
         for asset in data.get('assets', []):
             name = asset.get('name', '')
-            if 'linux_amd64' in name and name.endswith('.tar.gz'):
+            if asset_tag in name and name.endswith('.tar.gz'):
                 download_url = asset.get('browser_download_url', '')
                 break
-        
+
         if not download_url:
-            return jsonify({'success': False, 'error': 'Could not find linux_amd64 download URL'}), 400
+            return jsonify({'success': False, 'error':
+                            f'MediaMTX {remote_version or "latest"} has no {asset_tag} '
+                            f'release asset for this host ({platform.machine()}). '
+                            'Nothing was changed.'}), 400
         
         # Refuse up-front if this box gives us no way to swap the binary —
         # better than stopping the service and failing halfway through.
@@ -12697,6 +12773,19 @@ def upgrade_mediamtx():
         if not os.path.exists(new_binary):
             return jsonify({'success': False, 'error': 'Binary not found in download'}), 400
 
+        # Sanity-check the candidate against this host BEFORE stopping anything.
+        # Catching a wrong-arch binary here costs zero downtime; catching it
+        # after the swap means the service is already dead with 203/EXEC.
+        want_machine = _ELF_MACHINE_FOR_ARCH.get(MEDIAMTX_ARCH)
+        got_machine = elf_machine(new_binary)
+        if want_machine and got_machine and got_machine != want_machine:
+            return jsonify({'success': False, 'error':
+                            'Downloaded MediaMTX binary is built for '
+                            + _ELF_MACHINE_NAMES.get(got_machine, hex(got_machine))
+                            + f' but this host is {platform.machine()} ('
+                            + _ELF_MACHINE_NAMES.get(want_machine, hex(want_machine))
+                            + '). Refusing to install it. Nothing was changed.'}), 400
+
         # Step 6: Stop MediaMTX — abort with nothing changed if we can't
         print(f"UPGRADE: Stopping MediaMTX for upgrade to {remote_version}...", flush=True)
         stop_res = mtx_systemctl('stop')
@@ -12719,24 +12808,50 @@ def upgrade_mediamtx():
         os.remove(tmp_tar)
         shutil.rmtree(tmp_dir)
 
-        # Step 10: Start MediaMTX with existing config
+        # Step 10: Start MediaMTX with existing config, and confirm it STAYS up.
+        # This has to stand on its own: previously a bad swap was only ever
+        # rescued because systemd happened to restart the unit.
         mtx_systemctl('start')
-        time.sleep(2)
+        started, unit_state = mtx_wait_active()
 
-        # Verify it started
-        result = subprocess.run(['systemctl', 'is-active', 'mediamtx'], capture_output=True, text=True)
-        if result.stdout.strip() != 'active':
-            # Rollback binary and YAML
-            print(f"UPGRADE: MediaMTX failed to start, rolling back...", flush=True)
-            if backup_path:
+        if not started:
+            print(f"UPGRADE: MediaMTX did not stay running (unit state: {unit_state}), rolling back...", flush=True)
+            rolled_back = False
+            rollback_error = ''
+            try:
+                if not backup_path:
+                    raise RuntimeError('no backup of the previous binary was taken, '
+                                       'so there is nothing to restore')
                 mtx_install_binary(backup_path)
-            if os.path.exists(yaml_backup_path):
-                mtx_copy_priv(yaml_backup_path, CONFIG_FILE)
-            mtx_systemctl('start')
-            return jsonify({'success': False, 'error': 'MediaMTX failed to start with new version. Rolled back to previous version.', 'rollback': True}), 400
-        
+                if os.path.exists(yaml_backup_path):
+                    mtx_copy_priv(yaml_backup_path, CONFIG_FILE)
+                # restart, not start: the unit may be mid-restart-loop by now
+                mtx_systemctl('restart')
+                rolled_back, rb_state = mtx_wait_active()
+                if not rolled_back:
+                    rollback_error = f'previous version did not come back up (unit state: {rb_state})'
+            except Exception as rb_exc:
+                rolled_back = False
+                rollback_error = str(rb_exc)
+
+            if rolled_back:
+                print(f"UPGRADE: rolled back to {previous_version or 'previous version'}", flush=True)
+                return jsonify({'success': False, 'rollback': True, 'error':
+                                f'MediaMTX {remote_version} did not stay running '
+                                f'(unit state: {unit_state}). Rolled back to '
+                                f'{previous_version or "the previous version"}, '
+                                'which is running again.'}), 400
+
+            print(f"UPGRADE: ROLLBACK FAILED: {rollback_error}", flush=True)
+            return jsonify({'success': False, 'rollback': False, 'error':
+                            f'MediaMTX {remote_version} did not stay running (unit state: '
+                            f'{unit_state}) AND the rollback did not restore service: '
+                            f'{rollback_error}. MediaMTX is DOWN on this host and needs '
+                            f'manual attention. Binary backup: {backup_path or "none"}; '
+                            f'config backup: {yaml_backup_path}.'}), 500
+
         print(f"UPGRADE: MediaMTX successfully upgraded to {remote_version}", flush=True)
-        
+
         return jsonify({
             'success': True,
             'new_version': remote_version,
