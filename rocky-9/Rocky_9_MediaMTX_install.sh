@@ -22,11 +22,16 @@ case $ARCH in
     x86_64)
         MEDIAMTX_ARCH="amd64"
         ;;
-    aarch64)
-        MEDIAMTX_ARCH="arm64v8"
+    aarch64|arm64)
+        # arm64, NOT arm64v8 — upstream renamed the asset and the old name now
+        # 404s, so this download failed on every aarch64 install.
+        MEDIAMTX_ARCH="arm64"
         ;;
     armv7l)
         MEDIAMTX_ARCH="armv7"
+        ;;
+    armv6l)
+        MEDIAMTX_ARCH="armv6"
         ;;
     *)
         echo "Unsupported architecture: $ARCH"

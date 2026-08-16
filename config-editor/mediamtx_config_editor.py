@@ -18,6 +18,7 @@ import json
 import re
 import socket
 import shutil
+import platform
 from urllib.parse import urlparse, quote
 import psutil  # For system metrics
 
@@ -33,7 +34,7 @@ def add_no_cache_headers(response):
     return response
 
 # Version - used by auto-update checker
-CURRENT_VERSION = "v2.1.3"
+CURRENT_VERSION = "v2.1.4"
 GITHUB_REPO = "takwerx/mediamtx-installer"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/config-editor/mediamtx_config_editor.py"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -6391,7 +6392,13 @@ HTML_TEMPLATE = '''
                     box.style.background = '#4d3a00'; box.style.borderColor = '#8a6d00'; icon.textContent = '🟡';
                     tgt = '<span style="color:#ffc107;">🟡 Target:</span> connecting…';
                 }
-                text.innerHTML = ourEnd + '<br>' + tgt + '<br>' + route;
+                // What is actually going over the wire, so a dropped audio or KLV
+                // track is visible rather than silently missing at the far end.
+                var tracksLine = '';
+                if (data.target.tracks) {
+                    tracksLine = '<br><span style="color:#aaa;">Tracks: ' + escapeHtml(data.target.tracks) + '</span>';
+                }
+                text.innerHTML = ourEnd + '<br>' + tgt + '<br>' + route + tracksLine;
             } else {
                 // Not pushing. If it stopped on an error, show it IN the banner (persistent),
                 // not a popup that vanishes — so the failure reason stays visible.
@@ -6407,6 +6414,23 @@ HTML_TEMPLATE = '''
                     box.style.display = 'none';
                 }
             }
+        }
+
+        // Paint a failure into the status banner. Pre-flight rejections (bad
+        // hostname, unreachable port) explain WHY in a sentence or two, which an
+        // alert() shows once and then loses — the banner keeps it on screen.
+        function showRemotePushError(msg) {
+            var box = document.getElementById('remote-push-status');
+            var icon = document.getElementById('remote-push-icon');
+            var text = document.getElementById('remote-push-status-text');
+            var stopBtn = document.getElementById('remote-push-stop-btn');
+            if (!box) { alert('Error: ' + msg); return; }
+            if (stopBtn) stopBtn.style.display = 'none';
+            box.style.display = 'block';
+            box.style.background = '#3a1a1a';
+            box.style.borderColor = '#8a2d2d';
+            if (icon) icon.textContent = '🔴';
+            text.innerHTML = '<span style="color:#f87171;">🔴 Not started:</span> ' + escapeHtml(msg);
         }
 
         function updateRemotePushStatus() {
@@ -6451,12 +6475,11 @@ HTML_TEMPLATE = '''
                 body: JSON.stringify(payload)
             }).then(function(r) { return r.json(); }).then(function(data) {
                 if (data.success) {
-                    alert('Remote push started!');
                     updateRemotePushStatus();
                 } else {
-                    alert('Error: ' + data.error);
+                    showRemotePushError(data.error || 'Unknown error');
                 }
-            }).catch(function(err) { alert('Error: ' + err); });
+            }).catch(function(err) { showRemotePushError('' + err); });
         }
 
         function stopRemotePush() {
@@ -10284,13 +10307,21 @@ def _gst_launch_bin():
     return shutil.which('gst-launch-1.0')
 
 
+_PROBE_KINDS = {'video', 'audio', 'data', 'subtitle', 'attachment'}
+
+
 def _probe_media_tracks(filepath):
-    """Detect which track types a media file has: {'video','audio','klv'} -> bool.
+    """Detect which track types a media file has, and the codec behind each.
+
+    Returns {'video','audio','klv': bool, 'video_codec','audio_codec': str|None}.
+    The codec names matter because the GStreamer RTSP pipeline has to pick a
+    matching parser — guessing wrong makes tsdemux fail to link that branch.
 
     Order-independent: ffprobe's csv emits codec_name,codec_type (not the order
     given to -show_entries), so we scan every token rather than assume a column.
     """
-    info = {'video': False, 'audio': False, 'klv': False}
+    info = {'video': False, 'audio': False, 'klv': False,
+            'video_codec': None, 'audio_codec': None}
     try:
         out = subprocess.run(
             ['ffprobe', '-v', 'error', '-show_entries', 'stream=codec_type,codec_name',
@@ -10298,16 +10329,71 @@ def _probe_media_tracks(filepath):
             capture_output=True, text=True, timeout=15
         ).stdout
         for line in out.splitlines():
-            toks = [t.strip().lower() for t in line.split(',')]
+            toks = [t.strip().lower() for t in line.split(',') if t.strip()]
+            if not toks:
+                continue
+            # Whichever token isn't the codec_type keyword is the codec_name.
+            codec = next((t for t in toks if t not in _PROBE_KINDS), None)
             if 'video' in toks:
                 info['video'] = True
+                info['video_codec'] = info['video_codec'] or codec
             if 'audio' in toks:
                 info['audio'] = True
+                info['audio_codec'] = info['audio_codec'] or codec
             if 'data' in toks or any('klv' in t for t in toks):
                 info['klv'] = True
     except Exception:
         info['video'] = True  # assume at least a video track
     return info
+
+
+def _preflight_remote_target(host, port, protocol, timeout=6):
+    """Resolve and probe a remote target BEFORE launching the push process.
+
+    GStreamer and FFmpeg both collapse every connection failure into one generic
+    message ("Failed to connect. (Generic error)"), so a mistyped hostname, a
+    wrong port and a firewall drop all look identical to the user — after a full
+    connection-timeout wait. Checking here costs a few seconds and lets the UI
+    name the actual problem.
+
+    Returns (ok: bool, error: str|None).
+    """
+    try:
+        addrs = socket.getaddrinfo(host, int(port), type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False, ('Hostname "%s" does not resolve (DNS lookup failed). '
+                       'Check the spelling, or use an IP address.' % host)
+    except (ValueError, OSError) as e:
+        return False, 'Cannot look up %s:%s — %s' % (host, port, e)
+    if not addrs:
+        return False, 'Hostname "%s" does not resolve to any address.' % host
+
+    family, socktype, proto, _, sockaddr = addrs[0]
+    ip = sockaddr[0]
+
+    # SRT is UDP — a TCP connect() proves nothing about it, so resolving the
+    # name is as far as a pre-flight check can honestly go.
+    if protocol != 'rtsp':
+        return True, None
+
+    s = socket.socket(family, socktype, proto)
+    s.settimeout(timeout)
+    try:
+        s.connect(sockaddr)
+        return True, None
+    except socket.timeout:
+        return False, ('No response from %s:%s (%s) after %ds — the packets are being '
+                       'dropped, not refused. A firewall is blocking this port, either '
+                       'on the way out of this box or at the far end.' % (host, port, ip, timeout))
+    except ConnectionRefusedError:
+        return False, ('%s:%s (%s) refused the connection — the host is reachable but '
+                       'nothing is listening on that port. Check the port number.'
+                       % (host, port, ip))
+    except OSError as e:
+        return False, ('Cannot reach %s:%s (%s) — %s'
+                       % (host, port, ip, e.strerror or e))
+    finally:
+        s.close()
 
 @app.route('/api/test/stream/start/<filename>', methods=['POST'])
 @login_required
@@ -10445,6 +10531,16 @@ def start_remote_push():
         if not port.isdigit() or not (1 <= int(port) <= 65535):
             return jsonify({'success': False, 'error': 'Port must be a number between 1 and 65535'}), 400
 
+        # --- Pre-flight: name resolution + reachability ---
+        # Done BEFORE stopping the current push, so a typo'd target doesn't kill a
+        # working stream. Skipped when conn_timeout == 0, where "not reachable yet"
+        # is the whole point: that mode sits and retries until the target comes up.
+        if conn_timeout > 0:
+            reachable, why = _preflight_remote_target(
+                host, port, protocol, timeout=min(conn_timeout, 6))
+            if not reachable:
+                return jsonify({'success': False, 'error': why}), 400
+
         # Stop any existing remote push first (one remote target at a time)
         if remote_push_process:
             remote_push_process.terminate()
@@ -10478,6 +10574,10 @@ def start_remote_push():
         #    (video+audio, no KLV) if GStreamer isn't installed.
         #  - SRT (MPEG-TS): FFmpeg -map 0 -c copy carries everything incl. KLV.
         engine = 'ffmpeg'
+        tracks = _probe_media_tracks(filepath)
+        # Human-readable "what is actually going over the wire" descriptor, shown
+        # in the status banner so a dropped track is visible instead of silent.
+        track_bits = []
 
         if protocol == 'rtsp':
             transport = (data.get('transport') or 'tcp').strip().lower()
@@ -10489,9 +10589,8 @@ def start_remote_push():
 
             gst_bin = _gst_launch_bin()
             if gst_bin:
-                # GStreamer path: carries video + audio (re-encoded AAC) + KLV.
+                # GStreamer path: carries video + KLV, plus audio when it's AAC.
                 engine = 'gstreamer'
-                tracks = _probe_media_tracks(filepath)
                 location = f'rtsp://{host}:{port}'
                 if path:
                     location += '/' + path
@@ -10508,15 +10607,30 @@ def start_remote_push():
                     cmd.append(f'user-id={username}')
                 if password:
                     cmd.append(f'user-pw={password}')
-                # Video (assume H.264 — what the test/optimize pipeline produces): stream copy
-                cmd += ['d.', '!', 'queue', '!', 'h264parse', '!', 's.']
-                # Audio: re-encode to AAC (ADTS-from-TS has no RTP payloader as-is)
+                # Video: stream copy, with the parser matched to the actual codec.
+                # H.264 is what the test/optimize pipeline produces, but a file can
+                # arrive as H.265 and h264parse would never link to it.
+                vcodec = (tracks.get('video_codec') or 'h264').lower()
+                vparse = 'h265parse' if vcodec in ('hevc', 'h265') else 'h264parse'
+                cmd += ['d.', '!', 'queue', '!', vparse, '!', 's.']
+                track_bits.append(f'video {vcodec} → copy')
+                # Audio: ONLY AAC is forwarded (re-encoded — ADTS-from-TS has no RTP
+                # payloader as-is). Any other codec is dropped on purpose: pointing
+                # aacparse at e.g. an mp2 track makes tsdemux fail to link that
+                # branch, which stalls the whole pipeline's preroll and takes video
+                # and KLV down with it. Video + KLV are the payload that matters.
                 if tracks['audio']:
-                    cmd += ['d.', '!', 'queue', '!', 'aacparse', '!', 'avdec_aac', '!',
-                            'audioconvert', '!', 'audioresample', '!', 'avenc_aac', '!', 's.']
+                    acodec = (tracks.get('audio_codec') or 'unknown').lower()
+                    if acodec == 'aac':
+                        cmd += ['d.', '!', 'queue', '!', 'aacparse', '!', 'avdec_aac', '!',
+                                'audioconvert', '!', 'audioresample', '!', 'avenc_aac', '!', 's.']
+                        track_bits.append('audio aac → re-encoded')
+                    else:
+                        track_bits.append(f'audio {acodec} → dropped (RTSP push forwards AAC only)')
                 # KLV metadata: rtspclientsink auto-selects rtpklvpay for the data track
                 if tracks['klv']:
                     cmd += ['d.', '!', 'queue', '!', 's.']
+                    track_bits.append('KLV → forwarded')
             else:
                 # FFmpeg fallback (no KLV): video copy + audio re-encode to AAC.
                 auth = ''
@@ -10537,6 +10651,11 @@ def start_remote_push():
                     '-f', 'rtsp',
                     rtsp_url,
                 ]
+                track_bits.append(f"video {tracks.get('video_codec') or 'h264'} → copy")
+                if tracks['audio']:
+                    track_bits.append('audio → re-encoded aac')
+                if tracks['klv']:
+                    track_bits.append('KLV → dropped (needs GStreamer; FFmpeg cannot packetize KLV into RTP)')
 
             # Show creds in the status banner (password masked) so the user can confirm
             # auth is actually being applied, without leaking the password.
@@ -10570,6 +10689,12 @@ def start_remote_push():
             display_target = f'srt://{host}:{port}'
             if streamid:
                 display_target += f' (streamid: {streamid})'
+            # MPEG-TS over SRT carries every track as-is, KLV included.
+            track_bits.append(f"video {tracks.get('video_codec') or 'h264'} → copy")
+            if tracks['audio']:
+                track_bits.append(f"audio {tracks.get('audio_codec') or 'unknown'} → copy")
+            if tracks['klv']:
+                track_bits.append('KLV → forwarded')
 
         # Whether this push forwards KLV: SRT always does; RTSP only via GStreamer.
         if protocol == 'srt':
@@ -10616,6 +10741,7 @@ def start_remote_push():
             'engine': engine,
             'klv': carries_klv,
             'retry': retry,
+            'tracks': ' · '.join(track_bits),
         }
 
         return jsonify({'success': True, 'target': remote_push_target})
@@ -12180,6 +12306,44 @@ def remove_firewall_rule():
 MEDIAMTX_GITHUB_API = 'https://api.github.com/repos/bluenviron/mediamtx/releases/latest'
 MEDIAMTX_BINARY = '/usr/local/bin/mediamtx'
 
+# Which release asset this host can actually run. Upstream names them
+# mediamtx_<ver>_linux_{amd64,arm64,armv7,armv6}.tar.gz — note arm64, NOT the
+# arm64v8 that older releases used and that the install scripts carried for
+# years. Without this the upgrade endpoint downloaded linux_amd64 everywhere;
+# on aarch64 that installs an x86 binary over /usr/local/bin/mediamtx and the
+# service dies with "Exec format error", status=203/EXEC. Mirrors what
+# infra-TAK's deploy path does.
+MEDIAMTX_ARCH_MAP = {
+    'x86_64': 'amd64',
+    'amd64': 'amd64',
+    'aarch64': 'arm64',
+    'arm64': 'arm64',
+    'armv8l': 'arm64',
+    'armv7l': 'armv7',
+    'armv6l': 'armv6',
+}
+MEDIAMTX_ARCH = MEDIAMTX_ARCH_MAP.get(platform.machine(), 'amd64')
+
+# ELF e_machine values, for checking a downloaded binary against this host
+# BEFORE it is installed. Read from the file header — the candidate is never
+# executed to test it (it is untrusted, and /tmp may be noexec).
+_ELF_MACHINE_FOR_ARCH = {'amd64': 0x3E, 'arm64': 0xB7, 'armv7': 0x28, 'armv6': 0x28}
+_ELF_MACHINE_NAMES = {0x3E: 'x86-64', 0xB7: 'aarch64', 0x28: 'ARM', 0x03: 'i386'}
+
+
+def elf_machine(path):
+    """Return the ELF e_machine of `path`, or None if it isn't a readable ELF.
+    None means 'can't tell' — callers must not treat that as a mismatch."""
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(20)
+    except OSError:
+        return None
+    if len(head) < 20 or head[:4] != b'\x7fELF':
+        return None
+    little = head[5] == 1          # EI_DATA: 1 = little-endian
+    return int.from_bytes(head[18:20], 'little' if little else 'big')
+
 @app.route('/api/mediamtx/version/check')
 @admin_required
 def check_mediamtx_version():
@@ -12360,6 +12524,39 @@ def mtx_systemctl(action):
                           capture_output=True, timeout=25)
 
 
+def mtx_unit_state():
+    """Current systemd state of the mediamtx unit ('active', 'activating',
+    'failed', ...). Read-only query, so it needs no privileged path."""
+    try:
+        r = subprocess.run(['systemctl', 'is-active', SERVICE_NAME],
+                           capture_output=True, text=True, timeout=10)
+        return (r.stdout or '').strip() or (r.stderr or '').strip() or 'unknown'
+    except Exception:
+        return 'unknown'
+
+
+def mtx_wait_active(timeout=20, settle=4.0):
+    """Wait for mediamtx to come up AND stay up. Returns (ok, last_state).
+
+    Sampling `is-active` once, a couple of seconds after `start`, is not enough
+    to tell a healthy start from a unit flapping under Restart= — which is
+    exactly what a binary the kernel can't exec (status=203/EXEC) produces. So
+    require the unit to still be active `settle` seconds after it first says it
+    is, and keep polling until `timeout` for a slow but healthy start.
+    """
+    deadline = time.time() + timeout
+    state = 'unknown'
+    while time.time() < deadline:
+        state = mtx_unit_state()
+        if state == 'active':
+            time.sleep(settle)
+            state = mtx_unit_state()
+            if state == 'active':
+                return True, state
+        time.sleep(1)
+    return False, state
+
+
 def mtx_restart_checked(timeout=25):
     """Restart MediaMTX via whatever privilege path exists, raising on failure.
 
@@ -12515,16 +12712,20 @@ def upgrade_mediamtx():
         
         remote_version = data.get('tag_name', '')
         
-        # Find the linux amd64 tar.gz asset
+        # Find the tar.gz asset for THIS host's architecture
+        asset_tag = 'linux_' + MEDIAMTX_ARCH
         download_url = None
         for asset in data.get('assets', []):
             name = asset.get('name', '')
-            if 'linux_amd64' in name and name.endswith('.tar.gz'):
+            if asset_tag in name and name.endswith('.tar.gz'):
                 download_url = asset.get('browser_download_url', '')
                 break
-        
+
         if not download_url:
-            return jsonify({'success': False, 'error': 'Could not find linux_amd64 download URL'}), 400
+            return jsonify({'success': False, 'error':
+                            f'MediaMTX {remote_version or "latest"} has no {asset_tag} '
+                            f'release asset for this host ({platform.machine()}). '
+                            'Nothing was changed.'}), 400
         
         # Refuse up-front if this box gives us no way to swap the binary —
         # better than stopping the service and failing halfway through.
@@ -12572,6 +12773,19 @@ def upgrade_mediamtx():
         if not os.path.exists(new_binary):
             return jsonify({'success': False, 'error': 'Binary not found in download'}), 400
 
+        # Sanity-check the candidate against this host BEFORE stopping anything.
+        # Catching a wrong-arch binary here costs zero downtime; catching it
+        # after the swap means the service is already dead with 203/EXEC.
+        want_machine = _ELF_MACHINE_FOR_ARCH.get(MEDIAMTX_ARCH)
+        got_machine = elf_machine(new_binary)
+        if want_machine and got_machine and got_machine != want_machine:
+            return jsonify({'success': False, 'error':
+                            'Downloaded MediaMTX binary is built for '
+                            + _ELF_MACHINE_NAMES.get(got_machine, hex(got_machine))
+                            + f' but this host is {platform.machine()} ('
+                            + _ELF_MACHINE_NAMES.get(want_machine, hex(want_machine))
+                            + '). Refusing to install it. Nothing was changed.'}), 400
+
         # Step 6: Stop MediaMTX — abort with nothing changed if we can't
         print(f"UPGRADE: Stopping MediaMTX for upgrade to {remote_version}...", flush=True)
         stop_res = mtx_systemctl('stop')
@@ -12594,24 +12808,50 @@ def upgrade_mediamtx():
         os.remove(tmp_tar)
         shutil.rmtree(tmp_dir)
 
-        # Step 10: Start MediaMTX with existing config
+        # Step 10: Start MediaMTX with existing config, and confirm it STAYS up.
+        # This has to stand on its own: previously a bad swap was only ever
+        # rescued because systemd happened to restart the unit.
         mtx_systemctl('start')
-        time.sleep(2)
+        started, unit_state = mtx_wait_active()
 
-        # Verify it started
-        result = subprocess.run(['systemctl', 'is-active', 'mediamtx'], capture_output=True, text=True)
-        if result.stdout.strip() != 'active':
-            # Rollback binary and YAML
-            print(f"UPGRADE: MediaMTX failed to start, rolling back...", flush=True)
-            if backup_path:
+        if not started:
+            print(f"UPGRADE: MediaMTX did not stay running (unit state: {unit_state}), rolling back...", flush=True)
+            rolled_back = False
+            rollback_error = ''
+            try:
+                if not backup_path:
+                    raise RuntimeError('no backup of the previous binary was taken, '
+                                       'so there is nothing to restore')
                 mtx_install_binary(backup_path)
-            if os.path.exists(yaml_backup_path):
-                mtx_copy_priv(yaml_backup_path, CONFIG_FILE)
-            mtx_systemctl('start')
-            return jsonify({'success': False, 'error': 'MediaMTX failed to start with new version. Rolled back to previous version.', 'rollback': True}), 400
-        
+                if os.path.exists(yaml_backup_path):
+                    mtx_copy_priv(yaml_backup_path, CONFIG_FILE)
+                # restart, not start: the unit may be mid-restart-loop by now
+                mtx_systemctl('restart')
+                rolled_back, rb_state = mtx_wait_active()
+                if not rolled_back:
+                    rollback_error = f'previous version did not come back up (unit state: {rb_state})'
+            except Exception as rb_exc:
+                rolled_back = False
+                rollback_error = str(rb_exc)
+
+            if rolled_back:
+                print(f"UPGRADE: rolled back to {previous_version or 'previous version'}", flush=True)
+                return jsonify({'success': False, 'rollback': True, 'error':
+                                f'MediaMTX {remote_version} did not stay running '
+                                f'(unit state: {unit_state}). Rolled back to '
+                                f'{previous_version or "the previous version"}, '
+                                'which is running again.'}), 400
+
+            print(f"UPGRADE: ROLLBACK FAILED: {rollback_error}", flush=True)
+            return jsonify({'success': False, 'rollback': False, 'error':
+                            f'MediaMTX {remote_version} did not stay running (unit state: '
+                            f'{unit_state}) AND the rollback did not restore service: '
+                            f'{rollback_error}. MediaMTX is DOWN on this host and needs '
+                            f'manual attention. Binary backup: {backup_path or "none"}; '
+                            f'config backup: {yaml_backup_path}.'}), 500
+
         print(f"UPGRADE: MediaMTX successfully upgraded to {remote_version}", flush=True)
-        
+
         return jsonify({
             'success': True,
             'new_version': remote_version,
@@ -13534,6 +13774,17 @@ def klv_runon_lines(klv):
     )
 
 
+def rtsp_transport_line(source_url):
+    """YAML rtspTransport line for RTSP pulls, or '' for other protocols.
+
+    MediaMTX pulls RTSP over UDP by default; on lossy links that drops RTP
+    packets and smears the video (invalid FU-A errors), so force TCP.
+    """
+    if source_url.startswith(('rtsp://', 'rtsps://')):
+        return '    rtspTransport: tcp\n'
+    return ''
+
+
 # --- Netbird connectivity (box-level; underpins the KLV "Netbird" transport) -
 # Mike self-hosts Netbird, so joining needs his management URL + a setup key.
 # Joined once per box; every KLV source then reaches the aggregator over the mesh.
@@ -13719,7 +13970,9 @@ def api_add_external_source():
         
         # Build the path entry
         on_demand_value = 'yes' if on_demand else 'no'
-        path_entry = f"\n  {name}:\n    source: {source_url}\n    sourceOnDemand: {on_demand_value}\n"
+        path_entry = f"\n  {name}:\n    source: {source_url}\n"
+        path_entry += rtsp_transport_line(source_url)
+        path_entry += f"    sourceOnDemand: {on_demand_value}\n"
         path_entry += klv_runon_lines(klv)
         
         # Insert into YAML - find the paths section and append before the last path or at end
@@ -13948,7 +14201,9 @@ def api_toggle_external_source():
             source_url = sources_metadata[name].get('source_url', '')
             on_demand = sources_metadata[name].get('on_demand', False)
             on_demand_value = 'yes' if on_demand else 'no'
-            path_entry = f"\n  {name}:\n    source: {source_url}\n    sourceOnDemand: {on_demand_value}\n"
+            path_entry = f"\n  {name}:\n    source: {source_url}\n"
+            path_entry += rtsp_transport_line(source_url)
+            path_entry += f"    sourceOnDemand: {on_demand_value}\n"
             path_entry += klv_runon_lines(sources_metadata[name].get('klv'))
             
             with open(CONFIG_FILE, 'r') as f:
@@ -14096,15 +14351,16 @@ def api_edit_external_source():
                     # Replace source line
                     if stripped.startswith('source:'):
                         new_lines.append(f'    source: {new_source_url}\n')
+                        new_lines.append(rtsp_transport_line(new_source_url))  # '' for non-RTSP
                         continue
                     # Replace sourceOnDemand line, then (re)write KLV runOn lines after it
                     elif stripped.startswith('sourceOnDemand:'):
                         new_lines.append(f'    sourceOnDemand: {on_demand_value}\n')
                         new_lines.append(klv_runon_lines(klv))  # '' clears it when disabled
                         continue
-                    # Drop any existing KLV runOn lines — they're rewritten above
+                    # Drop any existing KLV runOn / rtspTransport lines — rewritten above
                     elif (stripped.startswith('runOnReady:') or stripped.startswith('runOnReadyRestart:')
-                          or stripped.startswith('runOnNotReady:')):
+                          or stripped.startswith('runOnNotReady:') or stripped.startswith('rtspTransport:')):
                         continue
                     # Detect end of our path block
                     elif stripped and not line.startswith('    ') and not line.startswith('\t\t'):
@@ -14961,6 +15217,7 @@ if __name__ == '__main__':
         # Pass 1: Remove the full ~^live/(.+)$ block using indentation
         ffmpeg_start = None
         base_indent = 0
+        removed = False
         for i, line in enumerate(lines):
             if '~^live/(.+)$' in line:
                 ffmpeg_start = i
@@ -14977,7 +15234,13 @@ if __name__ == '__main__':
                         end -= 1
                     del lines[ffmpeg_start:end]
                     changed = True
+                    removed = True
                     break
+        # Block at end of file: no following line at base indent, so the
+        # loop above never fires — delete through EOF.
+        if ffmpeg_start is not None and not removed:
+            del lines[ffmpeg_start:]
+            changed = True
 
         # Pass 2: Clean up orphaned fragments from previous bad removals
         cleaned = []
