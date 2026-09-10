@@ -12489,6 +12489,22 @@ def mtx_copy_priv(src, dst):
         raise RuntimeError('broker cp failed: ' + (err.decode(errors='replace').strip() or 'cp')[:200])
 
 
+def _broker_available():
+    """True when the infra-TAK privilege broker is reachable AND will run our commands.
+
+    GH takwerx/infra-TAK#67 (mighkel, 2026-09-08, hardened Ubuntu 22.04 box): this used to
+    probe with `true`, which is not on the broker's EXEC_ALLOW. Every probe was a DENY in the
+    broker audit log, and the editor concluded the broker was unavailable and fell back to
+    `sudo` — which on a hardened box has no password and cannot work, so /api/deps/status
+    filled the journal with PAM auth failures on EVERY poll.
+
+    We do NOT ask for a broker allowlist exception, and the reporter explicitly did not
+    request one either. The fix is caller-side: probe with a command the broker already
+    permits — the same `systemctl is-enabled mediamtx` mtx_priv_mode() has always used.
+    """
+    return _mtx_broker_exec(['systemctl', 'is-enabled', 'mediamtx'], timeout=5) is not None
+
+
 def mtx_priv_mode():
     """'root' = privileged ops work in-process; 'broker' = infra-TAK broker
     socket is reachable; 'helper' = the sudo helper is provisioned; None = no
@@ -12593,7 +12609,7 @@ def mtx_install_binary(src_path):
     # (the broker won't cp from /tmp), then have the broker back up + swap + chmod.
     # The candidate is NEVER executed as root anywhere in this path — the broker
     # only cp's it into place; the mediamtx service then runs it as takwerx.
-    if _mtx_broker_exec(['true'], timeout=5) is not None:
+    if _broker_available():
         stage_dir = os.path.join(os.path.dirname(MTX_BIN_BACKUP_DIR), 'binstage')
         os.makedirs(stage_dir, exist_ok=True)
         staged = os.path.join(stage_dir, 'mediamtx')
@@ -12670,7 +12686,7 @@ def schedule_editor_self_restart(delay=1.5):
         _later(_root_restart)
         return True
 
-    if _mtx_broker_exec(['true'], timeout=5) is not None:
+    if _broker_available():
         def _broker_restart():
             br = _mtx_broker_exec(['systemctl', 'restart', 'mediamtx-webeditor'], timeout=25)
             if br is not None and br[0] == 0:
@@ -13388,21 +13404,21 @@ def deps_status():
     pkgs = DEPS_PACKAGES.get(pm, {})
     ff['update_available'] = _pkg_update_available(pkgs.get('ffmpeg', []), refresh) if ff['installed'] else False
     gs['update_available'] = _pkg_update_available(pkgs.get('gstreamer', []), refresh) if gs['installed'] else False
-    # Can this console actually install packages? (root, or passwordless sudo.)
-    # On managed infra-TAK boxes the console runs as a non-sudo user — there the
-    # deps come from the infra-TAK deploy, so we hide the in-UI install button.
+    # Can this console actually install packages? (root, the broker, or passwordless sudo.)
+    #
+    # Order matters, and it is the reverse of what it used to be (GH infra-TAK#67). This route
+    # is polled continuously by the page, so a `sudo -n` probe here runs on every poll — on a
+    # hardened infra-TAK box that is a PAM auth failure per poll, filling the journal, and it
+    # can never succeed there anyway. The broker IS the privileged path on those boxes, so ask
+    # it first and only fall back to sudo on a standalone box that has no broker at all.
     can_install = (os.geteuid() == 0)
+    if not can_install:
+        can_install = _broker_available()
     if not can_install:
         try:
             can_install = subprocess.run(['sudo', '-n', 'true'], capture_output=True, timeout=5).returncode == 0
         except Exception:
             can_install = False
-    # infra-TAK hardened boxes have no sudo but do have the privilege broker,
-    # which mediates package installs. Without this the button stayed hidden and
-    # the deps were unreachable from the UI on exactly the boxes that most need
-    # a one-click path, since nobody can ssh in and dnf on a managed host.
-    if not can_install:
-        can_install = _mtx_broker_exec(['true'], timeout=5) is not None
     return jsonify({'pkg_mgr': pm, 'can_install': can_install, 'ffmpeg': ff, 'gstreamer': gs})
 
 
@@ -13431,32 +13447,35 @@ def deps_update():
         # a Rocky 9.8 box that it permits `dnf install` and writes into
         # /usr/lib64/gstreamer-1.0.
         privileged = (os.geteuid() == 0)
+        use_broker = False
         if not privileged:
+            # Broker first — see _broker_available(). On a hardened box `sudo -n` cannot
+            # succeed and only costs a PAM failure in the journal (GH infra-TAK#67).
+            use_broker = _broker_available()
+        if not privileged and not use_broker:
             try:
                 privileged = subprocess.run(['sudo', '-n', 'true'], capture_output=True, timeout=5).returncode == 0
             except Exception:
                 privileged = False
 
-        use_broker = False
-        if not privileged:
-            use_broker = _mtx_broker_exec(['true'], timeout=5) is not None
-
         if use_broker:
             if pm == 'apt':
-                # apt MUST be told not to prompt. Without DEBIAN_FRONTEND
-                # noninteractive it can stop on a debconf question and sit there
-                # until the timeout -- long past any reverse proxy's limit, so the
-                # browser gets an HTML gateway error instead of our JSON and the
-                # page reports "Unexpected token '<'". `env` may not be on the
-                # broker's allowlist, so fall back to apt's own non-interactive
-                # switches, which cover the common config-file prompts.
+                # apt MUST be told not to prompt, or it stops on a debconf question and sits
+                # there past any reverse proxy's limit — the browser then gets an HTML gateway
+                # error instead of our JSON and the page reports "Unexpected token '<'".
+                #
+                # Neither of the two things that used to be wrapped around this call is needed,
+                # and both were REJECTED by the broker (GH infra-TAK#67):
+                #   * `env DEBIAN_FRONTEND=noninteractive` — the broker is in EXEC_DENY as an
+                #     exec wrapper, and it is redundant: the broker already injects
+                #     DEBIAN_FRONTEND=noninteractive and NEEDRESTART_MODE=l for apt/apt-get.
+                #   * `-o Dpkg::Options::=--force-conf{def,old}` — denied by the broker's
+                #     package-manager check as a hook-command escalation vector, with a second
+                #     check rejecting any argument containing `::`. Reshaping the flag cannot
+                #     get through, so the approach is dropped rather than renamed; plain
+                #     `apt-get install -y -q` behaves the same way through the broker.
                 _mtx_broker_exec(['apt-get', 'update', '-qq'], timeout=180)
-                apt_args = ['apt-get', 'install', '-y', '-q',
-                            '-o', 'Dpkg::Options::=--force-confdef',
-                            '-o', 'Dpkg::Options::=--force-confold'] + pkgs
-                br = _mtx_broker_exec(['env', 'DEBIAN_FRONTEND=noninteractive'] + apt_args, timeout=600)
-                if br is None or br[0] != 0:
-                    br = _mtx_broker_exec(apt_args, timeout=600)
+                br = _mtx_broker_exec(['apt-get', 'install', '-y', '-q'] + pkgs, timeout=600)
             else:
                 br = _mtx_broker_exec(['dnf', 'install', '-y'] + pkgs, timeout=600)
             if br is None:
