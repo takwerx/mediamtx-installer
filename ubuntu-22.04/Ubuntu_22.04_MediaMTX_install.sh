@@ -559,6 +559,19 @@ webrtcTrackGatherTimeout: 2s
 webrtcSTUNGatherTimeout: 5s
 
 ###############################################
+# Global settings -> MoQ server
+
+# Disabled. MediaMTX defaults MoQ ON with relative cert paths (moqServerKey:
+# auto.key / moqServerCert: auto.crt) that it generates into the service's working
+# directory. The unit below sets no WorkingDirectory, so that is / — and because
+# this unit runs as root the write SUCCEEDS, dropping /auto.key and /auto.crt in
+# the filesystem root and opening 8892 (and 8893 since v1.20.0) that nothing here
+# firewalls. Not a crash for us, unlike a non-root install, but not something
+# anyone asked for either. We install from releases/latest, so this arrived
+# without a version change on our side. Turn it back on if you actually want MoQ.
+moq: no
+
+###############################################
 # Global settings -> SRT server
 
 # Enable publishing and reading streams with the SRT protocol.

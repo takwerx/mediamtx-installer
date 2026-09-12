@@ -8,6 +8,9 @@ memory-bank/
 
 # Claude Code project guidance — local only, full copy mirrored in the private notes repo.
 CLAUDE.md
+# .claude/skills is a symlink into the PRIVATE notes repo. Committing it would put
+# internal paths (and, if ever de-symlinked, internal content) in this public repo.
+.claude/
 
 # Python bytecode — never commit
 __pycache__/

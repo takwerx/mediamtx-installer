@@ -119,6 +119,18 @@ mkdir -p /usr/local/etc
 # Move config file
 mv mediamtx.yml /usr/local/etc/
 
+# Disable MoQ. Unlike the Ubuntu script this one keeps upstream's shipped config, so
+# it inherits `moq: true` — relative cert paths (auto.key/auto.crt) written into the
+# service's working directory, which is / for the unit below. As root that write
+# succeeds and litters the filesystem root while opening 8892 (and 8893 since
+# v1.20.0), unfirewalled. Handle both shapes: rewrite the key if upstream ships one,
+# append it if not.
+if grep -qE '^[[:space:]]*moq:' /usr/local/etc/mediamtx.yml; then
+    sed -i -E 's/^([[:space:]]*)moq:[[:space:]]*(yes|true)[[:space:]]*$/\1moq: no/' /usr/local/etc/mediamtx.yml
+else
+    printf '\n# Disabled by the infra-TAK MediaMTX installer - see notes in the Ubuntu script.\nmoq: no\n' >> /usr/local/etc/mediamtx.yml
+fi
+
 echo "MediaMTX installed to /usr/local/bin/"
 echo "Configuration file: /usr/local/etc/mediamtx.yml"
 
