@@ -10067,9 +10067,26 @@ def restore_backup(backup_name):
 @app.route('/stream_logs')
 @login_required
 def stream_logs():
-    """Stream MediaMTX logs in real-time using Server-Sent Events"""
-    def generate():
-        # Start journalctl process
+    """Stream MediaMTX logs in real-time using Server-Sent Events.
+
+    Two defects fixed here, both diagnosed on a customer box (infra-TAK v10.1.68):
+
+      1. journalctl was read on stdout only. The editor runs as the unprivileged
+         console user, which on a hardened box is in no group that can read the
+         journal — journalctl then prints a permissions hint to STDERR and nothing
+         to stdout, so this yielded ZERO bytes: a blank pane with no explanation.
+         stderr is now surfaced as `[log viewer]` lines, so the failure says what
+         it is. (The other half is unit-side: SupplementaryGroups=systemd-journal.)
+      2. No keepalive. A reverse proxy with a short idle timeout kills a response
+         that has sent nothing, EventSource fires onerror, the page reopens, and the
+         user sees "Connection lost. Reconnecting..." forever. MediaMTX itself logs
+         only every ~30s, so even WITH journal access the stream would idle out.
+
+    The `_INFRATAK_SSE_HEARTBEAT` marker below is load-bearing — infra-TAK keys the
+    idempotency of its editor patch on it. See _broker_available().
+    """
+    def generate():  # _INFRATAK_SSE_HEARTBEAT
+        import select as _sel, time as _t
         process = subprocess.Popen(
             ['journalctl', '-u', SERVICE_NAME, '-f', '-n', '50'],
             stdout=subprocess.PIPE,
@@ -10077,15 +10094,48 @@ def stream_logs():
             universal_newlines=True,
             bufsize=1
         )
-        
+        # Say something immediately: a response that sends nothing is what a proxy
+        # kills, and what leaves the pane blank with no explanation.
+        yield ": open\n\n"
+        _open = [process.stdout, process.stderr]
+        _last = _t.monotonic()
         try:
-            for line in iter(process.stdout.readline, ''):
-                if line:
-                    # Send log line as Server-Sent Event
-                    yield f"data: {line.strip()}\n\n"
+            while True:
+                # NOTE: a closed pipe stays permanently "ready" in select(), so a stream
+                # that has hit EOF must be dropped from the set -- otherwise the loop
+                # spins at 100% CPU, never idles, and therefore never heartbeats.
+                _ready = _sel.select(_open, [], [], 1.0)[0] if _open else []
+                _got = False
+                for _fh in list(_ready):
+                    _line = _fh.readline()
+                    if _line == '':
+                        _open.remove(_fh)
+                        continue
+                    _txt = _line.strip()
+                    if not _txt:
+                        continue
+                    if _fh is process.stderr:
+                        yield f"data: [log viewer] {_txt}\n\n"
+                    else:
+                        yield f"data: {_txt}\n\n"
+                    _got = True
+                    _last = _t.monotonic()
+                if _got:
+                    continue
+                if not _open and process.poll() is not None:
+                    yield "data: [log viewer] journalctl exited; stream closed.\n\n"
+                    break
+                if not _open:
+                    _t.sleep(1.0)
+                if _t.monotonic() - _last >= 10:
+                    yield ": ping\n\n"   # keep proxies from idling us out
+                    _last = _t.monotonic()
         finally:
-            process.terminate()
-            process.wait()
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except Exception:
+                pass
     
     return app.response_class(generate(), mimetype='text/event-stream')
 
@@ -11407,10 +11457,100 @@ def get_recording_settings():
         print(f"Error reading recording settings: {e}")
         return jsonify({'enabled': False, 'retention': '168h'})
 
+def _set_path_defaults_keys(text, updates):
+    """Update-or-insert scalar keys inside the top-level `pathDefaults:` block.
+
+    This replaces four `sed -i '/^  record:/c\\  record: yes'` calls that could only
+    ever UPDATE. sed's `c` command rewrites a line that already matches and does
+    nothing at all when the key is absent, so on a config whose pathDefaults block
+    had been trimmed down (one in the field carried only `rtspDemuxMpegts: true`)
+    every recording setting was swallowed silently and the toggle read back as off.
+
+    Scoped deliberately to the TOP-LEVEL block: `paths:` -> `<stream>:` -> `record:`
+    is a per-path override living at a deeper indent, and must not be touched.
+
+    `updates` is a list of (key, value) pairs, applied in order. Returns the new
+    text, or None if the result would not parse as YAML (in which case the caller
+    leaves the config alone rather than writing something MediaMTX cannot load).
+    """
+    from io import StringIO
+
+    lines = text.splitlines(keepends=True)
+
+    def _is_top_level(line):
+        return line.strip() != '' and not line[:1].isspace()
+
+    # Locate the top-level `pathDefaults:` key - not a comment, not a nested one.
+    start = None
+    for i, line in enumerate(lines):
+        if _is_top_level(line) and re.match(r'^pathDefaults:\s*(#.*)?$', line):
+            start = i
+            break
+
+    if start is None:
+        # No block at all: build one and put it just before `paths:`, which is where
+        # MediaMTX's own shipped config keeps it. Falls back to appending at EOF.
+        block = ['pathDefaults:\n'] + ['  {}: {}\n'.format(k, v) for k, v in updates] + ['\n']
+        insert_at = len(lines)
+        for i, line in enumerate(lines):
+            if _is_top_level(line) and re.match(r'^paths:\s*(#.*)?$', line):
+                insert_at = i
+                break
+        if insert_at == len(lines) and lines and not lines[-1].endswith('\n'):
+            lines[-1] += '\n'
+        lines[insert_at:insert_at] = block
+    else:
+        # The block runs until the next line that starts in column 0.
+        end = len(lines)
+        for i in range(start + 1, len(lines)):
+            if _is_top_level(lines[i]):
+                end = i
+                break
+
+        # Take the indent from the block's existing children rather than assuming two
+        # spaces, so an inserted key lines up with its siblings instead of splitting
+        # the mapping across two indent levels (a YAML error, not a cosmetic one).
+        indent = '  '
+        for i in range(start + 1, end):
+            m = re.match(r'^(\s+)[A-Za-z_][A-Za-z0-9_]*:', lines[i])
+            if m:
+                indent = m.group(1)
+                break
+
+        missing = []
+        for key, value in updates:
+            pattern = re.compile(r'^' + re.escape(indent) + re.escape(key) + r':')
+            for i in range(start + 1, end):
+                if pattern.match(lines[i]):
+                    lines[i] = '{}{}: {}\n'.format(indent, key, value)
+                    break
+            else:
+                missing.append('{}{}: {}\n'.format(indent, key, value))
+
+        if missing:
+            # Append after the block's last non-blank line, so the shipped config's
+            # comment headers stay attached to the settings they describe.
+            anchor = start
+            for i in range(start + 1, end):
+                if lines[i].strip():
+                    anchor = i
+            if not lines[anchor].endswith('\n'):
+                lines[anchor] += '\n'
+            lines[anchor + 1:anchor + 1] = missing
+
+    new_text = ''.join(lines)
+    try:
+        yaml.load(StringIO(new_text))
+    except Exception:
+        return None
+    return new_text
+
+
 @app.route('/api/recordings/settings', methods=['POST'])
 @login_required
 def save_recording_settings():
-    """Save recording settings to MediaMTX config using sed (avoids ruamel.yaml corruption)"""
+    """Save recording settings to MediaMTX config by editing the file's lines directly
+    (never a ruamel round-trip, which would reflow the config and drop its comments)."""
     try:
         data = request.get_json()
         enabled = data.get('enabled', False)
@@ -11428,21 +11568,34 @@ def save_recording_settings():
         # Ensure recordings directory exists
         os.makedirs(RECORDINGS_DIR, exist_ok=True)
         
-        # Use sed to update settings in place (safe, doesn't corrupt YAML)
-        commands = [
-            # Update or add record setting
-            f"sed -i '/^  record:/c\\  record: {record_value}' {CONFIG_FILE}",
-            # Update or add recordPath
-            f"sed -i '/^  recordPath:/c\\  recordPath: {record_path}' {CONFIG_FILE}",
-            # Update or add recordFormat  
-            f"sed -i '/^  recordFormat:/c\\  recordFormat: {record_format}' {CONFIG_FILE}",
-            # Update or add recordDeleteAfter
-            f"sed -i '/^  recordDeleteAfter:/c\\  recordDeleteAfter: {retention}' {CONFIG_FILE}",
-        ]
-        
-        for cmd in commands:
-            subprocess.run(cmd, shell=True, check=True)
-        
+        # Write the four keys into the top-level pathDefaults block, INSERTING any that
+        # are missing. The previous implementation shelled out to
+        # `sed -i '/^  record:/c\\  record: yes'` four times and was documented as
+        # "update or add", but sed's `c` command can only rewrite a line that already
+        # matches. On a config with no record keys in pathDefaults, all four commands
+        # succeeded and changed nothing, so "Auto record streams" would not stay
+        # selected: the save reported success and the next read found no `record:` key
+        # and answered false. Doing it in Python also drops a shell round-trip per key
+        # and no longer needs write permission on /usr/local/etc itself (`sed -i`
+        # rewrites the directory entry, a plain write does not).
+        with open(CONFIG_FILE, 'r') as f:
+            original = f.read()
+
+        updated = _set_path_defaults_keys(original, [
+            ('record', record_value),
+            ('recordPath', record_path),
+            ('recordFormat', record_format),
+            ('recordDeleteAfter', retention),
+        ])
+        if updated is None:
+            return jsonify({'success': False,
+                            'error': f'Recording settings not saved: the result would not be '
+                                     f'valid YAML. {CONFIG_FILE} was left unchanged.'}), 500
+
+        if updated != original:
+            with open(CONFIG_FILE, 'w') as f:
+                f.write(updated)
+
         # Restart MediaMTX to apply changes
         mtx_restart_checked()
         
@@ -12489,7 +12642,7 @@ def mtx_copy_priv(src, dst):
         raise RuntimeError('broker cp failed: ' + (err.decode(errors='replace').strip() or 'cp')[:200])
 
 
-def _broker_available():
+def _broker_available():  # _MTX_PROBE_V2
     """True when the infra-TAK privilege broker is reachable AND will run our commands.
 
     GH takwerx/infra-TAK#67 (mighkel, 2026-09-08, hardened Ubuntu 22.04 box): this used to
@@ -12499,10 +12652,23 @@ def _broker_available():
     filled the journal with PAM auth failures on EVERY poll.
 
     We do NOT ask for a broker allowlist exception, and the reporter explicitly did not
-    request one either. The fix is caller-side: probe with a command the broker already
-    permits — the same `systemctl is-enabled mediamtx` mtx_priv_mode() has always used.
+    request one either. The fix is caller-side: probe with something the broker already
+    permits. Two other forms were tried and are wrong, so do not "simplify" back to them:
+    the broker's own {'op': 'ping'} looks right in its source but is not served on the
+    socket, so the probe just timed out; and `true` is the original bug. `systemctl` is
+    verb-gated rather than unit-gated, `is-active` is an allowed verb, and asking about
+    takwerx-broker itself says what we actually want to know — is the broker there. It
+    answers in ~10ms and audits as ALLOW on both distro families.
+
+    Only "did the daemon reply" matters, never the exit status: a DENIED answer still comes
+    back as a tuple, and a box with no broker fails to connect and gets None.
+
+    The `_MTX_PROBE_V2` marker above is load-bearing. infra-TAK's console carries a
+    text-surgery patch that rewrites this file on deployed boxes, and keys its idempotency
+    on that marker; with it present, the patch sees the fix is already upstream and leaves
+    the file alone. Do not remove it while infra-TAK <= v10.1.68 is in the field.
     """
-    return _mtx_broker_exec(['systemctl', 'is-enabled', 'mediamtx'], timeout=5) is not None
+    return _mtx_broker_exec(['systemctl', 'is-active', 'takwerx-broker'], timeout=5) is not None
 
 
 def mtx_priv_mode():
@@ -13364,12 +13530,21 @@ def _detect_gstreamer():
 
 def _pkg_update_available(pkgs, refresh=False):
     """Best-effort: is a newer version available for any of pkgs? Uses cached
-    metadata unless refresh=True (which needs sudo and is slower)."""
+    metadata unless refresh=True (which needs root and is slower).
+
+    The refresh used to go through `sudo` unconditionally. On a hardened infra-TAK box
+    that can never succeed — there is no sudo for the console user — so the metadata was
+    never actually refreshed, the "up to date" verdict was unverified, and every refresh
+    added another PAM auth failure to the journal (GH infra-TAK#67). Prefer the broker
+    there; sudo stays the path for standalone installs."""
     pm = _host_pkg_mgr()
     try:
         if pm == 'apt':
             if refresh:
-                _run_quiet(['apt-get', 'update', '-qq'], timeout=120, use_sudo=True)
+                if _broker_available():
+                    _mtx_broker_exec(['apt-get', 'update', '-qq'], timeout=120)
+                else:
+                    _run_quiet(['apt-get', 'update', '-qq'], timeout=120, use_sudo=True)
             for p in pkgs:
                 _, out = _run_quiet(['apt-cache', 'policy', p], timeout=20)
                 inst = cand = None
@@ -13384,7 +13559,10 @@ def _pkg_update_available(pkgs, refresh=False):
             return False
         elif pm == 'dnf':
             if refresh:
-                _run_quiet(['dnf', '-q', 'makecache'], timeout=120, use_sudo=True)
+                if _broker_available():
+                    _mtx_broker_exec(['dnf', '-q', 'makecache'], timeout=120)
+                else:
+                    _run_quiet(['dnf', '-q', 'makecache'], timeout=120, use_sudo=True)
             code, _ = _run_quiet(['dnf', '-q', 'check-update'] + list(pkgs), timeout=60)
             return code == 100  # dnf: 100 = updates available
     except Exception:
