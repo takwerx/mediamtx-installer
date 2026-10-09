@@ -34,7 +34,7 @@ def add_no_cache_headers(response):
     return response
 
 # Version - used by auto-update checker
-CURRENT_VERSION = "v2.1.5"
+CURRENT_VERSION = "v2.2.1"
 GITHUB_REPO = "takwerx/mediamtx-installer"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/config-editor/mediamtx_config_editor.py"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -196,6 +196,29 @@ def clear_srt_passphrase_backup():
     if os.path.exists(SRT_PASSPHRASE_BACKUP_FILE):
         os.remove(SRT_PASSPHRASE_BACKUP_FILE)
 
+def _yaml_scalar_text(raw):
+    """The string a YAML scalar holds, as written on one line of the file.
+
+    save_config() writes every password as `pass: "..."`, and returning the raw
+    text kept those quotes as part of the password. The console then sent
+    `"secret"` to MediaMTX, which refused it: Watch spun forever and share links
+    failed, but only for viewers outside the box -- loopback is authorised by
+    the `any` user, so the same request from the server itself worked.
+    Unquoted values are returned as-is (a YAML parse would turn 0123 into 123).
+    """
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in '"\'':
+        try:
+            from io import StringIO
+            value = YAML(typ='safe').load(StringIO(raw))
+            if isinstance(value, str):
+                return value
+        except Exception:
+            pass
+        return raw[1:-1]
+    return raw
+
+
 def get_hlsviewer_credential():
     """Get hlsviewer credential by reading directly from config file"""
     try:
@@ -210,7 +233,7 @@ def get_hlsviewer_credential():
                     if 'pass:' in lines[j]:
                         pass_line = lines[j].strip()
                         if ':' in pass_line:
-                            password = pass_line.split(':', 1)[1].strip()
+                            password = _yaml_scalar_text(pass_line.split(':', 1)[1].strip())
                             if password:
                                 # Ensure it's in group metadata
                                 ensure_hlsviewer_in_metadata()
@@ -1588,6 +1611,7 @@ HTML_TEMPLATE = '''
                     <div class="sidebar-group-items">
                         <button class="sidebar-item {% if tab == 'basic' %}active{% endif %}" onclick="showTab('basic', event)"><span class="sidebar-label">Basic Settings</span></button>
                         <button class="sidebar-item {% if tab == 'users' %}active{% endif %}" onclick="showTab('users', event)"><span class="sidebar-label">Users & Auth</span></button>
+                        <button class="sidebar-item {% if tab == 'streamkeys' %}active{% endif %}" onclick="showTab('streamkeys', event)"><span class="sidebar-label">Stream Keys</span></button>
                         <button class="sidebar-item {% if tab == 'protocols' %}active{% endif %}" onclick="showTab('protocols', event)"><span class="sidebar-label">Protocols</span></button>
                         <button class="sidebar-item {% if tab == 'hls' %}active{% endif %}" onclick="showTab('hls', event)"><span class="sidebar-label">HLS Tuning</span></button>
                         <button class="sidebar-item {% if tab == 'advanced' %}active{% endif %}" onclick="showTab('advanced', event)"><span class="sidebar-label">Advanced YAML</span></button>
@@ -1866,7 +1890,43 @@ HTML_TEMPLATE = '''
                     <p style="color: #999;">Loading...</p>
                 </div>
             </div>
-            
+
+            <!-- Stream Keys Tab -->
+            <div id="streamkeys" class="tab-content {% if tab == 'streamkeys' %}active{% endif %}">
+                <h2 class="section-title">Stream Keys</h2>
+                <p class="help-text">Publish-only credentials for encoders (OBS, DJI drones, hardware encoders). Each key can publish to one stream path and nothing else: it cannot watch, and it cannot publish anywhere else.</p>
+
+                <div id="stream-keys-rtmp-warning" class="alert alert-warning" style="display: none; margin-top: 20px;"></div>
+
+                <div class="alert alert-info" style="margin-top: 20px;">
+                    <strong>💡 How it works:</strong><br>
+                    Viewers watch the stream path (e.g. <code>live/field-camera</code>) with their own read credentials. Only the encoder holds the key, so knowing the path is not enough to publish over a live feed.<br>
+                    Rotating a key issues a new password; the encoder using the old one is refused from its next connection.
+                </div>
+
+                <div style="margin-top: 20px; padding: 20px; background: #2d2d2d; border-radius: 8px;">
+                    <h3 style="margin-top: 0;">Create Stream Key</h3>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 15px;">
+                        <div class="form-group">
+                            <label>Label</label>
+                            <input type="text" id="sk-label" maxlength="60" placeholder="e.g., Field Camera" oninput="suggestStreamKeyPath()">
+                            <p class="help-text">Who or what uses this key</p>
+                        </div>
+                        <div class="form-group">
+                            <label>Stream Path</label>
+                            <input type="text" id="sk-path" placeholder="live/field-camera" oninput="this.dataset.touched = '1'">
+                            <p class="help-text">Where the encoder publishes. Format: <code>app/name</code>, e.g. <code>live/field-camera</code></p>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" onclick="createStreamKey()">+ Create Stream Key</button>
+                </div>
+
+                <h3 style="margin-top: 30px;">Stream Keys</h3>
+                <div id="stream-keys-list">
+                    <p style="color: #999;">Loading...</p>
+                </div>
+            </div>
+
             <!-- Protocols Tab -->
             <div id="protocols" class="tab-content {% if tab == 'protocols' %}active{% endif %}">
                 <h2 class="section-title">Protocol Settings</h2>
@@ -3680,6 +3740,10 @@ HTML_TEMPLATE = '''
             if (tabName === 'users' && typeof loadMediaMTXUsers === 'function') {
                 loadMediaMTXUsers();
             }
+
+            if (tabName === 'streamkeys' && typeof loadStreamKeys === 'function') {
+                loadStreamKeys();
+            }
             
             // Load external sources when External Sources tab is opened
             if (tabName === 'sources' && typeof loadExternalSources === 'function') {
@@ -4650,7 +4714,8 @@ HTML_TEMPLATE = '''
             if (form) {
                 if (form.dataset.editing) delete form.dataset.editing;
                 if (form.dataset.editingIps) delete form.dataset.editingIps;
-                
+                delete form.dataset.editingPass;
+
                 // Reset button text back to "Create User"
                 const submitButton = form.querySelector('button[type="submit"]');
                 if (submitButton) {
@@ -4712,6 +4777,7 @@ HTML_TEMPLATE = '''
                     body: JSON.stringify({
                         oldUsername: editingUsername,
                         oldIps: editingIps,
+                        oldPass: form.dataset.editingPass,
                         groupName,
                         username,
                         password,
@@ -4723,6 +4789,7 @@ HTML_TEMPLATE = '''
                     if (data.success) {
                         delete form.dataset.editing;
                         delete form.dataset.editingIps;
+                        delete form.dataset.editingPass;
                         hideAddMediaMTXUserForm();
                         loadMediaMTXUsers();
                         reloadYAMLContent();
@@ -5574,7 +5641,8 @@ HTML_TEMPLATE = '''
             const form = document.getElementById('mediamtx-user-form');
             form.dataset.editing = username;
             form.dataset.editingIps = JSON.stringify(ips || []);
-            
+            form.dataset.editingPass = password || '';
+
             // Change button text to "Update User"
             const submitButton = form.querySelector('button[type="submit"]');
             if (submitButton) {
@@ -5585,13 +5653,13 @@ HTML_TEMPLATE = '''
             document.getElementById('add-mediamtx-user-form').scrollIntoView({behavior: 'smooth'});
         }
         
-        function revokeMediaMTXUser(username, ips) {
+        function revokeMediaMTXUser(username, ips, pass) {
             if (!confirm('Revoke access for user: ' + username + '?')) return;
-            
+
             fetch('/api/mediamtx/users/revoke', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({username, ips})
+                body: JSON.stringify({username, ips, pass})
             })
             .then(response => response.json())
             .then(data => {
@@ -5681,7 +5749,7 @@ HTML_TEMPLATE = '''
                         }
                         
                         html += '<p style="margin: 5px 0;"><strong>Permissions:</strong> ';
-                        const perms = user.permissions.map(p => p.action).join(', ');
+                        const perms = user.permissions.map(p => p.path ? p.action + ' (' + p.path + ')' : p.action).join(', ');
                         html += perms || 'None';
                         html += '</p>';
                         html += '</div>';
@@ -5697,7 +5765,7 @@ HTML_TEMPLATE = '''
                         const isHLSViewer = user.user === 'hlsviewer';
                         
                         if (!isPublicUser && !isHLSViewer) {
-                            html += '<button class="btn btn-danger" onclick="revokeMediaMTXUser(\\'' + user.user + '\\', ' + ipsJson + ')">🗑️ Revoke</button>';
+                            html += '<button class="btn btn-danger" onclick="revokeMediaMTXUser(\\'' + user.user + '\\', ' + ipsJson + ', \\'' + (user.pass || '') + '\\')">🗑️ Revoke</button>';
                         } else if (isHLSViewer) {
                             html += '<span style="color: #ff9800; font-size: 13px; margin-left: 10px;">⚠️ System User - Auto-generated for HLS playback (password edit only)</span>';
                         }
@@ -5735,6 +5803,139 @@ HTML_TEMPLATE = '''
             });
         }
         
+        // === STREAM KEYS ===
+        const streamKeyLabels = {};
+
+        function suggestStreamKeyPath() {
+            const pathField = document.getElementById('sk-path');
+            if (pathField.dataset.touched) return;
+            const slug = document.getElementById('sk-label').value.toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+            pathField.value = slug ? 'live/' + slug : '';
+        }
+
+        function streamKeyRow(label, value) {
+            const id = 'skv-' + Math.random().toString(36).slice(2);
+            return '<div style="margin: 8px 0;">' +
+                '<div style="color: #999; font-size: 12px; margin-bottom: 3px;">' + label + '</div>' +
+                '<div style="display: flex; gap: 8px; align-items: center;">' +
+                '<code id="' + id + '" style="flex: 1; min-width: 0; overflow-wrap: anywhere; background: #1a1a1a; padding: 6px 8px; border-radius: 4px;">' + escapeHtml(value) + '</code>' +
+                '<button class="btn btn-secondary" style="padding: 4px 10px;" onclick="copyToClipboard(document.getElementById(&quot;' + id + '&quot;).textContent)">Copy</button>' +
+                '</div></div>';
+        }
+
+        function loadStreamKeys() {
+            fetch('/api/stream-keys')
+                .then(r => r.json())
+                .then(data => {
+                    const warning = document.getElementById('stream-keys-rtmp-warning');
+                    if (!data.rtmp_enabled) {
+                        warning.innerHTML = '<strong>⚠️ RTMP is disabled.</strong> Keys still work over SRT and RTSP, but OBS and DJI need RTMP. Enable it in <a href="#" onclick="showTab(&quot;protocols&quot;, event); return false;">Configuration → Protocols</a>.';
+                        warning.style.display = 'block';
+                    } else {
+                        warning.style.display = 'none';
+                    }
+
+                    const container = document.getElementById('stream-keys-list');
+                    if (!data.keys || data.keys.length === 0) {
+                        container.innerHTML = '<p style="color: #999;">No stream keys yet.</p>';
+                        return;
+                    }
+                    let html = '';
+                    data.keys.forEach(k => {
+                        const u = k.urls || {};
+                        html += '<div style="background: #2d2d2d; padding: 20px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #4CAF50;">';
+                        html += '<div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex-wrap: wrap;">';
+                        html += '<div><h4 style="margin: 0;">' + escapeHtml(k.label) + '</h4>';
+                        html += '<p style="margin: 5px 0; color: #999;">Publishes to <code>' + escapeHtml(k.path) + '</code> · user <code>' + escapeHtml(k.user) + '</code></p></div>';
+                        html += '<div style="display: flex; gap: 10px;">';
+                        html += '<button class="btn btn-secondary" onclick="rotateStreamKey(&quot;' + escapeHtml(k.user) + '&quot;)">🔄 Rotate</button>';
+                        streamKeyLabels[k.user] = k.label;
+                        html += '<button class="btn btn-danger" onclick="revokeStreamKey(&quot;' + escapeHtml(k.user) + '&quot;)">🗑️ Revoke</button>';
+                        html += '</div></div>';
+
+                        html += '<details style="margin-top: 10px;"><summary style="cursor: pointer;">Show publish settings</summary>';
+                        if (u.obs_server) {
+                            html += '<h4 style="margin: 15px 0 5px 0;">OBS / encoders with separate Server + Key</h4>';
+                            html += streamKeyRow('Server', u.obs_server);
+                            html += streamKeyRow('Stream Key', u.obs_key);
+                        }
+                        if (u.obs_server_tls) {
+                            html += streamKeyRow('Server (RTMPS, encrypted)', u.obs_server_tls);
+                            if (!u.obs_server) html += streamKeyRow('Stream Key', u.obs_key);
+                        }
+                        if (u.rtmp || u.rtmps) {
+                            html += '<h4 style="margin: 15px 0 5px 0;">DJI / single-URL encoders</h4>';
+                            if (u.rtmp) html += streamKeyRow('RTMP URL', u.rtmp);
+                            if (u.rtmps) html += streamKeyRow('RTMPS URL (encrypted)', u.rtmps);
+                        }
+                        if (u.srt || u.rtsp) {
+                            html += '<h4 style="margin: 15px 0 5px 0;">Other protocols</h4>';
+                            if (u.srt) html += streamKeyRow('SRT URL', u.srt);
+                            if (u.rtsp) html += streamKeyRow('RTSP URL', u.rtsp);
+                        }
+                        html += '</details></div>';
+                    });
+                    container.innerHTML = html;
+                })
+                .catch(err => {
+                    document.getElementById('stream-keys-list').innerHTML = '<p style="color: #f44336;">Could not load stream keys: ' + escapeHtml(String(err)) + '</p>';
+                });
+        }
+
+        function streamKeyAction(url, body, doneMessage) {
+            return fetch(url, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    loadStreamKeys();
+                    if (typeof reloadYAMLContent === 'function') reloadYAMLContent();
+                    alert(doneMessage);
+                } else {
+                    alert('Error: ' + data.error);
+                }
+                return data;
+            })
+            .catch(err => alert('Error: ' + err));
+        }
+
+        function createStreamKey() {
+            const label = document.getElementById('sk-label').value.trim();
+            const path = document.getElementById('sk-path').value.trim().replace(/^[/]+|[/]+$/g, '');
+            if (!label) { alert('Enter a label'); return; }
+            if (!/^[A-Za-z0-9_.~-]+([/][A-Za-z0-9_.~-]+)+$/.test(path)) {
+                alert('Stream path must look like live/name (letters, numbers, - _ . ~ and at least one "/")');
+                return;
+            }
+            streamKeyAction('/api/stream-keys/create', {label, path}, 'Stream key created. MediaMTX restarted.')
+                .then(data => {
+                    if (data && data.success) {
+                        document.getElementById('sk-label').value = '';
+                        const pathField = document.getElementById('sk-path');
+                        pathField.value = '';
+                        delete pathField.dataset.touched;
+                    }
+                });
+        }
+
+        function rotateStreamKey(user) {
+            if (!confirm('Issue a new password for this key? The encoder using the current key will be refused from its next connection.')) return;
+            streamKeyAction('/api/stream-keys/rotate', {user}, 'Key rotated. Update the encoder with the new settings.');
+        }
+
+        function revokeStreamKey(user) {
+            if (!confirm('Revoke stream key "' + (streamKeyLabels[user] || user) + '"? The encoder using it can no longer publish.')) return;
+            streamKeyAction('/api/stream-keys/revoke', {user}, 'Stream key revoked.');
+        }
+
+        if (document.getElementById('streamkeys')?.classList.contains('active')) {
+            loadStreamKeys();
+        }
+
         // Load MediaMTX users if on users tab
         if (document.getElementById('users')) {
             loadMediaMTXUsers();
@@ -5909,9 +6110,12 @@ HTML_TEMPLATE = '''
             // Resolve relative URL to absolute so the popup (about:blank) can fetch it
             const absoluteUrl = isProxied ? (window.location.origin + streamUrl) : streamUrl;
 
-            // Stream name = second-to-last path segment (.../<name>/index.m3u8)
-            const urlParts = absoluteUrl.split('/');
-            const streamName = urlParts.length >= 2 ? urlParts[urlParts.length - 2] : 'stream';
+            // Stream name = the whole path before /index.m3u8, so nested paths such as
+            // live/drone1 keep their prefix. Taking only the last segment sent WebRTC
+            // to "drone1", a path with no stream on it.
+            let streamPath = decodeURIComponent(new URL(absoluteUrl).pathname);
+            if (isProxied) streamPath = streamPath.replace(/^[/]hls-proxy/, '');
+            const streamName = streamPath.replace(/^[/]+/, '').replace(/[/]index[.]m3u8$/, '') || 'stream';
 
             // playbackConfig is loaded once at page load; default to HLS so a
             // failed/absent fetch can never take the watch button offline.
@@ -5920,7 +6124,7 @@ HTML_TEMPLATE = '''
             // same-origin (no CORS), session-authenticated, and it lets the
             // WebRTC port stay bound to localhost like HLS already is.
             const whepUrl = (playbackConfig && playbackConfig.webrtc_available)
-                ? window.location.origin + '/whep/' + encodeURIComponent(streamName)
+                ? window.location.origin + '/whep/' + streamName.split('/').map(encodeURIComponent).join('/')
                 : '';
 
             console.log('[Watch] Resolved URL:', absoluteUrl, '| proxied:', isProxied, '| mode:', playbackMode);
@@ -8936,6 +9140,22 @@ def api_status():
     except:
         return jsonify({'status': 'unknown', 'color': 'secondary'})
 
+def is_legacy_relay_input(path_name, all_names):
+    """True for `live/X` when `X` also exists: the input half of the old FFmpeg
+    relay (publish to live/X, FFmpeg re-published it as X), which is counted as
+    viewers of X rather than listed on its own.
+
+    This used to hide every `live/` path. The relay is gone -- startup strips it
+    from mediamtx.yml -- so a `live/` path is now a real publisher, usually OBS or
+    a DJI drone on RTMP (`rtmp://host/live/<name>`). Those streams were online
+    and recording while Active Streams and the dashboard showed nothing.
+    """
+    return path_name.startswith('live/') and path_name[5:] in all_names
+
+
+STREAM_NAME_RE = re.compile(r'^[A-Za-z0-9_.~-]+(/[A-Za-z0-9_.~-]+)*$')
+
+
 @app.route('/api/streams')
 @login_required
 def api_streams():
@@ -8978,8 +9198,8 @@ def api_streams():
             
             for item in data.get('items', []):
                 path_name = item.get('name', '')
-                # Skip internal relay streams and 'all' path
-                if path_name and path_name != 'all' and not path_name.startswith('live/'):
+                # Skip legacy relay inputs and 'all' path
+                if path_name and path_name != 'all' and not is_legacy_relay_input(path_name, available_paths):
                     stream_info = {
                         'name': path_name,
                         'readers': 0,  # Will update from detail call
@@ -9389,6 +9609,293 @@ def api_email_test():
     else:
         return jsonify({'success': False, 'error': error})
 
+# === STREAM KEYS ===
+#
+# A stream key is a MediaMTX user that may publish to exactly one path and do
+# nothing else:
+#
+#     # Stream Key: Field Camera
+#     - user: sk_3f9a1c2e
+#       pass: "Xq7..."
+#       ips: []
+#       permissions:
+#       - action: publish
+#         path: live/field-camera
+#
+# The credentials ride in the RTMP query string, so OBS gets
+# Server `rtmp://host:1935/live` and Stream Key `field-camera?user=..&pass=..`.
+# Keeping the secret in the credentials rather than the path is the point: a
+# viewer has to know the path to watch, and a path-as-secret key would hand every
+# viewer the ability to publish over the live feed.
+#
+# Entries are recognised structurally (one publish permission with a path), the
+# same approach find_public_any_block() takes. The label is stored as the user's
+# group name, so add_group_comments_to_yaml_FIXED() keeps the comment above it
+# through ruamel saves made elsewhere in the editor.
+
+STREAM_KEY_LABEL_PREFIX = 'Stream Key: '
+STREAM_PATH_RE = re.compile(r'^[A-Za-z0-9_.~-]+(/[A-Za-z0-9_.~-]+)+$')
+
+
+def is_stream_key_user(u):
+    perms = list(u.get('permissions') or [])
+    return (str(u.get('user') or '') not in ('', 'any') and bool(u.get('pass'))
+            and len(perms) == 1 and perms[0].get('action') == 'publish'
+            and bool(perms[0].get('path')))
+
+
+def _is_hidden_teststream_viewer(u):
+    return (u.get('user') == 'any' and not list(u.get('ips') or []) and not u.get('pass')
+            and any(p.get('path') == 'teststream' for p in (u.get('permissions') or [])))
+
+
+def _matches_mediamtx_user(u, username, ips, password=None):
+    """Identify the one user an edit/revoke from the Users tab refers to.
+
+    Several `user: any` entries can share `ips: []` (public access, the hidden
+    teststream viewer, hand-made publish grants), so for 'any' the password is
+    compared too when the client sends it. Stream keys and the teststream viewer
+    have their own controls and are never matched here.
+    """
+    if str(u.get('user') or '') != username:
+        return False
+    if is_stream_key_user(u) or _is_hidden_teststream_viewer(u):
+        return False
+    if username != 'any':
+        return True
+    if list(u.get('ips') or []) != list(ips or []):
+        return False
+    return password is None or str(u.get('pass') or '') == str(password)
+
+
+def _merge_permissions(old_perms, actions):
+    """New permission list for the chosen actions, keeping any path scope.
+
+    The Users form only knows action names. Rebuilding as bare {'action': a}
+    turned "publish to live/game only" into "publish anywhere" -- on an 'any'
+    user, that let anyone on the internet publish to any path.
+    """
+    merged = []
+    for action in actions:
+        scoped = [p for p in (old_perms or []) if p.get('action') == action]
+        merged.extend(scoped if scoped else [{'action': action}])
+    return merged
+
+
+def _auth_users_insert_index(lines):
+    """Line index at which to append a new authInternalUsers entry: the next
+    top-level key after the section, so key order in the file doesn't matter."""
+    start = next((i for i, l in enumerate(lines) if l.startswith('authInternalUsers:')), None)
+    if start is None:
+        return None
+    i = start + 1
+    while i < len(lines):
+        s = lines[i]
+        if s.strip() and s[0] not in ' \t#-':
+            break
+        i += 1
+    # Leave comments that introduce the next key attached to it. A comment here
+    # can't be a user's group label -- those sit directly above a `- user:` line.
+    if i < len(lines):
+        while i > start + 1 and (lines[i - 1].startswith('#') or not lines[i - 1].strip()):
+            i -= 1
+    return i
+
+
+def _user_block(lines, username):
+    """(start, end) of the `- user: <username>` entry, including a
+    `# Stream Key:` label comment directly above it."""
+    for i, line in enumerate(lines):
+        if line.rstrip() == f'- user: {username}':
+            j = i + 1
+            while j < len(lines) and lines[j].startswith((' ', '\t')):
+                j += 1
+            start = i
+            if i > 0 and lines[i - 1].startswith('# ' + STREAM_KEY_LABEL_PREFIX):
+                start = i - 1
+            return start, j
+    return None
+
+
+def _write_config_text(new_text):
+    """Validate, back up, then write. Returns an error string or None."""
+    try:
+        from io import StringIO
+        yaml.load(StringIO(new_text))
+    except Exception as e:
+        return f'result would not be valid YAML ({e}); {CONFIG_FILE} left unchanged'
+    backup_file = os.path.join(BACKUP_DIR, f'mediamtx.yml.{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+    subprocess.run(['cp', CONFIG_FILE, backup_file], check=True)
+    with open(CONFIG_FILE, 'w') as f:
+        f.write(new_text)
+    return None
+
+
+def _stream_key_host():
+    domain = get_streaming_domain().get('domain')
+    return domain or request.host.split(':')[0]
+
+
+def stream_key_urls(path, user, password, host):
+    """Publish URLs for one key, only for protocols that are switched on."""
+    app_name, _, stream_name = path.rpartition('/')
+    creds = f'user={user}&pass={password}'
+    urls = {}
+    if read_yaml_field('rtmp', 'no') == 'yes':
+        enc = read_yaml_field('rtmpEncryption', 'no')
+        if enc != 'strict':
+            port = _listen_port('rtmpAddress', '1935')
+            urls['rtmp'] = f'rtmp://{host}:{port}/{path}?{creds}'
+            urls['obs_server'] = f'rtmp://{host}:{port}/{app_name}'
+        if enc in ('optional', 'strict'):
+            port = _listen_port('rtmpsAddress', '1936')
+            urls['rtmps'] = f'rtmps://{host}:{port}/{path}?{creds}'
+            urls['obs_server_tls'] = f'rtmps://{host}:{port}/{app_name}'
+        urls['obs_key'] = f'{stream_name}?{creds}'
+    if read_yaml_field('srt', 'no') == 'yes':
+        urls['srt'] = f'srt://{host}:{_listen_port("srtAddress", "8890")}?streamid=publish:{path}:{user}:{password}'
+    if read_yaml_field('rtsp', 'no') == 'yes':
+        urls['rtsp'] = f'rtsp://{user}:{password}@{host}:{_listen_port("rtspAddress", "8554")}/{path}'
+    return urls
+
+
+def _new_stream_key_password():
+    alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+    return ''.join(secrets.choice(alphabet) for _ in range(24))
+
+
+def _restart_after_key_change():
+    try:
+        mtx_restart_checked()
+    except Exception as e:
+        print(f"WARNING: MediaMTX restart after stream key change failed: {e}", flush=True)
+
+
+@app.route('/api/stream-keys')
+@admin_required
+def api_list_stream_keys():
+    group_metadata = load_group_metadata()
+    host = _stream_key_host()
+    keys = []
+    for u in read_yaml_users():
+        if not is_stream_key_user(u):
+            continue
+        label = group_metadata.get(u['user'], '')
+        if label.startswith(STREAM_KEY_LABEL_PREFIX):
+            label = label[len(STREAM_KEY_LABEL_PREFIX):]
+        path = u['permissions'][0]['path'].strip('\'"')
+        keys.append({
+            'user': u['user'],
+            'pass': u['pass'],
+            'label': label or u['user'],
+            'path': path,
+            'urls': stream_key_urls(path, u['user'], u['pass'], host),
+        })
+    return jsonify({
+        'keys': keys,
+        'rtmp_enabled': read_yaml_field('rtmp', 'no') == 'yes',
+        'rtmp_encryption': read_yaml_field('rtmpEncryption', 'no'),
+    })
+
+
+@app.route('/api/stream-keys/create', methods=['POST'])
+@admin_required
+def api_create_stream_key():
+    data = request.get_json() or {}
+    label = re.sub(r'[\x00-\x1f\x7f]', '', str(data.get('label', ''))).strip()[:60]
+    path = str(data.get('path', '')).strip().strip('/')
+    if not label:
+        return jsonify({'success': False, 'error': 'A label is required'}), 400
+    if not STREAM_PATH_RE.match(path) or '..' in path:
+        return jsonify({'success': False, 'error': 'Stream path must look like live/name '
+                        '(letters, numbers, - _ . ~, at least one "/")'}), 400
+
+    existing = {u['user'] for u in read_yaml_users()}
+    user = 'sk_' + secrets.token_hex(4)
+    while user in existing:
+        user = 'sk_' + secrets.token_hex(4)
+    password = _new_stream_key_password()
+
+    with open(CONFIG_FILE, 'r') as f:
+        lines = f.read().split('\n')
+    at = _auth_users_insert_index(lines)
+    if at is None:
+        return jsonify({'success': False, 'error': 'authInternalUsers section not found in config'}), 500
+    entry = [f'# {STREAM_KEY_LABEL_PREFIX}{label}',
+             f'- user: {user}',
+             f'  pass: "{password}"',
+             '  ips: []',
+             '  permissions:',
+             '  - action: publish',
+             f'    path: {path}']
+    err = _write_config_text('\n'.join(lines[:at] + entry + lines[at:]))
+    if err:
+        return jsonify({'success': False, 'error': err}), 500
+
+    group_metadata = load_group_metadata()
+    group_metadata[user] = STREAM_KEY_LABEL_PREFIX + label
+    save_group_metadata(group_metadata)
+
+    _restart_after_key_change()
+    return jsonify({'success': True, 'user': user})
+
+
+def _find_stream_key_or_404(user):
+    for u in read_yaml_users():
+        if u['user'] == user and is_stream_key_user(u):
+            return u
+    return None
+
+
+@app.route('/api/stream-keys/rotate', methods=['POST'])
+@admin_required
+def api_rotate_stream_key():
+    """New password, same user and path. Any encoder using the old key is
+    refused from its next connection."""
+    user = str((request.get_json() or {}).get('user', ''))
+    if not _find_stream_key_or_404(user):
+        return jsonify({'success': False, 'error': 'Stream key not found'}), 404
+    with open(CONFIG_FILE, 'r') as f:
+        lines = f.read().split('\n')
+    block = _user_block(lines, user)
+    if not block:
+        return jsonify({'success': False, 'error': 'Stream key not found'}), 404
+    password = _new_stream_key_password()
+    for i in range(*block):
+        if lines[i].startswith('  pass:'):
+            lines[i] = f'  pass: "{password}"'
+            break
+    err = _write_config_text('\n'.join(lines))
+    if err:
+        return jsonify({'success': False, 'error': err}), 500
+    _restart_after_key_change()
+    return jsonify({'success': True})
+
+
+@app.route('/api/stream-keys/revoke', methods=['POST'])
+@admin_required
+def api_revoke_stream_key():
+    user = str((request.get_json() or {}).get('user', ''))
+    if not _find_stream_key_or_404(user):
+        return jsonify({'success': False, 'error': 'Stream key not found'}), 404
+    with open(CONFIG_FILE, 'r') as f:
+        lines = f.read().split('\n')
+    block = _user_block(lines, user)
+    if not block:
+        return jsonify({'success': False, 'error': 'Stream key not found'}), 404
+    start, end = block
+    err = _write_config_text('\n'.join(lines[:start] + lines[end:]))
+    if err:
+        return jsonify({'success': False, 'error': err}), 500
+    group_metadata = load_group_metadata()
+    if group_metadata.pop(user, None) is not None:
+        save_group_metadata(group_metadata)
+    _restart_after_key_change()
+    return jsonify({'success': True})
+
+# === END STREAM KEYS ===
+
+
 @app.route('/api/mediamtx/users')
 @login_required
 def api_get_mediamtx_users():
@@ -9412,6 +9919,10 @@ def api_get_mediamtx_users():
         
         # Skip localhost exemption (hidden from UI)
         if username == 'any' and '127.0.0.1' in ips:
+            continue
+
+        # Stream keys are managed on their own tab
+        if is_stream_key_user(user):
             continue
         
         # Skip hidden teststream viewer (has path: teststream)
@@ -9550,29 +10061,16 @@ def api_update_mediamtx_user():
     if 'authInternalUsers' not in config:
         return jsonify({'success': False, 'error': 'No users configured'}), 400
     
-    # Find the specific user to update (match by username AND ips to handle multiple 'any' users)
+    # Find the specific user to update (see _matches_mediamtx_user for 'any' users)
     user_found = False
     for user in config['authInternalUsers']:
-        if user.get('user') == old_username:
-            # For 'any' users, also check IPs to find the right one
-            if old_username == 'any':
-                user_ips = user.get('ips', [])
-                # Match the specific 'any' user by IPs
-                if user_ips == old_ips:
-                    # Update this user
-                    user['user'] = username
-                    # Force password as quoted string to prevent YAML number parsing
-                    user['pass'] = DoubleQuotedScalarString(str(password)) if password else ''
-                    user['permissions'] = [{'action': perm} for perm in permissions]
-                    user_found = True
-                    break
-            else:
-                # For non-'any' users, just match username
-                user['user'] = username
-                user['pass'] = DoubleQuotedScalarString(str(password)) if password else ''
-                user['permissions'] = [{'action': perm} for perm in permissions]
-                user_found = True
-                break
+        if _matches_mediamtx_user(user, old_username, old_ips, data.get('oldPass')):
+            user['user'] = username
+            # Force password as quoted string to prevent YAML number parsing
+            user['pass'] = DoubleQuotedScalarString(str(password)) if password else ''
+            user['permissions'] = _merge_permissions(user.get('permissions'), permissions)
+            user_found = True
+            break
     
     if not user_found:
         return jsonify({'success': False, 'error': 'User not found'}), 404
@@ -9616,18 +10114,13 @@ def api_revoke_mediamtx_user():
     if username == 'any' and ips and '127.0.0.1' in ips:
         return jsonify({'success': False, 'error': 'Cannot delete localhost exemption (required for FFmpeg)'}), 400
     
-    # Remove the specific user (match by username AND ips for 'any' users)
-    original_count = len(config['authInternalUsers'])
-    if username == 'any':
-        # For 'any' users, match by IPs to delete the right one
-        config['authInternalUsers'] = [u for u in config['authInternalUsers'] 
-                                        if not (u.get('user') == username and u.get('ips', []) == ips)]
-    else:
-        # For other users, just match username
-        config['authInternalUsers'] = [u for u in config['authInternalUsers'] if u.get('user') != username]
-    
-    if len(config['authInternalUsers']) == original_count:
+    # Remove exactly one user. Filtering every 'any' entry with matching IPs also
+    # deleted the hidden teststream viewer, which shares `user: any, ips: []`.
+    idx = next((i for i, u in enumerate(config['authInternalUsers'])
+                if _matches_mediamtx_user(u, username, ips, data.get('pass'))), None)
+    if idx is None:
         return jsonify({'success': False, 'error': 'User not found'}), 404
+    del config['authInternalUsers'][idx]
     
     # Remove from group metadata
     group_metadata = load_group_metadata()
@@ -9874,28 +10367,31 @@ def save_protocols():
             if result.returncode == 0:
                 subprocess.run(['sed', '-i', 's/^  srtReadPassphrase:.*/  srtReadPassphrase:/', CONFIG_FILE], check=True)
         
-        # Auto-manage UFW for port changes and encryption
-        try:
-            # Ensure protocol ports are open in UFW
-            if rtsp_port:
-                subprocess.run(['sudo', 'ufw', 'allow', f'{rtsp_port}/tcp'], capture_output=True, timeout=10)
-            if rtsps_port and rtsp_encryption in ['optional', 'strict']:
-                subprocess.run(['sudo', 'ufw', 'allow', f'{rtsps_port}/tcp'], capture_output=True, timeout=10)
-            if rtmp_port:
-                subprocess.run(['sudo', 'ufw', 'allow', f'{rtmp_port}/tcp'], capture_output=True, timeout=10)
-            if rtmps_port and rtmp_encryption in ['optional', 'strict']:
-                subprocess.run(['sudo', 'ufw', 'allow', f'{rtmps_port}/tcp'], capture_output=True, timeout=10)
-            if hls_port:
-                subprocess.run(['sudo', 'ufw', 'allow', f'{hls_port}/tcp'], capture_output=True, timeout=10)
-            if srt_port:
-                subprocess.run(['sudo', 'ufw', 'allow', f'{srt_port}/udp'], capture_output=True, timeout=10)
-            print("✓ UFW rules updated for protocol ports", flush=True)
-        except Exception as e:
-            print(f"WARNING: UFW update failed: {e}", flush=True)
-        
+        # Firewall: open what the saved settings listen on. RTMP is managed as a
+        # pair so RTMPS (1936) is opened with "optional"/"strict" and closed again
+        # with "no" -- before, only 1935 was ever opened. HLS is skipped when bound
+        # to loopback: infra-TAK serves it through Caddy and 8888 must stay closed.
+        fw_changes = []
+        if rtsp_port:
+            fw_changes.append(('allow', rtsp_port, 'tcp'))
+        if rtsps_port and rtsp_encryption in ['optional', 'strict']:
+            fw_changes.append(('allow', rtsps_port, 'tcp'))
+        if rtmp_port or rtmps_port or rtmp_encryption:
+            fw_changes += rtmp_firewall_changes(
+                read_yaml_field('rtmp', 'no') == 'yes',
+                rtmp_encryption or read_yaml_field('rtmpEncryption', 'no'),
+                rtmp_port, rtmps_port)
+        if hls_port and not is_hls_localhost_bound():
+            fw_changes.append(('allow', hls_port, 'tcp'))
+        if srt_port:
+            fw_changes.append(('allow', srt_port, 'udp'))
+        fw_warning = firewall_warning(fw_apply(fw_changes))
+
         # Restart MediaMTX
         mtx_restart_checked()
         time.sleep(3)
+        if fw_warning:
+            return redirect(f'/?message={quote("Protocol settings saved and MediaMTX restarted. " + fw_warning)}&message_type=warning&tab={tab}')
         return redirect(f'/?message=Protocol settings saved and MediaMTX restarted successfully!&message_type=success&tab={tab}')
         
     except Exception as e:
@@ -11379,10 +11875,9 @@ def toggle_protocol():
             except Exception as e:
                 print(f"Warning: could not pin webrtcAddress to loopback: {e}", flush=True)
 
-        # Auto-manage UFW for protocol ports
+        # Auto-manage the firewall for protocol ports
         protocol_ports = {
             'rtsp': [('8554', 'tcp')],
-            'rtmp': [('1935', 'tcp')],
             'hls': [('8888', 'tcp')],
             'srt': [('8890', 'udp')],
             # 8189/udp only. WHEP signalling is proxied via /whep/<stream> and
@@ -11395,23 +11890,23 @@ def toggle_protocol():
             'webrtc': [('8189', 'udp')],
         }
         
-        if protocol in protocol_ports:
-            try:
-                for port, proto in protocol_ports[protocol]:
-                    if enabled:
-                        subprocess.run(['sudo', 'ufw', 'allow', f'{port}/{proto}'], capture_output=True, timeout=10)
-                        print(f"✓ UFW rule created: allow {port}/{proto} ({protocol.upper()})", flush=True)
-                    else:
-                        subprocess.run(['sudo', 'ufw', 'delete', 'allow', f'{port}/{proto}'], capture_output=True, timeout=10)
-                        print(f"✓ UFW rule removed: {port}/{proto} ({protocol.upper()})", flush=True)
-            except:
-                pass
-        
+        if protocol == 'rtmp':
+            # Configured ports, and RTMPS alongside RTMP when encryption is on.
+            fw_changes = rtmp_firewall_changes(enabled, read_yaml_field('rtmpEncryption', 'no'))
+        elif protocol == 'hls' and is_hls_localhost_bound():
+            fw_changes = []   # served through Caddy; 8888 stays closed
+        else:
+            fw_changes = [('allow' if enabled else 'delete', port, proto)
+                          for port, proto in protocol_ports.get(protocol, [])]
+        fw_warning = firewall_warning(fw_apply(fw_changes))
+
         mtx_restart_checked()
         time.sleep(3)
-        
+
         message = f'{protocol.upper()} {"enabled" if enabled else "disabled"}'
-        return jsonify({'success': True, 'enabled': enabled, 'message': message})
+        if fw_warning:
+            message += '\n\n' + fw_warning
+        return jsonify({'success': True, 'enabled': enabled, 'message': message, 'firewall_warning': fw_warning})
             
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -12285,6 +12780,112 @@ def rollback_webeditor():
 
 # === FIREWALL ENDPOINTS ===
 
+def _fw_exec(argv, timeout=20):
+    """Run one firewall command as root. Returns (returncode, stdout, stderr) as text.
+
+    Every firewall call used to be `subprocess.run(['sudo', 'ufw', ...])` with the
+    result thrown away. On infra-TAK boxes the editor runs as the unprivileged
+    console user, which has no sudo, so each of those calls failed with "a password
+    is required" and nothing said so: enabling RTMPS reported success while 1936
+    stayed closed. Same privilege order as mtx_systemctl(): in-process as root, then
+    the infra-TAK broker (which allowlists ufw and firewall-cmd), then `sudo -n`,
+    which fails fast instead of hanging on a password prompt.
+    """
+    if os.geteuid() == 0:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout or '', r.stderr or ''
+    br = _mtx_broker_exec(argv, timeout=timeout)
+    if br is not None:
+        rc, out, err = br
+        return rc, out.decode(errors='replace'), err.decode(errors='replace')
+    r = subprocess.run(['sudo', '-n'] + list(argv), capture_output=True, text=True, timeout=timeout)
+    return r.returncode, r.stdout or '', r.stderr or ''
+
+
+def _fw_tool():
+    """'ufw', 'firewalld', or None. ufw wins when both exist: infra-TAK installs a
+    ufw->firewalld shim on RHEL, and the Firewall tab only reads ufw's status."""
+    for path in ('/usr/sbin/ufw', '/sbin/ufw', '/usr/bin/ufw'):
+        if os.path.exists(path):
+            return 'ufw'
+    if shutil.which('ufw'):
+        return 'ufw'
+    if shutil.which('firewall-cmd') or os.path.exists('/usr/bin/firewall-cmd'):
+        return 'firewalld'
+    return None
+
+
+def fw_port(action, port, proto='tcp'):
+    """Open (action='allow') or close (action='delete') one port.
+
+    Returns (ok, message). Callers must surface a failure: a firewall rule that
+    silently did not apply looks exactly like a working one until someone
+    outside tries to connect.
+    """
+    port = str(port).strip()
+    if not port.isdigit() or not (1 <= int(port) <= 65535) or proto not in ('tcp', 'udp'):
+        return False, f'invalid port {port}/{proto}'
+    tool = _fw_tool()
+    if tool is None:
+        return False, 'no firewall tool (ufw or firewall-cmd) found'
+    try:
+        if tool == 'ufw':
+            argv = ['ufw', 'allow', f'{port}/{proto}'] if action == 'allow' \
+                else ['ufw', 'delete', 'allow', f'{port}/{proto}']
+            rc, out, err = _fw_exec(argv)
+        else:
+            flag = '--add-port' if action == 'allow' else '--remove-port'
+            rc, out, err = _fw_exec(['firewall-cmd', '--permanent', f'{flag}={port}/{proto}'])
+            if rc == 0:
+                rc, out, err = _fw_exec(['firewall-cmd', '--reload'])
+    except Exception as e:
+        return False, f'{port}/{proto}: {e}'
+    if rc != 0:
+        detail = (err or out).strip().splitlines()
+        return False, f'{port}/{proto}: ' + (detail[-1] if detail else f'exit {rc}')
+    verb = 'opened' if action == 'allow' else 'closed'
+    print(f"✓ Firewall: {verb} {port}/{proto} ({tool})", flush=True)
+    return True, f'{port}/{proto} {verb}'
+
+
+def fw_apply(changes):
+    """Apply [(action, port, proto), ...]. Returns a list of failure messages."""
+    failures = []
+    for action, port, proto in changes:
+        ok, msg = fw_port(action, port, proto)
+        if not ok:
+            print(f"WARNING: firewall {action} failed: {msg}", flush=True)
+            failures.append(msg)
+    return failures
+
+
+def _listen_port(field, default):
+    """Port number of a listener field such as `rtmpAddress: :1935`."""
+    value = str(read_yaml_field(field, '') or '')
+    port = value.rsplit(':', 1)[-1].strip()
+    return port if port.isdigit() else default
+
+
+def rtmp_firewall_changes(enabled, encryption, rtmp_port=None, rtmps_port=None):
+    """The firewall state RTMP needs: 1935 open unless encryption is strict,
+    1936 open when encryption is optional or strict, both closed when RTMP is off.
+    Previously only 1935 was ever opened, so RTMPS listened behind a closed port."""
+    rtmp_port = rtmp_port or _listen_port('rtmpAddress', '1935')
+    rtmps_port = rtmps_port or _listen_port('rtmpsAddress', '1936')
+    plain = enabled and encryption != 'strict'
+    tls = enabled and encryption in ('optional', 'strict')
+    return [('allow' if plain else 'delete', rtmp_port, 'tcp'),
+            ('allow' if tls else 'delete', rtmps_port, 'tcp')]
+
+
+def firewall_warning(failures):
+    """One sentence for the UI, or '' when every rule applied."""
+    if not failures:
+        return ''
+    return ('Firewall not updated: ' + '; '.join(failures) +
+            '. Open the port(s) manually or check the Firewall tab.')
+
+
 # Known port descriptions for auto-labeling
 KNOWN_PORTS = {
     '22/tcp': ('SSH', True),
@@ -12301,6 +12902,7 @@ KNOWN_PORTS = {
     '8888/tcp': ('HLS', False),
     '8890/udp': ('SRT', False),
     '1935/tcp': ('RTMP', False),
+    '1936/tcp': ('RTMPS', False),
     '8000/udp': ('RTP', False),
     '8001/udp': ('RTCP', False),
 }
@@ -12321,9 +12923,11 @@ def get_ssh_port():
 def get_firewall_rules():
     """Get current UFW rules"""
     try:
-        # Get UFW status
-        result = subprocess.run(['sudo', 'ufw', 'status'], capture_output=True, text=True, timeout=10)
-        output = result.stdout
+        # Get UFW status (through the same privilege path as rule changes, so an
+        # unprivileged editor reports real rules instead of an empty "inactive")
+        rc, output, err = _fw_exec(['ufw', 'status'], timeout=10)
+        if rc != 0:
+            return jsonify({'success': False, 'error': 'Could not read firewall status: ' + (err or output).strip()[:200]})
         
         # Parse status
         status = 'inactive'
@@ -12409,14 +13013,11 @@ def add_firewall_rule():
         if not port or not isinstance(port, int) or port < 1 or port > 65535:
             return jsonify({'success': False, 'error': 'Invalid port number'}), 400
         
-        if protocol == 'both':
-            subprocess.run(['sudo', 'ufw', 'allow', f'{port}/tcp'], capture_output=True, timeout=10)
-            subprocess.run(['sudo', 'ufw', 'allow', f'{port}/udp'], capture_output=True, timeout=10)
-            print(f"✓ UFW rules created: allow {port}/tcp and {port}/udp", flush=True)
-        else:
-            subprocess.run(['sudo', 'ufw', 'allow', f'{port}/{protocol}'], capture_output=True, timeout=10)
-            print(f"✓ UFW rule created: allow {port}/{protocol}", flush=True)
-        
+        protos = ['tcp', 'udp'] if protocol == 'both' else [protocol]
+        failures = fw_apply([('allow', port, p) for p in protos])
+        if failures:
+            return jsonify({'success': False, 'error': firewall_warning(failures)}), 500
+
         return jsonify({'success': True})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -12441,13 +13042,11 @@ def remove_firewall_rule():
         if rule in protected:
             return jsonify({'success': False, 'error': 'Cannot remove protected port'}), 403
         
-        result = subprocess.run(['sudo', 'ufw', 'delete', 'allow', rule], 
-                              capture_output=True, text=True, timeout=10)
-        
-        if result.returncode != 0:
-            return jsonify({'success': False, 'error': result.stderr or 'Failed to remove rule'}), 500
-        
-        print(f"✓ UFW rule removed: {rule}", flush=True)
+        port, proto = rule.split('/', 1)
+        ok, msg = fw_port('delete', port, proto)
+        if not ok:
+            return jsonify({'success': False, 'error': msg}), 500
+
         return jsonify({'success': True})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -14222,9 +14821,7 @@ def api_add_external_source():
                 port_match = re.search(r':(\d+)', source_url.replace('udp+mpegts://', ''))
                 if port_match:
                     udp_port = port_match.group(1)
-                    subprocess.run(['sudo', 'ufw', 'allow', f'{udp_port}/udp'], 
-                                   capture_output=True, timeout=10)
-                    print(f"✓ UFW rule created: allow {udp_port}/udp", flush=True)
+                    fw_apply([('allow', udp_port, 'udp')])
             except Exception as e:
                 print(f"Warning: Could not create UFW rule: {e}", flush=True)
         
@@ -14312,9 +14909,7 @@ def api_delete_external_source():
                 port_match = re.search(r':(\d+)', source_url.replace('udp+mpegts://', ''))
                 if port_match:
                     udp_port = port_match.group(1)
-                    subprocess.run(['sudo', 'ufw', 'delete', 'allow', f'{udp_port}/udp'],
-                                   capture_output=True, timeout=10)
-                    print(f"✓ UFW rule removed: {udp_port}/udp", flush=True)
+                    fw_apply([('delete', udp_port, 'udp')])
             except Exception as e:
                 print(f"Warning: Could not remove UFW rule: {e}", flush=True)
         
@@ -14905,10 +15500,13 @@ def whep_negotiate(stream, sdp_offer):
         return None, str(e)[:200]
 
 
-@app.route('/whep/<stream_name>', methods=['POST'])
+@app.route('/whep/<path:stream_name>', methods=['POST'])
 @login_required
 def whep_authenticated(stream_name):
-    """WHEP for logged-in console users (Active Streams watch button)."""
+    """WHEP for logged-in console users (Active Streams watch button).
+    `path:` so nested stream paths such as live/drone1 reach MediaMTX."""
+    if not STREAM_NAME_RE.match(stream_name):
+        return Response('invalid stream name', status=404, content_type='text/plain')
     answer, err = whep_negotiate(stream_name, request.get_data(as_text=True))
     if err:
         return Response(err, status=502, content_type='text/plain')
@@ -15045,6 +15643,10 @@ def api_share_links_revoke():
 
 def _watch_stream_impl(stream_name):
     """Shareable HLS player page - credentials embedded server-side"""
+    # The name is written into the page's HTML and JS below, and the route now
+    # takes nested paths (live/drone1), so allow only stream-path characters.
+    if not STREAM_NAME_RE.match(stream_name or ''):
+        return "Stream not found", 404
     try:
         # Get HLS viewer credentials
         cred = get_hlsviewer_credential()
@@ -15195,7 +15797,7 @@ def _watch_stream_impl(stream_name):
 # The overlay provides its own visibility-aware /watch/ route; registering both
 # crashes Flask with "View function mapping is overwriting an existing endpoint".
 if not LDAP_OVERLAY_ACTIVE:
-    watch_stream = app.route('/watch/<stream_name>', endpoint='watch_stream')(_watch_stream_impl)
+    watch_stream = app.route('/watch/<path:stream_name>', endpoint='watch_stream')(_watch_stream_impl)
 
 # === END SHAREABLE WATCH LINKS ===
 
@@ -15240,10 +15842,11 @@ def get_dashboard_metrics():
                                 live_paths[stream_name] = max(0, (readers_data or 0) - 1)
                     
                     # Process main paths and add live/ viewers
+                    all_names = {p.get('name', '') for p in paths_data['items']}
                     for path in paths_data['items']:
                         path_name = path.get('name', '')
-                        # Skip internal paths and live/ paths
-                        if path_name and path_name != 'all' and not path_name.startswith('live/'):
+                        # Skip internal paths and legacy relay inputs
+                        if path_name and path_name != 'all' and not is_legacy_relay_input(path_name, all_names):
                             # Count streams that are ready (have active source)
                             if path.get('ready', False):
                                 active_streams += 1

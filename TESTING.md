@@ -161,7 +161,7 @@ Go to **Configuration → Protocols**.
 
 ### Enable/Disable Protocols
 
-Toggle RTSP, HLS, SRT, and RTMP on/off. The firewall (UFW) rules are automatically managed — enabling RTMP opens port 1935, disabling it closes port 1935.
+Toggle RTSP, HLS, SRT, and RTMP on/off. The firewall rules are automatically managed — enabling RTMP opens port 1935 (and 1936 when RTMP encryption is Optional or Strict), disabling it closes both. If a rule cannot be applied (for example, no privilege to run `ufw`), the result message says which port failed.
 
 ### RTSP Settings
 
@@ -183,7 +183,8 @@ Toggle RTSP, HLS, SRT, and RTMP on/off. The firewall (UFW) rules are automatical
 ### RTMPS (Encrypted RTMP)
 
 - Port 1936 default
-- Requires certificates from Caddy installer
+- Requires certificates from Caddy installer (which sets RTMP Encryption to Optional)
+- Saving with Optional/Strict opens 1936 in the firewall; saving with No closes it. Strict also closes 1935
 
 ### SRT Settings
 
@@ -326,6 +327,17 @@ DJI drones (Avata, Mini series, etc.) stream via RTMP:
 
 For encrypted RTMPS (requires Caddy SSL):
 - Enter: `rtmps://YOUR-DOMAIN:1936/drone1`
+
+### With a stream key
+
+1. Go to **Configuration → Stream Keys**, enter a label (e.g. `Drone 1`); the path fills in as `live/drone-1`
+2. Click **Create Stream Key**, then **Show publish settings**
+3. DJI: paste the **RTMP URL** (it carries `?user=...&pass=...`). OBS: paste **Server** and **Stream Key** separately
+4. Verify `live/drone-1` appears in **Active Streams**
+5. Publish to a different path with the same credentials — MediaMTX must refuse it
+6. **Rotate** the key, restart the encoder with the old settings — it must be refused; the new settings must work
+7. **Revoke** the key — it disappears from the list and from **Advanced YAML**
+8. Check **Users & Auth**: stream keys never appear there
 
 ---
 

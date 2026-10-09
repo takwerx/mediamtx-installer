@@ -285,11 +285,15 @@ if [ "$SKIP_CERTS" != "true" ]; then
     # Enable encryption
     sed -i 's/^rtspEncryption: .*/rtspEncryption: "optional"/' /usr/local/etc/mediamtx.yml
     sed -i 's/^hlsEncryption: .*/hlsEncryption: yes/' /usr/local/etc/mediamtx.yml
+    # RTMPS alongside plain RTMP: "optional" keeps 1935 working for encoders
+    # that cannot do TLS (most DJI apps) and adds rtmps:// on 1936.
+    sed -i 's/^rtmpEncryption: .*/rtmpEncryption: "optional"/' /usr/local/etc/mediamtx.yml
+    ufw allow 1936/tcp > /dev/null 2>&1   # RTMPS
     
     echo "✓ Certificate paths written to mediamtx.yml"
     echo "✓ RTSPS encryption enabled (optional - both RTSP and RTSPS work)"
     echo "✓ HLS encryption enabled"
-    echo "✓ RTMP certificates configured (enable RTMPS via Web Editor → Protocols)"
+    echo "✓ RTMPS encryption enabled (optional - both RTMP and RTMPS work, port 1936 opened)"
     
     # Restart MediaMTX to pick up config changes
     systemctl restart mediamtx
@@ -316,7 +320,7 @@ echo "    RTSPS: rtsps://$DOMAIN:8322/[stream]  (after enabling encryption)"
 echo "    HLS:   https://$DOMAIN:8888/[stream]/  (after enabling encryption)"
 echo "    SRT:   srt://$DOMAIN:8890?streamid=[stream]"
 echo "    RTMP:  rtmp://$DOMAIN:1935/[stream]"
-echo "    RTMPS: rtmps://$DOMAIN:1936/[stream]  (after enabling encryption)"
+echo "    RTMPS: rtmps://$DOMAIN:1936/[stream]"
 echo ""
 echo "  To enable RTSPS encryption:"
 echo "    1. Open Web Editor → Advanced YAML"

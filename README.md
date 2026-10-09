@@ -57,16 +57,19 @@ This re-syncs the LDAP overlay and restarts the editor. **v2.0.1** fixes this at
 - ✅ Auto-downloads latest MediaMTX from GitHub
 - ✅ Ships with proven production YAML configuration
 - ✅ **MPEG-TS demuxing enabled by default** — RTSP sources (TAKICU, ATAK UAS, ISR cameras) work with HLS natively
+- ✅ **RTMP enabled by default** (port 1935) for OBS, DJI drones and hardware encoders
+- ✅ **Recording enabled by default** — MPEG-TS segments, deleted after 7 days
 - ✅ No FFmpeg transcoding required for MPEG-TS over RTSP sources
 - ✅ Random HLS viewer password generation
 - ✅ Unattended-upgrade detection (waits for system updates)
 - ✅ Firewall configuration (UFW)
 - ✅ systemd service with auto-start
 
-### 🎨 Web Configuration Editor (v2.0.4)
+### 🎨 Web Configuration Editor (v2.2.0)
 - ✅ **HLS Tuning page** — Segment count, duration, variant, always remux, write queue — all from the browser
 - ✅ **HLS presets** — One-click LAN, Internet, and Satellite (KU/KA) profiles
 - ✅ **MPEG-TS demux toggle** — Enable/disable RTSP MPEG-TS unwrapping from the UI (no YAML editing)
+- ✅ **Stream keys** — Publish-only credentials locked to one stream path, with ready-to-paste OBS, DJI, SRT and RTSP settings; rotate or revoke per encoder
 - ✅ User management with agency/group labels
 - ✅ Recording management with retention periods
 - ✅ Public access toggle
@@ -81,7 +84,8 @@ This re-syncs the LDAP overlay and restarts the editor. **v2.0.1** fixes this at
 ### 🔒 Caddy SSL Script (Optional)
 - ✅ Let's Encrypt SSL certificates (automatic)
 - ✅ HTTPS reverse proxy for web editor
-- ✅ Certificate paths auto-configured for RTSPS/HLS
+- ✅ Certificate paths auto-configured for RTSPS/RTMPS/HLS
+- ✅ RTMPS (port 1936) turned on alongside plain RTMP
 - ✅ TAK Server Caddy coexistence (appends, doesn't overwrite)
 - ✅ No manual certificate management
 
@@ -111,7 +115,7 @@ mediamtx-installer/
 │   └── Ubuntu_22.04_Install_MediaMTX_Caddy.sh    # SSL/Let's Encrypt setup
 ├── config-editor/
 │   ├── Install_MediaMTX_Config_Editor.sh          # Web editor installer (universal)
-│   └── mediamtx_config_editor.py                  # Web editor application (v2.0.4)
+│   └── mediamtx_config_editor.py                  # Web editor application (v2.2.0)
 ├── scripts/
 │   └── ku-band-simulator/                         # Ku-band link simulator (delay/jitter/loss)
 ├── MEDIAMTX-DEPLOYMENT-GUIDE.md                   # Complete deployment guide
@@ -190,6 +194,8 @@ sudo ./ubuntu-22.04/Ubuntu_22.04_Install_MediaMTX_Caddy.sh
 | **RTSPS** | 8322/tcp | Encrypted RTSP (after enabling) |
 | **HLS** | 8888/tcp | Browser playback |
 | **SRT** | 8890/udp | Low-latency, reliable |
+| **RTMP** | 1935/tcp | OBS, DJI drones, hardware encoders |
+| **RTMPS** | 1936/tcp | Encrypted RTMP (after Caddy install) |
 
 ### MPEG-TS Demuxing (v2.0.0+)
 
@@ -234,6 +240,8 @@ The scripts automatically configure these ports:
 - **8322/tcp** - RTSPS (after enabling encryption)
 - **8888/tcp** - HLS
 - **8890/udp** - SRT
+- **1935/tcp** - RTMP
+- **1936/tcp** - RTMPS (only if using Caddy)
 - **8000/udp** - RTP
 - **8001/udp** - RTCP
 - **5000/tcp** - Web editor
@@ -283,7 +291,7 @@ If these scripts helped you deploy a streaming server, please star this reposito
 ---
 
 **Latest Update:** March 2026  
-**Web Editor:** v2.0.4  
+**Web Editor:** v2.2.0  
 **Script Version:** 2.0  
 **Compatible with:** MediaMTX v1.17.0+ (auto-downloads latest)  
 **Tested on:** Ubuntu 22.04 LTS

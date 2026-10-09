@@ -131,6 +131,13 @@ else
     printf '\n# Disabled by the infra-TAK MediaMTX installer - see notes in the Ubuntu script.\nmoq: no\n' >> /usr/local/etc/mediamtx.yml
 fi
 
+# Record by default, with the same layout and 7-day retention as the Ubuntu
+# installer, so the Web Editor's Recordings page finds the files. Upstream
+# records nothing, and its relative ./recordings would land in / (the unit's CWD).
+# Anchored at two spaces: only the top-level pathDefaults keys match.
+mkdir -p /opt/mediamtx-webeditor/recordings
+sed -i -E     -e 's|^  record: .*|  record: yes|'     -e 's|^  recordPath: .*|  recordPath: /opt/mediamtx-webeditor/recordings/%path_%Y-%m-%d_%H-%M-%S-%f|'     -e 's|^  recordFormat: .*|  recordFormat: mpegts|'     -e 's|^  recordDeleteAfter: .*|  recordDeleteAfter: 168h|'     /usr/local/etc/mediamtx.yml
+
 echo "MediaMTX installed to /usr/local/bin/"
 echo "Configuration file: /usr/local/etc/mediamtx.yml"
 

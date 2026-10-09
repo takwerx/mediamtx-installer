@@ -427,7 +427,9 @@ rtspAuthMethods: [basic]
 # Global settings -> RTMP server
 
 # Enable publishing and reading streams with the RTMP protocol.
-rtmp: no
+# On by default: OBS, DJI drones and most hardware encoders publish over RTMP.
+# The Caddy installer turns on RTMPS (1936) once a certificate exists.
+rtmp: yes
 # Address of the RTMP listener. This is needed only when encryption is "no" or "optional".
 rtmpAddress: :1935
 # Encrypt connections with TLS (RTMPS).
@@ -642,8 +644,9 @@ pathDefaults:
   ###############################################
   # Default path settings -> Record
 
-  # Record streams to disk.
-  record: no
+  # Record streams to disk. On by default; retention is set below and
+  # can be changed in the Web Editor (Recordings).
+  record: yes
   # Path of recording segments.
   # Extension is added automatically.
   # Available variables are %path (path name), %Y %m %d (year, month, day),
@@ -663,7 +666,7 @@ pathDefaults:
   recordSegmentDuration: 1h
   # Delete segments after this timespan.
   # Set to 0s to disable automatic deletion.
-  recordDeleteAfter: 720h
+  recordDeleteAfter: 168h
 
   ###############################################
   # Default path settings -> Publisher source (when source is "publisher")
@@ -913,7 +916,8 @@ echo "  - FFmpeg localhost user (internal, no auth)"
 echo "  - HLS viewer user (read-only)"
 echo "  - Public teststream (no auth required)"
 echo "  - MPEG-TS demuxing enabled for RTSP publishers (TAKICU/UAS)"
-echo "  - Recording OFF by default (enable via Web Editor)"
+echo "  - Recording ON by default (MPEG-TS, deleted after 7 days)"
+echo "  - RTMP ON (port 1935) for OBS / DJI / hardware encoders"
 echo "  - Encryption OFF by default (enable after Caddy install)"
 
 echo ""
@@ -952,6 +956,7 @@ ufw --force enable > /dev/null 2>&1
 
 # MediaMTX ports
 ufw allow 8554/tcp   # RTSP
+ufw allow 1935/tcp   # RTMP
 ufw allow 8322/tcp   # RTSPS
 ufw allow 8888/tcp   # HLS
 ufw allow 8890/udp   # SRT
@@ -988,6 +993,8 @@ echo "    RTSP:  8554/tcp"
 echo "    RTSPS: 8322/tcp (enable encryption after Caddy)"
 echo "    HLS:   8888/tcp"
 echo "    SRT:   8890/udp"
+echo "    RTMP:  1935/tcp"
+echo "    RTMPS: 1936/tcp (opened by the Caddy installer)"
 echo ""
 echo "  Service Commands:"
 echo "    Status:  systemctl status mediamtx"
