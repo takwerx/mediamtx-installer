@@ -3,6 +3,7 @@
 # MediaMTX Web Configuration Editor - Installation Script (Ubuntu 22.04)
 # Installs Flask-based web editor for managing MediaMTX
 # v2.0 - Adds psutil, requests dependencies
+# v2.1 - Python packages go in a venv, so the install works on Ubuntu 24.04+ / Debian 12
 
 set -e
 
@@ -62,12 +63,34 @@ echo "Step 1: Installing Python Dependencies"
 echo "=========================================="
 
 apt-get update -qq > /dev/null 2>&1
-apt-get install -y python3 python3-pip python3-psutil > /dev/null 2>&1 || apt-get install -y python3 python3-pip python3-psutil
+apt-get install -y python3 python3-pip python3-venv python3-psutil > /dev/null 2>&1 || apt-get install -y python3 python3-pip python3-venv python3-psutil
 echo "✓ Python3 and pip installed"
 
-# Install required Python packages
-echo "Installing Flask and dependencies..."
-pip3 install Flask ruamel.yaml requests psutil 2>&1 | grep -v "already satisfied" || true
+# Install required Python packages into a venv that the service runs from.
+# Ubuntu 23.04+ and Debian 12 mark the system Python as externally managed
+# (PEP 668) and refuse a system-wide `pip3 install`. This used to be
+# `pip3 install ... || true`, which swallowed that refusal, printed ✓ anyway,
+# and left the service crash-looping on `import flask`.
+# --system-site-packages lets the venv use apt's python3-psutil, so boards with
+# no psutil wheel (armv7) don't need a compiler. --clear rebuilds the venv on a
+# re-run, which also repairs one still pointing at the Python from before a
+# release upgrade.
+WEB_EDITOR_DIR="/opt/mediamtx-webeditor"
+VENV_DIR="$WEB_EDITOR_DIR/venv"
+mkdir -p "$WEB_EDITOR_DIR"
+echo "Installing Flask and dependencies into $VENV_DIR..."
+if ! python3 -m venv --clear --system-site-packages "$VENV_DIR"; then
+    echo ""
+    echo "ERROR: Could not create a Python virtual environment at $VENV_DIR"
+    echo "Install python3-venv (apt-get install python3-venv) and re-run this script."
+    exit 1
+fi
+if ! "$VENV_DIR/bin/pip" install --quiet --disable-pip-version-check Flask ruamel.yaml requests psutil; then
+    echo ""
+    echo "ERROR: Could not install the web editor's Python packages (see pip's output above)."
+    echo "Fix that and re-run this script."
+    exit 1
+fi
 echo "✓ Python packages installed (Flask, ruamel.yaml, requests, psutil)"
 
 echo ""
@@ -75,9 +98,7 @@ echo "=========================================="
 echo "Step 2: Installing Web Editor Files"
 echo "=========================================="
 
-# Create web editor directory
-WEB_EDITOR_DIR="/opt/mediamtx-webeditor"
-mkdir -p "$WEB_EDITOR_DIR"
+# Create web editor directories
 mkdir -p "$WEB_EDITOR_DIR/backups"
 mkdir -p "$WEB_EDITOR_DIR/recordings"
 mkdir -p "$WEB_EDITOR_DIR/test_videos"
@@ -139,7 +160,7 @@ After=network.target mediamtx.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /opt/mediamtx-webeditor/mediamtx_config_editor.py
+ExecStart=/opt/mediamtx-webeditor/venv/bin/python3 /opt/mediamtx-webeditor/mediamtx_config_editor.py
 WorkingDirectory=/opt/mediamtx-webeditor
 Restart=always
 RestartSec=5
@@ -151,7 +172,9 @@ EOF
 
 systemctl daemon-reload
 systemctl enable mediamtx-webeditor
-systemctl start mediamtx-webeditor
+# restart, not start: on a re-run the editor is usually already running, and
+# `start` would leave it on the old unit (system python3) and the old editor file.
+systemctl restart mediamtx-webeditor
 
 echo "✓ Web editor service created and started"
 
