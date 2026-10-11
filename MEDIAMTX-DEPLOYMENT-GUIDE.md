@@ -354,8 +354,8 @@ netstat -tlnp | grep 8554
 journalctl -u mediamtx-webeditor -n 50 --no-pager
 
 # Common causes:
-# - Missing Python packages
-pip3 install Flask ruamel.yaml requests psutil
+# - Missing Python packages (the editor runs from its own venv)
+/opt/mediamtx-webeditor/venv/bin/pip install Flask ruamel.yaml requests psutil
 # - Port 5000 blocked by firewall
 ufw status
 # - mediamtx_config_editor.py not found

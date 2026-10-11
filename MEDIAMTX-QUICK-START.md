@@ -199,7 +199,7 @@ journalctl -u mediamtx -n 50 --no-pager
 **Web editor won't load:**
 ```bash
 journalctl -u mediamtx-webeditor -n 50 --no-pager
-# Check: pip3 install Flask ruamel.yaml requests psutil
+# Check: /opt/mediamtx-webeditor/venv/bin/pip install Flask ruamel.yaml requests psutil
 ```
 
 **Caddy SSL fails:**
