@@ -8354,6 +8354,29 @@ def set_scalar_field(field, value, after_field=None):
         return False
 
 
+def cert_file_exists(path):
+    """True if a TLS cert/key file exists, even where this process can't see it.
+
+    On hardened infra-TAK boxes the editor runs as an unprivileged user that is
+    not in group caddy, so it cannot traverse /var/lib/caddy. os.path.exists()
+    then answers False for Caddy's Let's Encrypt cert, which plainly exists and
+    which MediaMTX itself (group caddy) reads fine - and encryption could never
+    be enabled. A permission error is not absence: ask the infra-TAK broker
+    (`test` is a read-only predicate on its allowlist) before saying no.
+    """
+    try:
+        os.stat(path)
+        return True
+    except PermissionError:
+        pass
+    except OSError:
+        return False
+    if os.geteuid() == 0:
+        return False
+    br = _mtx_broker_exec(['test', '-f', path], timeout=10)
+    return br is not None and br[0] == 0
+
+
 def resolve_existing_cert():
     """Find a TLS cert/key already configured for any protocol on this box.
 
@@ -8368,7 +8391,7 @@ def resolve_existing_cert():
     for proto in ['webrtc', 'hls', 'rtsp', 'rtmp']:
         cert = (config.get(f'{proto}ServerCert') or '').strip()
         key = (config.get(f'{proto}ServerKey') or '').strip()
-        if cert and key and os.path.exists(cert) and os.path.exists(key):
+        if cert and key and cert_file_exists(cert) and cert_file_exists(key):
             return (cert, key)
     return (None, None)
 
@@ -9775,7 +9798,7 @@ def save_protocols():
             if not cert_key or not cert_file:
                 return redirect(f'/?message=Cannot enable RTSP encryption: Certificate paths not configured!&message_type=danger&tab={tab}')
             
-            if not os.path.exists(cert_key) or not os.path.exists(cert_file):
+            if not cert_file_exists(cert_key) or not cert_file_exists(cert_file):
                 return redirect(f'/?message=Cannot enable RTSP encryption: Certificate files not found!&message_type=danger&tab={tab}')
         
         # WebRTC encryption: reuse the cert Caddy already configured for the
