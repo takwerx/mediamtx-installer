@@ -154,7 +154,7 @@ sudo ./config-editor/Install_MediaMTX_Config_Editor.sh
 ```
 
 **What it does:**
-- Installs Python3, Flask, and dependencies
+- Installs Python3, plus Flask and dependencies in a venv at /opt/mediamtx-webeditor/venv
 - Deploys web editor to /opt/mediamtx-webeditor/
 - Creates systemd service on port 5000
 
