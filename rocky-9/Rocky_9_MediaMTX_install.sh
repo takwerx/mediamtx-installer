@@ -49,8 +49,8 @@ echo "=========================================="
 # Update system
 dnf update -y
 
-# Install wget, tar, and firewall tools
-dnf install -y wget tar firewalld
+# Install wget, tar, openssl (random password) and firewall tools
+dnf install -y wget tar openssl firewalld
 
 # Install FFmpeg (for HLS support and transcoding)
 echo ""
@@ -151,25 +151,123 @@ echo "Configuration file: /usr/local/etc/mediamtx.yml"
 
 echo ""
 echo "=========================================="
-echo "Step 6: Configuring Default Credentials"
+echo "Step 6: Configuring Credentials"
 echo "=========================================="
+
+# Characters MediaMTX accepts in a username/password; anything else stops it from starting.
+MTX_CREDENTIAL_RE='^[]A-Za-z0-9!$()*+.;<=>^_@#&{}[-]+$'
+MTX_CREDENTIAL_CHARS='letters, digits and ! $ ( ) * + . ; < = > [ ] ^ _ - { } @ # &'
+
+# True if a `user: any` entry (anonymous) may publish from any IP, as in upstream's
+# shipped mediamtx.yml.
+anyone_can_publish() {
+    awk '
+        function check() { if (is_any && open_ips && can_publish) found = 1 }
+        /^authInternalUsers:/ { in_users = 1; next }
+        in_users && /^[^[:space:]#-]/ { check(); in_users = 0 }
+        !in_users { next }
+        /^[[:space:]]*- user:/ { check(); u = $3; gsub(/["\047]/, "", u); is_any = (u == "any"); open_ips = 1; can_publish = 0; next }
+        /^[[:space:]]*ips:/ { open_ips = ($0 ~ /ips:[[:space:]]*(\[[[:space:]]*\])?[[:space:]]*$/) }
+        /^[[:space:]]*- action:[[:space:]]*publish/ { can_publish = 1 }
+        END { if (in_users) check(); exit !found }
+    ' "$1"
+}
 
 if [ "$KEEP_CONFIG" = "1" ]; then
     echo "Skipped: existing configuration keeps its users and passwords"
+    if anyone_can_publish "$CONFIG_FILE"; then
+        echo ""
+        echo "WARNING: this configuration lets ANYONE publish streams without a password"
+        echo "         (a 'user: any' entry with publish rights and no IP limit)."
+        echo "         Remove publish from that entry in $CONFIG_FILE (or in the web"
+        echo "         editor's Users tab) and add a named user instead, then:"
+        echo "         systemctl restart mediamtx"
+        echo "         To start over with this installer's secure default, move"
+        echo "         $CONFIG_FILE away and re-run this script."
+        echo ""
+    fi
 else
     # Prompt for username and password
-    read -p "Enter MediaMTX username [default: admin]: " MTX_USER
-    MTX_USER=${MTX_USER:-admin}
+    while true; do
+        read -p "Enter MediaMTX username [default: admin]: " MTX_USER || true
+        MTX_USER=${MTX_USER:-admin}
+        if [ "$MTX_USER" = "any" ]; then
+            echo "'any' means anonymous in MediaMTX; pick another username"
+        elif [[ ! "$MTX_USER" =~ $MTX_CREDENTIAL_RE ]]; then
+            echo "Username can only contain $MTX_CREDENTIAL_CHARS"
+        else
+            break
+        fi
+    done
 
-    read -sp "Enter MediaMTX password [default: admin]: " MTX_PASS
-    echo ""
-    MTX_PASS=${MTX_PASS:-admin}
+    while true; do
+        read -sp "Enter MediaMTX password [default: random]: " MTX_PASS || true
+        echo ""
+        if [ -z "$MTX_PASS" ]; then
+            MTX_PASS=$(openssl rand -base64 16 | tr -d '/+=\n' | head -c 16)
+            break
+        elif [[ ! "$MTX_PASS" =~ $MTX_CREDENTIAL_RE ]]; then
+            echo "Password can only contain $MTX_CREDENTIAL_CHARS"
+        else
+            break
+        fi
+    done
 
-    # Update credentials in config file
-    sed -i "s/user: addusernamehere/user: $MTX_USER/" /usr/local/etc/mediamtx.yml
-    sed -i "s/pass: addpasswordhere/pass: $MTX_PASS/" /usr/local/etc/mediamtx.yml
+    # Replace upstream's authInternalUsers list with our own (same layout as the
+    # Ubuntu template):
+    #   - localhost (internal FFmpeg, web editor test stream): read, publish, API, metrics
+    #   - the user entered above: publish and read from anywhere
+    #   - anyone: read the teststream path only
+    MTX_USER="$MTX_USER" MTX_PASS="$MTX_PASS" awk '
+        /^authInternalUsers:/ {
+            print "authInternalUsers:"
+            print "# Internal FFmpeg - localhost only"
+            print "- user: any"
+            print "  ips: [\"127.0.0.1\", \"::1\"]"
+            print "  permissions:"
+            print "  - action: read"
+            print "  - action: publish"
+            print "  - action: api"
+            print "  - action: metrics"
+            print "  - action: pprof"
+            print "# Installer user - publish and read"
+            print "- user: \"" ENVIRON["MTX_USER"] "\""
+            print "  pass: \"" ENVIRON["MTX_PASS"] "\""
+            print "  ips: []"
+            print "  permissions:"
+            print "  - action: publish"
+            print "  - action: read"
+            print "  - action: playback"
+            print "# Public test stream - no auth, teststream only"
+            print "- user: any"
+            print "  pass: \047\047"
+            print "  ips: []"
+            print "  permissions:"
+            print "  - action: read"
+            print "    path: teststream"
+            print ""
+            skipping = 1
+            next
+        }
+        # Upstream indents the list and its comments; the next column-0 line ends it.
+        skipping && (/^[[:space:]]/ || /^-/ || /^$/) { next }
+        { skipping = 0; print }
+    ' "$CONFIG_FILE" > "$CONFIG_FILE.new"
+    if ! grep -qxF -- "- user: \"$MTX_USER\"" "$CONFIG_FILE.new" || anyone_can_publish "$CONFIG_FILE.new"; then
+        rm -f "$CONFIG_FILE.new"
+        echo "ERROR: could not replace the users in $CONFIG_FILE; credentials NOT configured"
+        exit 1
+    fi
+    mv "$CONFIG_FILE.new" "$CONFIG_FILE"
 
-    echo "Credentials configured"
+    # Requests through the Caddy reverse proxy (HLS, WebRTC, API, metrics) arrive from
+    # localhost. Trust Caddy's X-Forwarded-For so they are checked as the real client,
+    # not as the localhost user above.
+    sed -i -E 's/^(hls|webrtc|api|metrics|pprof|playback)TrustedProxies:.*/\1TrustedProxies: ["127.0.0.1", "::1"]/' "$CONFIG_FILE"
+    # Browsers may not call the Control API from other origins (CSRF).
+    sed -i -E 's/^apiAllowOrigins:.*/apiAllowOrigins: []/' "$CONFIG_FILE"
+
+    echo "Credentials configured: anonymous publishing is off, '$MTX_USER' can publish and read"
 fi
 
 echo ""
