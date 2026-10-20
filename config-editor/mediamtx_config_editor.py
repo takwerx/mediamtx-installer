@@ -12147,6 +12147,88 @@ def check_for_update():
             'error': str(e)
         })
 
+# Every directory infra-TAK has installed itself to. start.sh runs from wherever the
+# repo was cloned, so older root installs live in a home dir; born-non-root installs
+# (infra-TAK v10.0.5+) relocate to /opt/infratak. A box can carry several clones at
+# once (a stale /root/infra-TAK next to the live /opt/infratak), so the running
+# console's own WorkingDirectory is asked first and the rest are fallbacks.
+INFRA_TAK_INSTALL_DIRS = [
+    '/opt/infratak',
+    '/root/infra-TAK',
+    '/home/takwerx/infra-TAK',
+    '/opt/infra-TAK',
+    '/home/ubuntu/infra-TAK',
+    '/home/admin/infra-TAK',
+]
+
+
+def _infra_tak_console_dir():
+    """The live infra-TAK console's install dir, from its systemd unit, or None."""
+    try:
+        r = subprocess.run(['systemctl', 'show', 'takwerx-console', '--property=WorkingDirectory'],
+                           capture_output=True, text=True, timeout=5)
+        wd = r.stdout.strip().split('=', 1)[-1].strip()
+        return wd or None
+    except Exception:
+        return None
+
+
+def resync_ldap_overlay(overlay_file='/opt/mediamtx-webeditor/mediamtx_ldap_overlay.py'):
+    """Refresh the infra-TAK LDAP overlay after an editor update, never downgrading it.
+
+    Looks in every infra-TAK install dir, takes the newest overlay by mtime, and copies
+    it only when it differs from the installed one AND is newer. The installed copy is
+    written by infra-TAK's own console on every console update, so a source older than
+    it is a stale clone: copying it back once put a March overlay on a box running the
+    October one. Returns (synced, message); the message says what was picked and why.
+    """
+    dirs = []
+    console_dir = _infra_tak_console_dir()
+    for d in ([console_dir] if console_dir else []) + INFRA_TAK_INSTALL_DIRS:
+        if d not in dirs:
+            dirs.append(d)
+
+    found = []  # (mtime, path)
+    seen = set()
+    for d in dirs:
+        path = os.path.join(d, 'mediamtx_ldap_overlay.py')
+        try:
+            real = os.path.realpath(path)
+            if real in seen or real == os.path.realpath(overlay_file) or not os.path.isfile(path):
+                continue
+            seen.add(real)
+            found.append((os.path.getmtime(path), path))
+        except OSError:
+            continue  # unreadable (e.g. /root as an unprivileged editor): skip it
+
+    if not found:
+        return False, f'no infra-TAK overlay found (looked in {", ".join(dirs)}); left as is'
+
+    def _stamp(t):
+        return datetime.fromtimestamp(t).strftime('%Y-%m-%d %H:%M')
+
+    src_mtime, src = max(found)
+    others = ', '.join(f'{p} ({_stamp(t)})' for t, p in sorted(found, reverse=True) if p != src)
+    picked = f'picked {src} ({_stamp(src_mtime)})' + (f' over {others}' if others else '')
+
+    try:
+        with open(src, 'rb') as f:
+            want = f.read()
+        with open(overlay_file, 'rb') as f:
+            have = f.read()
+        have_mtime = os.path.getmtime(overlay_file)
+    except OSError as e:
+        return False, f'{picked}; could not compare with {overlay_file}: {e}'
+
+    if want == have:
+        return False, f'{picked}; installed overlay already matches'
+    if src_mtime <= have_mtime:
+        return False, (f'{picked}; installed overlay is newer ({_stamp(have_mtime)}), '
+                       f'not replacing it with an older one')
+    shutil.copy2(src, overlay_file)
+    return True, f'{picked}; replaced installed overlay from {_stamp(have_mtime)}'
+
+
 @app.route('/api/update/apply', methods=['POST'])
 @admin_required
 def apply_update():
@@ -12232,20 +12314,14 @@ def apply_update():
 
         # Step 7: Re-sync LDAP overlay if this is an infra-TAK install
         overlay_synced = False
+        overlay_msg = ''
         overlay_file = '/opt/mediamtx-webeditor/mediamtx_ldap_overlay.py'
         if os.path.exists(overlay_file):
             try:
-                infra_tak_overlay = None
-                for candidate in ['/root/infra-TAK/mediamtx_ldap_overlay.py',
-                                  '/opt/infra-TAK/mediamtx_ldap_overlay.py']:
-                    if os.path.exists(candidate):
-                        infra_tak_overlay = candidate
-                        break
-                if infra_tak_overlay:
-                    shutil.copy2(infra_tak_overlay, overlay_file)
-                    overlay_synced = True
-                    print(f"✓ LDAP overlay re-synced from {infra_tak_overlay}", flush=True)
+                overlay_synced, overlay_msg = resync_ldap_overlay(overlay_file)
+                print(f"{'✓' if overlay_synced else 'INFO:'} LDAP overlay: {overlay_msg}", flush=True)
             except Exception as oe:
+                overlay_msg = f'failed to re-sync: {oe}'
                 print(f"WARNING: Failed to re-sync LDAP overlay: {oe}", flush=True)
         
         # Step 8: Restart the web editor onto the new file. Scheduled after the
@@ -12260,6 +12336,7 @@ def apply_update():
             'backup_file': backup_file,
             'config_backup': config_backup,
             'overlay_synced': overlay_synced,
+            'overlay_message': overlay_msg,
             'restarted': restarted,
             # Reported so the UI can say the update landed but is NOT yet live.
             # Claiming success here while the old process keeps serving is how a
