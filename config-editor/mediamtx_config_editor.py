@@ -5111,7 +5111,7 @@ HTML_TEMPLATE = '''
                     hideAddSourceForm();
                     loadExternalSources();
                     reloadYAMLContent();
-                    alert(successMsg);
+                    alert(successMsg + (data.warning ? '\\n\\n⚠️ ' + data.warning : ''));
                 } else {
                     alert('Error: ' + (data.error || 'Unknown error'));
                 }
@@ -14249,23 +14249,46 @@ def udp_listen_port(source_url):
         return None
 
 
+def _firewall_run(argv, timeout=20):
+    """Run a ufw / firewall-cmd command as root: in-process when root, else via the
+    infra-TAK broker (hardened boxes, console unprivileged), else sudo -n. Returns
+    (returncode, error_text)."""
+    if os.geteuid() == 0:
+        r = subprocess.run(argv, capture_output=True, timeout=timeout)
+        return r.returncode, r.stderr.decode(errors='replace')
+    br = _mtx_broker_exec(argv, timeout=timeout)
+    if br is not None:
+        return br[0], br[2].decode(errors='replace')
+    r = subprocess.run(['sudo', '-n'] + argv, capture_output=True, timeout=timeout)
+    return r.returncode, r.stderr.decode(errors='replace')
+
+
 def set_udp_firewall(port, allow):
-    """Best effort: open or close a UDP port in ufw (Ubuntu) or firewalld (Rocky)."""
+    """Best effort: open or close a UDP port in ufw (Ubuntu) or firewalld (Rocky).
+
+    Returns '' on success or when there is nothing to do, else a short warning
+    for the operator (the source itself is saved either way)."""
     if not port or (not allow and port in MTX_RESERVED_UDP_PORTS):
-        return
+        return ''
     try:
         if shutil.which('ufw'):
-            cmd = ['sudo', 'ufw', 'allow', f'{port}/udp'] if allow else ['sudo', 'ufw', 'delete', 'allow', f'{port}/udp']
-            subprocess.run(cmd, capture_output=True, timeout=10)
+            rc, err = _firewall_run(['ufw', 'allow', f'{port}/udp'] if allow else ['ufw', 'delete', 'allow', f'{port}/udp'])
         elif shutil.which('firewall-cmd'):
             op = '--add-port' if allow else '--remove-port'
-            subprocess.run(['sudo', 'firewall-cmd', '--permanent', f'{op}={port}/udp'], capture_output=True, timeout=10)
-            subprocess.run(['sudo', 'firewall-cmd', '--reload'], capture_output=True, timeout=20)
+            rc, err = _firewall_run(['firewall-cmd', '--permanent', f'{op}={port}/udp'])
+            if rc == 0:
+                rc, err = _firewall_run(['firewall-cmd', '--reload'])
         else:
-            return
-        print(f"✓ Firewall: {'allow' if allow else 'removed'} {port}/udp", flush=True)
+            return ''
     except Exception as e:
-        print(f"Warning: Could not update firewall for {port}/udp: {e}", flush=True)
+        rc, err = 1, str(e)
+    if rc == 0:
+        print(f"✓ Firewall: {'allowed' if allow else 'removed'} {port}/udp", flush=True)
+        return ''
+    print(f"Warning: could not {'open' if allow else 'close'} {port}/udp in the firewall: {err.strip()[:200]}", flush=True)
+    if allow:
+        return f'Could not open UDP port {port} in the firewall. Allow {port}/udp by hand, or the stream will not arrive.'
+    return ''
 
 
 def yaml_pulled_sources():
@@ -14323,8 +14346,20 @@ def load_external_sources_for(name):
         meta = yaml_pulled_sources().get(name)
         if meta:
             meta.pop('from_yaml', None)
+            meta['adopted'] = True  # its firewall rule (if any) is the operator's, not ours
             sources[name] = meta
     return sources
+
+
+def closes_own_firewall_rule(meta):
+    """True when deleting / re-porting this source should close its UDP port: the
+    editor opened it (sources added before v2.1.9 never adopted, so assume ours)."""
+    return bool(meta.get('firewall_opened')) or not meta.get('adopted')
+
+
+def udp_port_in_use(port):
+    """True when another configured source (metadata or hand-written) still listens on port."""
+    return port in {udp_listen_port(m.get('source_url', '')) for m in load_all_external_sources().values()}
 
 
 def rtsp_transport_line(source_url):
@@ -14561,23 +14596,25 @@ def api_add_external_source():
         with open(CONFIG_FILE, 'w') as f:
             f.writelines(new_lines)
         
+        # Auto-create firewall rule for UDP (unicast / multicast) sources
+        udp_port = udp_listen_port(source_url)
+        fw_warning = set_udp_firewall(udp_port, allow=True)
+
         # Save to metadata
         sources_metadata[name] = {
             'source_url': source_url,
             'on_demand': on_demand,
             'enabled': True,
             'klv': klv,
+            'firewall_opened': bool(udp_port) and not fw_warning,
         }
         save_external_sources_metadata(sources_metadata)
-
-        # Auto-create firewall rule for UDP (unicast / multicast) sources
-        set_udp_firewall(udp_listen_port(source_url), allow=True)
 
         # Restart MediaMTX
         mtx_restart_checked()
         time.sleep(3)
-        
-        return jsonify({'success': True})
+
+        return jsonify({'success': True, 'warning': fw_warning})
     except Exception as e:
         print(f"ERROR adding external source: {e}", flush=True)
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -14650,13 +14687,13 @@ def api_delete_external_source():
             f.writelines(new_lines)
         
         # Remove from metadata
-        source_url = sources_metadata[name].get('source_url', '')
-        del sources_metadata[name]
+        old_meta = sources_metadata.pop(name)
         save_external_sources_metadata(sources_metadata)
 
-        # Remove the firewall rule for UDP sources, unless another source still uses the port
-        udp_port = udp_listen_port(source_url)
-        if udp_port and udp_port not in {udp_listen_port(m.get('source_url', '')) for m in load_all_external_sources().values()}:
+        # Remove the firewall rule the editor opened for a UDP source, unless another
+        # source still uses the port
+        udp_port = udp_listen_port(old_meta.get('source_url', ''))
+        if udp_port and closes_own_firewall_rule(old_meta) and not udp_port_in_use(udp_port):
             set_udp_firewall(udp_port, allow=False)
         
         # Restart MediaMTX
@@ -14912,25 +14949,29 @@ def api_edit_external_source():
             with open(CONFIG_FILE, 'w') as f:
                 f.writelines(new_lines)
 
+        # Move the firewall rule when a UDP source changes port
+        old_port, new_port = udp_listen_port(old_source_url), udp_listen_port(new_source_url)
+        closes_old = closes_own_firewall_rule(sources_metadata[name])
+        fw_warning = ''
+        if old_port != new_port:
+            fw_warning = set_udp_firewall(new_port, allow=True)
+            sources_metadata[name]['firewall_opened'] = bool(new_port) and not fw_warning
+
         # Update metadata
         sources_metadata[name]['source_url'] = new_source_url
         sources_metadata[name]['on_demand'] = on_demand
         sources_metadata[name]['klv'] = klv
         save_external_sources_metadata(sources_metadata)
 
-        # Move the firewall rule when a UDP source changes port
-        old_port, new_port = udp_listen_port(old_source_url), udp_listen_port(new_source_url)
-        if old_port != new_port:
-            set_udp_firewall(new_port, allow=True)
-            if old_port and old_port not in {udp_listen_port(m.get('source_url', '')) for m in load_all_external_sources().values()}:
-                set_udp_firewall(old_port, allow=False)
+        if old_port and old_port != new_port and closes_old and not udp_port_in_use(old_port):
+            set_udp_firewall(old_port, allow=False)
 
         # Restart MediaMTX if enabled
         if is_enabled:
             mtx_restart_checked()
             time.sleep(3)
         
-        return jsonify({'success': True})
+        return jsonify({'success': True, 'warning': fw_warning})
     except Exception as e:
         print(f"ERROR editing external source: {e}", flush=True)
         return jsonify({'success': False, 'error': str(e)}), 500
