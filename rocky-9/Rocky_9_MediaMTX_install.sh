@@ -222,6 +222,16 @@ if [ "$KEEP_CONFIG" = "1" ]; then
         echo "         $CONFIG_FILE away and re-run this script."
         echo ""
     fi
+    if grep -qE '^api:[[:space:]]*(no|false)[[:space:]]*$' "$CONFIG_FILE"; then
+        echo ""
+        echo "NOTE: the MediaMTX API is off in this configuration, so the web editor's"
+        echo "      Active Streams can't list streams. To turn it on for this server"
+        echo "      only, set these in $CONFIG_FILE:"
+        echo "        api: true"
+        echo "        apiAddress: 127.0.0.1:9997"
+        echo "      then: systemctl restart mediamtx"
+        echo ""
+    fi
 else
     # Prompt for username and password
     while true; do
@@ -302,6 +312,13 @@ else
     sed -i -E 's/^(hls|webrtc|api|metrics|pprof|playback)TrustedProxies:.*/\1TrustedProxies: ["127.0.0.1", "::1"]/' "$CONFIG_FILE"
     # Browsers may not call the Control API from other origins (CSRF).
     sed -i -E 's/^apiAllowOrigins:.*/apiAllowOrigins: []/' "$CONFIG_FILE"
+    # The web editor's Active Streams reads the Control API, which upstream ships
+    # off. Turn it on for localhost only: the firewall doesn't open 9997 and the
+    # Caddy /api/ proxy reaches it on localhost.
+    sed -i -E 's/^api:.*/api: true/; s/^apiAddress:.*/apiAddress: 127.0.0.1:9997/' "$CONFIG_FILE"
+    if ! grep -qx 'api: true' "$CONFIG_FILE" || ! grep -qx 'apiAddress: 127.0.0.1:9997' "$CONFIG_FILE"; then
+        echo "WARNING: could not enable the MediaMTX API; the web editor's Active Streams won't work"
+    fi
 
     echo "Credentials configured: anonymous publishing is off, '$MTX_USER' can publish and read"
 fi
