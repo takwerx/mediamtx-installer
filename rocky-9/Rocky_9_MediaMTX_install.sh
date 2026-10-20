@@ -55,10 +55,46 @@ dnf install -y wget tar firewalld
 # Install FFmpeg (for HLS support and transcoding)
 echo ""
 echo "Installing FFmpeg for HLS support and transcoding..."
-dnf install -y epel-release
-dnf config-manager --set-enabled crb
-dnf install -y ffmpeg ffmpeg-devel
-echo "FFmpeg installed successfully"
+# No EL release packages FFmpeg in BaseOS/AppStream, and neither does EPEL on
+# EL8 or EL9 -- it comes from RPM Fusion free, which in turn needs EPEL and the
+# CRB repo (called PowerTools on EL8, codeready-builder on RHEL). The old
+# "epel-release + crb + dnf install ffmpeg" failed on every clean EL9 box, and
+# on EL8 died even earlier because there is no repo named crb there.
+EL_MAJOR=$(rpm -E '%rhel')
+ffmpeg_failed() {
+    echo ""
+    echo "ERROR: Could not install FFmpeg: $1"
+    echo "FFmpeg on Rocky/RHEL $EL_MAJOR comes from RPM Fusion free, which needs EPEL"
+    echo "and the CRB/PowerTools repo. Enable them and install FFmpeg by hand:"
+    echo "  dnf install -y epel-release"
+    echo "  dnf config-manager --set-enabled crb   # powertools on EL8"
+    echo "  dnf install -y https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-${EL_MAJOR}.noarch.rpm"
+    echo "  dnf install -y ffmpeg"
+    echo "then re-run this script. MediaMTX has not been installed yet."
+    exit 1
+}
+if command -v ffmpeg >/dev/null 2>&1; then
+    echo "FFmpeg already installed: $(ffmpeg -version 2>/dev/null | head -1)"
+else
+    # config-manager comes from dnf-plugins-core, which minimal images lack.
+    dnf install -y dnf-plugins-core || ffmpeg_failed "could not install dnf-plugins-core"
+    if ! rpm -q epel-release >/dev/null 2>&1; then
+        # Rocky/Alma ship epel-release in their own repos; RHEL does not.
+        dnf install -y epel-release \
+            || dnf install -y "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${EL_MAJOR}.noarch.rpm" \
+            || ffmpeg_failed "could not enable EPEL"
+    fi
+    dnf config-manager --set-enabled crb 2>/dev/null \
+        || dnf config-manager --set-enabled powertools 2>/dev/null \
+        || subscription-manager repos --enable "codeready-builder-for-rhel-${EL_MAJOR}-$(uname -m)-rpms" \
+        || ffmpeg_failed "could not enable the CRB/PowerTools repo"
+    if ! rpm -q rpmfusion-free-release >/dev/null 2>&1; then
+        dnf install -y "https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-${EL_MAJOR}.noarch.rpm" \
+            || ffmpeg_failed "could not enable RPM Fusion free"
+    fi
+    dnf install -y ffmpeg || ffmpeg_failed "dnf install ffmpeg failed"
+    echo "FFmpeg installed successfully: $(ffmpeg -version 2>/dev/null | head -1)"
+fi
 
 echo ""
 echo "=========================================="
