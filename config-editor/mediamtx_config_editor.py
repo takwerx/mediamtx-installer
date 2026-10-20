@@ -407,7 +407,7 @@ def webrtc_available():
     8189/udp reaches the viewer, since that leg never touches the console.
     """
     try:
-        return read_yaml_field('webrtc', 'no') == 'yes'
+        return read_yaml_flag('webrtc')
     except Exception:
         return False
 
@@ -8171,6 +8171,19 @@ def read_yaml_field(field_name, default=None):
         print(f"ERROR reading field {field_name}: {e}", flush=True)
     return default
 
+def read_yaml_flag(field_name, default=True):
+    """A top-level on/off switch such as `webrtc:`. The Ubuntu template writes
+    `yes`/`no` but upstream's config (Rocky) writes `true`/`false`, so comparing
+    with 'yes' read every upstream switch as off. A missing or empty key gets
+    MediaMTX's own default, which is on for every protocol."""
+    value = read_yaml_field(field_name, None)
+    if value is None:
+        return default
+    value = str(value).split(' #', 1)[0].strip().lower()
+    if not value:
+        return default
+    return value in ('yes', 'true', 'on')
+
 def read_yaml_users():
     """Read authInternalUsers directly from YAML file without ruamel.yaml.
     Returns a list of user dicts with user, pass, ips, permissions."""
@@ -11043,7 +11056,7 @@ def get_stream_urls():
         # Browser-only, video without audio/KLV. MediaMTX serves its own player at
         # this path and the WHEP endpoint at <path>/whep. Only surfaced when the
         # protocol is actually enabled, so the UI never shows a dead link.
-        'webrtc': f'{protocol}://{domain}:8889/teststream' if read_yaml_field('webrtc', 'no') == 'yes' else None
+        'webrtc': f'{protocol}://{domain}:8889/teststream' if read_yaml_flag('webrtc') else None
     }
 
     return jsonify(urls)
@@ -11457,11 +11470,11 @@ def get_protocols_status():
     """Get enable/disable status for all protocols"""
     try:
         return jsonify({
-            'rtsp': read_yaml_field('rtsp', 'yes') == 'yes',
-            'rtmp': read_yaml_field('rtmp', 'yes') == 'yes',
-            'hls': read_yaml_field('hls', 'yes') == 'yes',
-            'webrtc': read_yaml_field('webrtc', 'yes') == 'yes',
-            'srt': read_yaml_field('srt', 'yes') == 'yes'
+            'rtsp': read_yaml_flag('rtsp'),
+            'rtmp': read_yaml_flag('rtmp'),
+            'hls': read_yaml_flag('hls'),
+            'webrtc': read_yaml_flag('webrtc'),
+            'srt': read_yaml_flag('srt')
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
