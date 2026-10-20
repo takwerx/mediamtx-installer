@@ -4673,7 +4673,9 @@ HTML_TEMPLATE = '''
             if (form) {
                 if (form.dataset.editing) delete form.dataset.editing;
                 if (form.dataset.editingIps) delete form.dataset.editingIps;
-                
+                delete form.dataset.editingPass;
+                delete form.dataset.editingPerms;
+
                 // Reset button text back to "Create User"
                 const submitButton = form.querySelector('button[type="submit"]');
                 if (submitButton) {
@@ -4735,6 +4737,8 @@ HTML_TEMPLATE = '''
                     body: JSON.stringify({
                         oldUsername: editingUsername,
                         oldIps: editingIps,
+                        oldPass: form.dataset.editingPass,
+                        oldPermissions: form.dataset.editingPerms ? JSON.parse(form.dataset.editingPerms) : null,
                         groupName,
                         username,
                         password,
@@ -4746,6 +4750,8 @@ HTML_TEMPLATE = '''
                     if (data.success) {
                         delete form.dataset.editing;
                         delete form.dataset.editingIps;
+                        delete form.dataset.editingPass;
+                        delete form.dataset.editingPerms;
                         hideAddMediaMTXUserForm();
                         loadMediaMTXUsers();
                         reloadYAMLContent();
@@ -5537,7 +5543,7 @@ HTML_TEMPLATE = '''
         }
         // === END EXTERNAL SOURCES ===
 
-        function editMediaMTXUser(username, password, groupName, permissions, ips) {
+        function editMediaMTXUser(username, password, groupName, permissions, ips, listIndex) {
             // Show the add form
             document.getElementById('add-mediamtx-user-form').style.display = 'block';
             
@@ -5597,7 +5603,10 @@ HTML_TEMPLATE = '''
             const form = document.getElementById('mediamtx-user-form');
             form.dataset.editing = username;
             form.dataset.editingIps = JSON.stringify(ips || []);
-            
+            form.dataset.editingPass = password || '';
+            const listed = listedMediaMTXUsers[listIndex];
+            form.dataset.editingPerms = JSON.stringify(listed ? listed.permissions : null);
+
             // Change button text to "Update User"
             const submitButton = form.querySelector('button[type="submit"]');
             if (submitButton) {
@@ -5608,13 +5617,20 @@ HTML_TEMPLATE = '''
             document.getElementById('add-mediamtx-user-form').scrollIntoView({behavior: 'smooth'});
         }
         
-        function revokeMediaMTXUser(username, ips) {
+        // Users as last listed, so Edit and Revoke can send what tells several
+        // `any` entries apart (their permissions) without an inline onclick.
+        let listedMediaMTXUsers = [];
+
+        function revokeMediaMTXUser(index) {
+            const user = listedMediaMTXUsers[index];
+            if (!user) return;
+            const username = user.user;
             if (!confirm('Revoke access for user: ' + username + '?')) return;
-            
+
             fetch('/api/mediamtx/users/revoke', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({username, ips})
+                body: JSON.stringify({username, ips: user.ips || [], pass: user.pass || '', permissions: user.permissions || []})
             })
             .then(response => response.json())
             .then(data => {
@@ -5665,8 +5681,9 @@ HTML_TEMPLATE = '''
                     });
                     
                     let html = '';
-                    
-                    data.users.forEach(user => {
+                    listedMediaMTXUsers = data.users;
+
+                    data.users.forEach((user, userIndex) => {
                         // Check if this is unprotected (any user with no password)
                         const isUnprotected = user.user === 'any' && (!user.pass || user.pass === '');
                         const borderColor = isUnprotected ? '#ff9800' : '#2196F3';
@@ -5704,7 +5721,7 @@ HTML_TEMPLATE = '''
                         }
                         
                         html += '<p style="margin: 5px 0;"><strong>Permissions:</strong> ';
-                        const perms = user.permissions.map(p => p.action).join(', ');
+                        const perms = user.permissions.map(p => p.path ? p.action + ' (' + escapeHtml(String(p.path).replace(/^["']|["']$/g, '')) + ')' : p.action).join(', ');
                         html += perms || 'None';
                         html += '</p>';
                         html += '</div>';
@@ -5712,7 +5729,7 @@ HTML_TEMPLATE = '''
                         html += '<div style="display: flex; gap: 10px;">';
                         const permsJson = JSON.stringify(user.permissions.map(p => p.action)).replace(/"/g, '&quot;');
                         const ipsJson = JSON.stringify(user.ips || []).replace(/"/g, '&quot;');
-                        html += '<button class="btn btn-secondary" onclick="editMediaMTXUser(\\'' + user.user + '\\', \\'' + (user.pass || '') + '\\', \\'' + (user.groupName || '') + '\\', ' + permsJson + ', ' + ipsJson + ')">✏️ Edit</button>';
+                        html += '<button class="btn btn-secondary" onclick="editMediaMTXUser(\\'' + user.user + '\\', \\'' + (user.pass || '') + '\\', \\'' + (user.groupName || '') + '\\', ' + permsJson + ', ' + ipsJson + ', ' + userIndex + ')">✏️ Edit</button>';
                         
                         // Hide Revoke button for PUBLIC user (controlled by toggle)
                         const isPublicUser = user.user === 'any' && (!user.pass || user.pass === '') && user.groupName === 'PUBLIC';
@@ -5720,7 +5737,7 @@ HTML_TEMPLATE = '''
                         const isHLSViewer = user.user === 'hlsviewer';
                         
                         if (!isPublicUser && !isHLSViewer) {
-                            html += '<button class="btn btn-danger" onclick="revokeMediaMTXUser(\\'' + user.user + '\\', ' + ipsJson + ')">🗑️ Revoke</button>';
+                            html += '<button class="btn btn-danger" onclick="revokeMediaMTXUser(' + userIndex + ')">🗑️ Revoke</button>';
                         } else if (isHLSViewer) {
                             html += '<span style="color: #ff9800; font-size: 13px; margin-left: 10px;">⚠️ System User - Auto-generated for HLS playback (password edit only)</span>';
                         }
@@ -9614,6 +9631,54 @@ def api_add_mediamtx_user():
     
     return jsonify({'success': True})
 
+def _is_hidden_teststream_viewer(u):
+    return (u.get('user') == 'any' and not list(u.get('ips') or []) and not u.get('pass')
+            and any(p.get('path') == 'teststream' for p in (u.get('permissions') or [])))
+
+
+def _permission_key(perms):
+    """Comparable form of a permission list. Paths are unquoted because the
+    Users tab reads them with read_yaml_users(), which keeps YAML quotes."""
+    return sorted((str(p.get('action') or ''), str(p.get('path') or '').strip('\'"'))
+                  for p in (perms or []) if isinstance(p, dict))
+
+
+def _matches_mediamtx_user(u, username, ips, password=None, permissions=None):
+    """Identify the one user an edit/revoke from the Users tab refers to.
+
+    Several `user: any` entries can share `ips: []` (public access, the hidden
+    teststream viewer, hand-made publish grants). MediaMTX refuses a password on
+    `any`, so they differ only in their permissions: for 'any', the password and
+    permissions the client listed are compared too when it sends them. The
+    teststream viewer is hidden from the Users tab and is never matched here.
+    """
+    if str(u.get('user') or '') != username:
+        return False
+    if _is_hidden_teststream_viewer(u):
+        return False
+    if username != 'any':
+        return True
+    if list(u.get('ips') or []) != list(ips or []):
+        return False
+    if password is not None and str(u.get('pass') or '') != str(password):
+        return False
+    return permissions is None or _permission_key(u.get('permissions')) == _permission_key(permissions)
+
+
+def _merge_permissions(old_perms, actions):
+    """New permission list for the chosen actions, keeping any path scope.
+
+    The Users form only knows action names. Rebuilding as bare {'action': a}
+    turned "publish to live/game only" into "publish anywhere" -- on an 'any'
+    user, that let anyone on the internet publish to any path.
+    """
+    merged = []
+    for action in actions:
+        scoped = [p for p in (old_perms or []) if p.get('action') == action]
+        merged.extend(scoped if scoped else [{'action': action}])
+    return merged
+
+
 @app.route('/api/mediamtx/users/update', methods=['POST'])
 @admin_required
 def api_update_mediamtx_user():
@@ -9651,29 +9716,16 @@ def api_update_mediamtx_user():
     if 'authInternalUsers' not in config:
         return jsonify({'success': False, 'error': 'No users configured'}), 400
     
-    # Find the specific user to update (match by username AND ips to handle multiple 'any' users)
+    # Find the specific user to update (see _matches_mediamtx_user for 'any' users)
     user_found = False
     for user in config['authInternalUsers']:
-        if user.get('user') == old_username:
-            # For 'any' users, also check IPs to find the right one
-            if old_username == 'any':
-                user_ips = user.get('ips', [])
-                # Match the specific 'any' user by IPs
-                if user_ips == old_ips:
-                    # Update this user
-                    user['user'] = username
-                    # Force password as quoted string to prevent YAML number parsing
-                    user['pass'] = DoubleQuotedScalarString(str(password)) if password else ''
-                    user['permissions'] = [{'action': perm} for perm in permissions]
-                    user_found = True
-                    break
-            else:
-                # For non-'any' users, just match username
-                user['user'] = username
-                user['pass'] = DoubleQuotedScalarString(str(password)) if password else ''
-                user['permissions'] = [{'action': perm} for perm in permissions]
-                user_found = True
-                break
+        if _matches_mediamtx_user(user, old_username, old_ips, data.get('oldPass'), data.get('oldPermissions')):
+            user['user'] = username
+            # Force password as quoted string to prevent YAML number parsing
+            user['pass'] = DoubleQuotedScalarString(str(password)) if password else ''
+            user['permissions'] = _merge_permissions(user.get('permissions'), permissions)
+            user_found = True
+            break
     
     if not user_found:
         return jsonify({'success': False, 'error': 'User not found'}), 404
@@ -9717,18 +9769,13 @@ def api_revoke_mediamtx_user():
     if username == 'any' and ips and '127.0.0.1' in ips:
         return jsonify({'success': False, 'error': 'Cannot delete localhost exemption (required for FFmpeg)'}), 400
     
-    # Remove the specific user (match by username AND ips for 'any' users)
-    original_count = len(config['authInternalUsers'])
-    if username == 'any':
-        # For 'any' users, match by IPs to delete the right one
-        config['authInternalUsers'] = [u for u in config['authInternalUsers'] 
-                                        if not (u.get('user') == username and u.get('ips', []) == ips)]
-    else:
-        # For other users, just match username
-        config['authInternalUsers'] = [u for u in config['authInternalUsers'] if u.get('user') != username]
-    
-    if len(config['authInternalUsers']) == original_count:
+    # Remove exactly one user. Filtering every 'any' entry with matching IPs also
+    # deleted the hidden teststream viewer, which shares `user: any, ips: []`.
+    idx = next((i for i, u in enumerate(config['authInternalUsers'])
+                if _matches_mediamtx_user(u, username, ips, data.get('pass'), data.get('permissions'))), None)
+    if idx is None:
         return jsonify({'success': False, 'error': 'User not found'}), 404
+    del config['authInternalUsers'][idx]
     
     # Remove from group metadata
     group_metadata = load_group_metadata()
