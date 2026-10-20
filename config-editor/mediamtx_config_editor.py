@@ -34,7 +34,7 @@ def add_no_cache_headers(response):
     return response
 
 # Version - used by auto-update checker
-CURRENT_VERSION = "v2.1.7"
+CURRENT_VERSION = "v2.1.8"
 GITHUB_REPO = "takwerx/mediamtx-installer"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/config-editor/mediamtx_config_editor.py"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -4692,7 +4692,7 @@ HTML_TEMPLATE = '''
             }
             
             // Validate MediaMTX allowed characters (no spaces, commas, apostrophes, slashes)
-            const allowedChars = /^[A-Za-z0-9!$()*.+;<=>\[\]^_\-"@#&]+$/;
+            const allowedChars = /^[A-Za-z0-9!$()*.+;<=>\[\]^_\-{}@#&]+$/;
             
             if (!allowedChars.test(username)) {
                 alert('Username contains invalid characters!\\n\\nAllowed: A-Z, 0-9, !$()*.@#& etc.\\nNOT allowed: spaces, commas, apostrophes, slashes');
@@ -9471,6 +9471,17 @@ def api_get_mediamtx_users():
     
     return jsonify({'users': users_list})
 
+# MediaMTX refuses to start on a plain username/password outside this set
+# ("credential contains unsupported characters"), so check before writing.
+MTX_CREDENTIAL_RE = re.compile(r'^[a-zA-Z0-9!$()*+.;<=>\[\]^_\-{}@#&]+$')
+MTX_CREDENTIAL_CHARS = 'letters, digits and ! $ ( ) * + . ; < = > [ ] ^ _ - { } @ # &'
+
+def mtx_credential_error(username, password):
+    for label, value in (('Username', username), ('Password', password)):
+        if value and not value.startswith(('sha256:', 'argon2:')) and not MTX_CREDENTIAL_RE.match(value):
+            return f'{label} can only contain {MTX_CREDENTIAL_CHARS}'
+    return None
+
 @app.route('/api/mediamtx/users/add', methods=['POST'])
 @admin_required
 def api_add_mediamtx_user():
@@ -9480,10 +9491,14 @@ def api_add_mediamtx_user():
     username = data.get('username', '').strip()
     password = data.get('password', '').strip()
     permissions = data.get('permissions', [])
-    
+
     if not username:
         return jsonify({'success': False, 'error': 'Username required'}), 400
-    
+
+    cred_error = mtx_credential_error(username, password)
+    if cred_error:
+        return jsonify({'success': False, 'error': cred_error}), 400
+
     if not permissions:
         return jsonify({'success': False, 'error': 'At least one permission required'}), 400
     
@@ -9512,36 +9527,14 @@ def api_add_mediamtx_user():
             else:
                 return jsonify({'success': False, 'error': 'Username already exists'}), 400
     
-    # Build new user YAML text
-    group_comment = f"# {group_name}\n" if group_name else ""
     # Always quote passwords to prevent YAML type issues (bare numbers break MediaMTX)
     pass_value = f'"{password}"' if password else "''"
-    user_yaml = f"""{group_comment}- user: {username}
-  pass: {pass_value}
-  ips: []
-  permissions:
-"""
-    for perm in permissions:
-        user_yaml += f"  - action: {perm}\n"
-    
-    # Read file and insert before authHTTPAddress
-    with open(CONFIG_FILE, 'r') as f:
-        lines = f.readlines()
-    
-    new_lines = []
-    inserted = False
-    
-    for line in lines:
-        if not inserted and 'authHTTPAddress:' in line:
-            # Insert new user before authHTTPAddress
-            new_lines.append(user_yaml)
-            inserted = True
-        new_lines.append(line)
-    
-    # Write back
-    with open(CONFIG_FILE, 'w') as f:
-        f.writelines(new_lines)
-    
+    entry = [f"- user: {username}", f"  pass: {pass_value}", "  ips: []", "  permissions:"]
+    entry += [f"  - action: {perm}" for perm in permissions]
+
+    if not insert_auth_user_entry(entry, group_name):
+        return jsonify({'success': False, 'error': 'Could not find the authInternalUsers list in mediamtx.yml'}), 500
+
     # Save group metadata
     if group_name:
         group_metadata = load_group_metadata()
@@ -9573,7 +9566,11 @@ def api_update_mediamtx_user():
         return jsonify({'success': False, 'error': 'Username required'}), 400
     
     # Password can be blank
-    
+
+    cred_error = mtx_credential_error(username, password)
+    if cred_error:
+        return jsonify({'success': False, 'error': cred_error}), 400
+
     if not permissions:
         return jsonify({'success': False, 'error': 'At least one permission required'}), 400
     
@@ -11024,6 +11021,68 @@ def get_stream_urls():
     return jsonify(urls)
 
 
+def find_auth_users_section(lines):
+    """Locate the authInternalUsers list in mediamtx.yml lines.
+
+    Returns (key_idx, end_idx, item_indent) or None. end_idx is one past the last
+    entry's last content line, so comments introducing the next key stay with it.
+    item_indent is the column of the entries' `-`.
+
+    Two layouts are in the field. The Ubuntu installer's template writes entries
+    at column 0 and runs straight into `authHTTPAddress:`; Rocky keeps upstream's
+    mediamtx.yml, which indents entries by 2 and puts a comment block before
+    `authHTTPAddress:`. Writers that assumed the template pasted a column-0 entry
+    after upstream's indented list, which is invalid YAML: MediaMTX won't start
+    and the console can no longer load the config.
+    """
+    key = next((i for i, ln in enumerate(lines) if ln.startswith('authInternalUsers:')), None)
+    if key is None:
+        return None
+    end = key + 1
+    item_indent = None
+    for i in range(key + 1, len(lines)):
+        ln = lines[i].rstrip('\n')
+        stripped = ln.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        indent = len(ln) - len(ln.lstrip())
+        if indent == 0 and not stripped.startswith('-'):
+            break
+        if item_indent is None and stripped.startswith('-'):
+            item_indent = indent
+        end = i + 1
+    return (key, end, 2 if item_indent is None else item_indent)
+
+
+def insert_auth_user_entry(entry, comment=None):
+    """Append one user to authInternalUsers in the file's own layout.
+
+    `entry` is the user written for column 0 (`- user: x`, `  pass: ...`); it is
+    shifted to the existing entries' indent. Returns False if there is no block
+    authInternalUsers list to add to.
+    """
+    with open(CONFIG_FILE, 'r') as f:
+        lines = f.readlines()
+    section = find_auth_users_section(lines)
+    if not section:
+        return False
+    key, end, indent = section
+    value = lines[key].split(':', 1)[1].split('#', 1)[0].strip()
+    if value == '[]':
+        lines[key] = 'authInternalUsers:\n'
+    elif value:
+        return False
+    pad = ' ' * indent
+    block = [f"{pad}# {comment}\n"] if comment else []
+    block += [f"{pad}{ln}\n" for ln in entry]
+    if end > 0 and not lines[end - 1].endswith('\n'):
+        lines[end - 1] += '\n'
+    lines[end:end] = block
+    with open(CONFIG_FILE, 'w') as f:
+        f.writelines(lines)
+    return True
+
+
 def find_public_any_block(lines):
     """Locate the genuinely-public `user: any` entry in authInternalUsers.
 
@@ -11046,22 +11105,38 @@ def find_public_any_block(lines):
     So identify it structurally rather than by label: `user: any`, no `ips:`
     restriction, no `path:` scope. Anything holding `action: api` is never a
     candidate -- that is infrastructure, not a sharing setting.
+
+    Entries may sit at column 0 (Ubuntu template) or indented (upstream config
+    on Rocky, whose default `any` user is public and carries empty `path:` keys,
+    which scope nothing). See find_auth_users_section().
     """
-    n = len(lines)
-    i = 0
+    section = find_auth_users_section(lines)
+    if not section:
+        return None
+    key, n, _ = section
+    i = key + 1
     while i < n:
-        if lines[i].startswith('- user:'):
+        line = lines[i].rstrip('\n')
+        if line.lstrip().startswith('- user:'):
+            indent = len(line) - len(line.lstrip())
             start = i
-            j = i + 1
-            while j < n and (lines[j].startswith(' ') or lines[j].startswith('  -')):
-                j += 1
+            last = i
+            for j in range(i + 1, n):
+                nxt = lines[j].rstrip('\n')
+                if nxt.strip():
+                    if len(nxt) - len(nxt.lstrip()) <= indent:
+                        break
+                    if not nxt.strip().startswith('#'):
+                        last = j
+            j = last + 1
             entry = lines[start:j]
             body = '\n'.join(entry)
             is_any = entry[0].split(':', 1)[1].strip() == 'any'
             ips_restricted = any(
                 ln.strip().startswith('ips:') and ln.split(':', 1)[1].strip() not in ('[]', '')
                 for ln in entry)
-            has_path = any(ln.strip().startswith('path:') for ln in entry)
+            has_path = any(ln.strip().startswith('path:') and ln.split(':', 1)[1].strip()
+                           for ln in entry)
             has_api = 'action: api' in body
             if is_any and not ips_restricted and not has_path and not has_api:
                 if start > 0 and lines[start - 1].lstrip().startswith('#'):
@@ -11117,36 +11192,12 @@ def toggle_public_access():
             return jsonify({'success': True, 'enabled': False, 'message': 'Public access disabled'})
             
         else:
-            # ENABLE: Add PUBLIC user section
-            # Find the end of authInternalUsers section
-            with open(CONFIG_FILE, 'r') as f:
-                lines = f.readlines()
-            
-            new_lines = []
-            inserted = False
-            
-            for i, line in enumerate(lines):
-                new_lines.append(line)
-                
-                # Find last user before authHTTPAddress
-                if not inserted and 'authHTTPAddress:' in line:
-                    # Insert PUBLIC user before authHTTPAddress
-                    public_user = """# PUBLIC
-- user: any
-  pass: ''
-  ips: []
-  permissions:
-  - action: read
-  - action: publish
-  - action: playback
-"""
-                    new_lines.insert(-1, public_user)
-                    inserted = True
-            
-            # Write back
-            with open(CONFIG_FILE, 'w') as f:
-                f.writelines(new_lines)
-            
+            # ENABLE: Add PUBLIC user at the end of authInternalUsers
+            public_user = ["- user: any", "  pass: ''", "  ips: []", "  permissions:",
+                           "  - action: read", "  - action: publish", "  - action: playback"]
+            if not insert_auth_user_entry(public_user, 'PUBLIC'):
+                return jsonify({'success': False, 'error': 'Could not find the authInternalUsers list in mediamtx.yml'}), 500
+
             # Save to group metadata
             group_metadata = load_group_metadata()
             group_metadata['any'] = 'PUBLIC'

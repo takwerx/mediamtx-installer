@@ -316,7 +316,9 @@ apiServerKey:
 apiServerCert:
 # List of allowed CORS origins.
 # Supports wildcards: ['http://*.example.com']
-apiAllowOrigins: ['*']
+# Empty: no browser page from another origin may call the API (CSRF). The web
+# editor talks to the API from the server itself, not from a browser.
+apiAllowOrigins: []
 # List of IPs or CIDRs of proxies placed before the HTTP server.
 # If the server receives a request from one of these entries, IP in logs
 # will be taken from the X-Forwarded-For header.
