@@ -5909,9 +5909,14 @@ HTML_TEMPLATE = '''
             // Resolve relative URL to absolute so the popup (about:blank) can fetch it
             const absoluteUrl = isProxied ? (window.location.origin + streamUrl) : streamUrl;
 
-            // Stream name = second-to-last path segment (.../<name>/index.m3u8)
-            const urlParts = absoluteUrl.split('/');
-            const streamName = urlParts.length >= 2 ? urlParts[urlParts.length - 2] : 'stream';
+            // Stream name = the whole path before /index.m3u8, so nested paths such as
+            // live/drone1 keep their prefix. Taking only the last segment sent WebRTC
+            // to "drone1", a path with no stream on it. The name is written into the
+            // popup's HTML below, so anything outside stream-path characters is dropped.
+            let streamPath = decodeURIComponent(new URL(absoluteUrl).pathname);
+            if (isProxied) streamPath = streamPath.replace(/^[/]hls-proxy/, '');
+            streamPath = streamPath.replace(/^[/]+/, '').replace(/[/]index[.]m3u8$/, '');
+            const streamName = /^[A-Za-z0-9_.~-]+([/][A-Za-z0-9_.~-]+)*$/.test(streamPath) ? streamPath : 'stream';
 
             // playbackConfig is loaded once at page load; default to HLS so a
             // failed/absent fetch can never take the watch button offline.
@@ -5920,7 +5925,7 @@ HTML_TEMPLATE = '''
             // same-origin (no CORS), session-authenticated, and it lets the
             // WebRTC port stay bound to localhost like HLS already is.
             const whepUrl = (playbackConfig && playbackConfig.webrtc_available)
-                ? window.location.origin + '/whep/' + encodeURIComponent(streamName)
+                ? window.location.origin + '/whep/' + streamName.split('/').map(encodeURIComponent).join('/')
                 : '';
 
             console.log('[Watch] Resolved URL:', absoluteUrl, '| proxied:', isProxied, '| mode:', playbackMode);
@@ -8976,6 +8981,29 @@ def api_status():
     except:
         return jsonify({'status': 'unknown', 'color': 'secondary'})
 
+def is_legacy_relay_input(path_name, all_names):
+    """True for `live/X` when `X` also exists: the input half of the old FFmpeg
+    relay (publish to live/X, FFmpeg re-published it as X), which is counted as
+    viewers of X rather than listed on its own.
+
+    This used to hide every `live/` path. The relay is gone -- startup strips it
+    from mediamtx.yml -- so a `live/` path is now a real publisher, usually OBS or
+    a DJI drone on RTMP (`rtmp://host/live/<name>`). Those streams were online
+    and recording while Active Streams and the dashboard showed nothing.
+    """
+    return path_name.startswith('live/') and path_name[5:] in all_names
+
+
+STREAM_NAME_RE = re.compile(r'^[A-Za-z0-9_.~-]+(/[A-Za-z0-9_.~-]+)*$')
+
+
+def is_valid_stream_name(name):
+    """Stream path characters, one or more segments (live/drone1), and no `.` or
+    `..` segment that would climb out of the path. Checked wherever a stream name
+    from a URL reaches MediaMTX or is written into a page."""
+    return bool(STREAM_NAME_RE.match(name or '')) and not any(s in ('.', '..') for s in name.split('/'))
+
+
 @app.route('/api/streams')
 @login_required
 def api_streams():
@@ -9018,8 +9046,8 @@ def api_streams():
             
             for item in data.get('items', []):
                 path_name = item.get('name', '')
-                # Skip internal relay streams and 'all' path
-                if path_name and path_name != 'all' and not path_name.startswith('live/'):
+                # Skip legacy relay inputs and 'all' path
+                if path_name and path_name != 'all' and not is_legacy_relay_input(path_name, available_paths):
                     stream_info = {
                         'name': path_name,
                         'readers': 0,  # Will update from detail call
@@ -15051,7 +15079,8 @@ def whep_negotiate(stream, sdp_offer):
     import urllib.error
     import urllib.request
 
-    if not re.match(r'^[A-Za-z0-9_.-]+$', stream or ''):
+    # Nested paths (live/drone1) are valid: MediaMTX serves WHEP at /live/drone1/whep.
+    if not is_valid_stream_name(stream):
         return None, 'Invalid stream name'
     try:
         enc = str(read_yaml_field('webrtcEncryption', 'no')).lower() in ('yes', 'true')
@@ -15080,10 +15109,12 @@ def whep_negotiate(stream, sdp_offer):
         return None, str(e)[:200]
 
 
-@app.route('/whep/<stream_name>', methods=['POST'])
+@app.route('/whep/<path:stream_name>', methods=['POST'])
 @login_required
 def whep_authenticated(stream_name):
-    """WHEP for logged-in console users (Active Streams watch button)."""
+    """WHEP for logged-in console users (Active Streams watch button).
+    `path:` so nested stream paths such as live/drone1 reach MediaMTX;
+    whep_negotiate() checks the name."""
     answer, err = whep_negotiate(stream_name, request.get_data(as_text=True))
     if err:
         return Response(err, status=502, content_type='text/plain')
@@ -15220,6 +15251,10 @@ def api_share_links_revoke():
 
 def _watch_stream_impl(stream_name):
     """Shareable HLS player page - credentials embedded server-side"""
+    # The name is written into the page's HTML and JS below, and the route takes
+    # nested paths (live/drone1), so allow only stream-path characters.
+    if not is_valid_stream_name(stream_name):
+        return "Stream not found", 404
     try:
         # Get HLS viewer credentials
         cred = get_hlsviewer_credential()
@@ -15370,7 +15405,7 @@ def _watch_stream_impl(stream_name):
 # The overlay provides its own visibility-aware /watch/ route; registering both
 # crashes Flask with "View function mapping is overwriting an existing endpoint".
 if not LDAP_OVERLAY_ACTIVE:
-    watch_stream = app.route('/watch/<stream_name>', endpoint='watch_stream')(_watch_stream_impl)
+    watch_stream = app.route('/watch/<path:stream_name>', endpoint='watch_stream')(_watch_stream_impl)
 
 # === END SHAREABLE WATCH LINKS ===
 
@@ -15415,10 +15450,11 @@ def get_dashboard_metrics():
                                 live_paths[stream_name] = max(0, (readers_data or 0) - 1)
                     
                     # Process main paths and add live/ viewers
+                    all_names = {p.get('name', '') for p in paths_data['items']}
                     for path in paths_data['items']:
                         path_name = path.get('name', '')
-                        # Skip internal paths and live/ paths
-                        if path_name and path_name != 'all' and not path_name.startswith('live/'):
+                        # Skip internal paths and legacy relay inputs
+                        if path_name and path_name != 'all' and not is_legacy_relay_input(path_name, all_names):
                             # Count streams that are ready (have active source)
                             if path.get('ready', False):
                                 active_streams += 1
