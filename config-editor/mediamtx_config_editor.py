@@ -34,7 +34,7 @@ def add_no_cache_headers(response):
     return response
 
 # Version - used by auto-update checker
-CURRENT_VERSION = "v2.1.6"
+CURRENT_VERSION = "v2.1.7"
 GITHUB_REPO = "takwerx/mediamtx-installer"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/config-editor/mediamtx_config_editor.py"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -8563,6 +8563,23 @@ def get_backups():
     except:
         return []
 
+def backup_config_file(reason):
+    """Copy mediamtx.yml into BACKUP_DIR so it shows up under Restore.
+
+    Call this before anything that rewrites the operator's config on its own
+    (updates, startup auto-patches, rollbacks). The config is the one thing an
+    update must never lose. Returns the backup path, or None if it failed.
+    """
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        backup_file = os.path.join(BACKUP_DIR, f'mediamtx.yml.{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+        shutil.copy2(CONFIG_FILE, backup_file)
+        print(f"✓ mediamtx.yml backed up before {reason}: {backup_file}", flush=True)
+        return backup_file
+    except Exception as e:
+        print(f"WARNING: could not back up mediamtx.yml before {reason}: {e}", flush=True)
+        return None
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     """Login page"""
@@ -12124,10 +12141,12 @@ def apply_update():
         with open(temp_file, 'wb') as f:
             f.write(new_code)
         
-        # Step 4: Backup current version
+        # Step 4: Backup current version, and the MediaMTX config with it: the
+        # new version's startup auto-patches may edit mediamtx.yml.
         if os.path.exists(webeditor_file):
             shutil.copy2(webeditor_file, backup_file)
-        
+        config_backup = backup_config_file(f'updating the web editor to {new_version}')
+
         # Step 5: Replace with new version
         shutil.copy2(temp_file, webeditor_file)
         os.chmod(webeditor_file, 0o644)
@@ -12188,6 +12207,7 @@ def apply_update():
             'success': True,
             'new_version': new_version,
             'backup_file': backup_file,
+            'config_backup': config_backup,
             'overlay_synced': overlay_synced,
             'restarted': restarted,
             # Reported so the UI can say the update landed but is NOT yet live.
@@ -13272,9 +13292,13 @@ def rollback_mediamtx():
             return jsonify({'success': False, 'error': 'Could not stop MediaMTX: ' + (err or 'systemctl stop failed')}), 500
         time.sleep(2)
 
-        # Backup current YAML before we modify anything (so we can undo rollback)
+        # Backup current YAML before we modify anything (so we can undo rollback).
+        # pre_rollback is deleted on success, so also keep a copy under Restore:
+        # the rollback puts back the config from upgrade time, and any edits made
+        # since would otherwise be gone for good.
         pre_rollback_yaml = f'{CONFIG_FILE}.pre_rollback'
         mtx_copy_priv(CONFIG_FILE, pre_rollback_yaml)
+        backup_config_file('rolling back MediaMTX')
 
         # Restore binary
         mtx_install_binary(latest_backup)
@@ -15418,6 +15442,7 @@ if __name__ == '__main__':
             content = f.read()
         if "ips: ['127.0.0.1']" in content and "::1" not in content:
             content = content.replace("ips: ['127.0.0.1']", "ips: ['127.0.0.1', '::1']", 1)
+            backup_config_file('the IPv6 loopback auto-patch')
             with open(CONFIG_FILE, 'w') as f:
                 f.write(content)
             print("✓ Patched mediamtx.yml: Added IPv6 loopback (::1) to localhost API user")
@@ -15473,6 +15498,7 @@ if __name__ == '__main__':
         lines = cleaned
 
         if changed:
+            backup_config_file('removing the legacy FFmpeg live/ path')
             with open(CONFIG_FILE, 'w') as f:
                 f.writelines(lines)
             print("✓ Removed legacy FFmpeg ~^live/(.+)$ path from mediamtx.yml (no longer needed with MPEG-TS demuxing)")
@@ -15490,6 +15516,7 @@ if __name__ == '__main__':
                 content = content.replace('pathDefaults:', 'pathDefaults:\n  rtspDemuxMpegts: true', 1)
             elif 'paths:' in content:
                 content = content.replace('paths:', 'pathDefaults:\n  rtspDemuxMpegts: true\n\npaths:', 1)
+            backup_config_file('the rtspDemuxMpegts auto-patch')
             with open(CONFIG_FILE, 'w') as f:
                 f.write(content)
             print("✓ Added rtspDemuxMpegts: true to pathDefaults (MPEG-TS unwrapping for RTSP sources)")

@@ -156,11 +156,30 @@ echo "=========================================="
 echo "Step 5: Installing Custom Configuration"
 echo "=========================================="
 
+# Re-running this script is how people update MediaMTX, so an existing config is
+# the operator's (streams, users, passwords, certs) and is never replaced. It is
+# backed up into the web editor's backup folder (shows up under Restore) and
+# kept as-is. To start over from the template, move the file away and re-run.
+CONFIG_FILE=/usr/local/etc/mediamtx.yml
+KEEP_CONFIG=0
+if [ -s "$CONFIG_FILE" ]; then
+    KEEP_CONFIG=1
+    CONFIG_BACKUP_DIR=/usr/local/etc/mediamtx_backups
+    mkdir -p "$CONFIG_BACKUP_DIR"
+    CONFIG_BACKUP="$CONFIG_BACKUP_DIR/mediamtx.yml.$(date +%Y%m%d_%H%M%S)"
+    cp -p "$CONFIG_FILE" "$CONFIG_BACKUP"
+fi
+
+if [ "$KEEP_CONFIG" = "1" ]; then
+    echo "✓ Existing configuration kept: $CONFIG_FILE"
+    echo "  Backup: $CONFIG_BACKUP"
+else
+
 # Generate random 16-character HLS viewer password
 HLS_PASS=$(openssl rand -base64 16 | tr -d '/+=\n' | head -c 16)
 
 # Write the custom configuration
-cat > /usr/local/etc/mediamtx.yml << 'CONFIGEOF'
+cat > "$CONFIG_FILE" << 'CONFIGEOF'
 ###############################################
 # Global settings
 
@@ -916,6 +935,8 @@ echo "  - MPEG-TS demuxing enabled for RTSP publishers (TAKICU/UAS)"
 echo "  - Recording OFF by default (enable via Web Editor)"
 echo "  - Encryption OFF by default (enable after Caddy install)"
 
+fi
+
 echo ""
 echo "=========================================="
 echo "Step 6: Creating systemd Service"
@@ -939,7 +960,9 @@ EOF
 
 systemctl daemon-reload
 systemctl enable mediamtx
-systemctl start mediamtx
+# restart, not start: on a re-run MediaMTX is already running, and `start` would
+# leave the old binary serving.
+systemctl restart mediamtx
 
 echo "✓ MediaMTX service created and started"
 
@@ -978,10 +1001,14 @@ echo "MediaMTX v${LATEST_VERSION} is running!"
 echo ""
 echo "  Config: /usr/local/etc/mediamtx.yml"
 echo ""
-echo "  HLS Viewer Credentials:"
-echo "    Username: hlsviewer"
-echo "    Password: $HLS_PASS"
-echo "    (Change in Web Editor → Users & Auth tab)"
+if [ "$KEEP_CONFIG" = "1" ]; then
+    echo "  Your existing configuration was kept (backup: $CONFIG_BACKUP)"
+else
+    echo "  HLS Viewer Credentials:"
+    echo "    Username: hlsviewer"
+    echo "    Password: $HLS_PASS"
+    echo "    (Change in Web Editor → Users & Auth tab)"
+fi
 echo ""
 echo "  Ports:"
 echo "    RTSP:  8554/tcp"

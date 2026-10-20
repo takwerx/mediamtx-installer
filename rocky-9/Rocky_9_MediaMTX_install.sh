@@ -116,8 +116,23 @@ chmod +x /usr/local/bin/mediamtx
 # Create config directory
 mkdir -p /usr/local/etc
 
-# Move config file
-mv mediamtx.yml /usr/local/etc/
+# Install upstream's config only on a fresh install. Re-running this script is
+# how people update MediaMTX, so an existing config is the operator's (streams,
+# users, passwords, certs) and is never replaced. It is backed up into the web
+# editor's backup folder (shows up under Restore) and kept as-is. To start over
+# from upstream's config, move the file away and re-run.
+CONFIG_FILE=/usr/local/etc/mediamtx.yml
+KEEP_CONFIG=0
+if [ -s "$CONFIG_FILE" ]; then
+    KEEP_CONFIG=1
+    CONFIG_BACKUP_DIR=/usr/local/etc/mediamtx_backups
+    mkdir -p "$CONFIG_BACKUP_DIR"
+    CONFIG_BACKUP="$CONFIG_BACKUP_DIR/mediamtx.yml.$(date +%Y%m%d_%H%M%S)"
+    cp -p "$CONFIG_FILE" "$CONFIG_BACKUP"
+    echo "Existing configuration kept: $CONFIG_FILE (backup: $CONFIG_BACKUP)"
+else
+    mv mediamtx.yml "$CONFIG_FILE"
+fi
 
 # Disable MoQ. Unlike the Ubuntu script this one keeps upstream's shipped config, so
 # it inherits `moq: true` — relative cert paths (auto.key/auto.crt) written into the
@@ -139,19 +154,23 @@ echo "=========================================="
 echo "Step 6: Configuring Default Credentials"
 echo "=========================================="
 
-# Prompt for username and password
-read -p "Enter MediaMTX username [default: admin]: " MTX_USER
-MTX_USER=${MTX_USER:-admin}
+if [ "$KEEP_CONFIG" = "1" ]; then
+    echo "Skipped: existing configuration keeps its users and passwords"
+else
+    # Prompt for username and password
+    read -p "Enter MediaMTX username [default: admin]: " MTX_USER
+    MTX_USER=${MTX_USER:-admin}
 
-read -sp "Enter MediaMTX password [default: admin]: " MTX_PASS
-echo ""
-MTX_PASS=${MTX_PASS:-admin}
+    read -sp "Enter MediaMTX password [default: admin]: " MTX_PASS
+    echo ""
+    MTX_PASS=${MTX_PASS:-admin}
 
-# Update credentials in config file
-sed -i "s/user: addusernamehere/user: $MTX_USER/" /usr/local/etc/mediamtx.yml
-sed -i "s/pass: addpasswordhere/pass: $MTX_PASS/" /usr/local/etc/mediamtx.yml
+    # Update credentials in config file
+    sed -i "s/user: addusernamehere/user: $MTX_USER/" /usr/local/etc/mediamtx.yml
+    sed -i "s/pass: addpasswordhere/pass: $MTX_PASS/" /usr/local/etc/mediamtx.yml
 
-echo "Credentials configured"
+    echo "Credentials configured"
+fi
 
 echo ""
 echo "=========================================="
@@ -179,7 +198,9 @@ systemctl daemon-reload
 
 # Enable and start service
 systemctl enable mediamtx
-systemctl start mediamtx
+# restart, not start: on a re-run MediaMTX is already running, and `start` would
+# leave the old binary serving.
+systemctl restart mediamtx
 
 echo "MediaMTX service created and started"
 
@@ -213,8 +234,12 @@ echo ""
 echo "MediaMTX Information:"
 echo "  - Version: $LATEST_VERSION"
 echo "  - Config: /usr/local/etc/mediamtx.yml"
-echo "  - Username: $MTX_USER"
-echo "  - Password: $MTX_PASS"
+if [ "$KEEP_CONFIG" = "1" ]; then
+    echo "  - Existing configuration kept (backup: $CONFIG_BACKUP)"
+else
+    echo "  - Username: $MTX_USER"
+    echo "  - Password: $MTX_PASS"
+fi
 echo "  - FFmpeg: Installed (HLS and transcoding enabled)"
 echo ""
 echo "Service Commands:"
@@ -238,9 +263,11 @@ echo "  1. Run the Caddy setup script for HTTPS/domain support"
 echo "  2. Edit /usr/local/etc/mediamtx.yml for advanced configuration"
 echo "  3. Or use the MediaMTX Config Editor web interface"
 echo ""
-echo "Test RTSP stream:"
-echo "  rtsp://$MTX_USER:$MTX_PASS@<your-server-ip>:8554/mystream"
-echo ""
+if [ "$KEEP_CONFIG" != "1" ]; then
+    echo "Test RTSP stream:"
+    echo "  rtsp://$MTX_USER:$MTX_PASS@<your-server-ip>:8554/mystream"
+    echo ""
+fi
 
 # Cleanup
 cd /
