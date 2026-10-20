@@ -196,6 +196,29 @@ def clear_srt_passphrase_backup():
     if os.path.exists(SRT_PASSPHRASE_BACKUP_FILE):
         os.remove(SRT_PASSPHRASE_BACKUP_FILE)
 
+def _yaml_scalar_text(raw):
+    """The string a YAML scalar holds, as written on one line of the file.
+
+    save_config() writes every password as `pass: "..."`, and returning the raw
+    text kept those quotes as part of the password. The console then sent
+    `"secret"` to MediaMTX, which refused it: Watch spun forever and share links
+    failed, but only for viewers outside the box -- loopback is authorised by
+    the `any` user, so the same request from the server itself worked.
+    Unquoted values are returned as-is (a YAML parse would turn 0123 into 123).
+    """
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in '"\'':
+        try:
+            from io import StringIO
+            value = YAML(typ='safe').load(StringIO(raw))
+            if isinstance(value, str):
+                return value
+        except Exception:
+            pass
+        return raw[1:-1]
+    return raw
+
+
 def get_hlsviewer_credential():
     """Get hlsviewer credential by reading directly from config file"""
     try:
@@ -210,7 +233,7 @@ def get_hlsviewer_credential():
                     if 'pass:' in lines[j]:
                         pass_line = lines[j].strip()
                         if ':' in pass_line:
-                            password = pass_line.split(':', 1)[1].strip()
+                            password = _yaml_scalar_text(pass_line.split(':', 1)[1].strip())
                             if password:
                                 # Ensure it's in group metadata
                                 ensure_hlsviewer_in_metadata()
