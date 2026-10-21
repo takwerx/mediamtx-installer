@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# MediaMTX Web Configuration Editor - Installation Script (Ubuntu 22.04)
+# MediaMTX Web Configuration Editor - Installation Script (Ubuntu / Rocky 9)
 # Installs Flask-based web editor for managing MediaMTX
 # v2.0 - Adds psutil, requests dependencies
 # v2.1 - Python packages go in a venv, so the install works on Ubuntu 24.04+ / Debian 12
@@ -25,7 +25,8 @@ fi
 if ! command -v mediamtx &> /dev/null || [ ! -f /usr/local/etc/mediamtx.yml ]; then
     echo "ERROR: MediaMTX is not installed!"
     echo "Please run the MediaMTX installer first:"
-    echo "  sudo ./Ubuntu_22_04_MediaMTX_install.sh"
+    echo "  sudo ./ubuntu-22.04/Ubuntu_22.04_MediaMTX_install.sh   (Ubuntu)"
+    echo "  sudo ./rocky-9/Rocky_9_MediaMTX_install.sh             (Rocky/RHEL)"
     exit 1
 fi
 
@@ -62,8 +63,17 @@ echo "=========================================="
 echo "Step 1: Installing Python Dependencies"
 echo "=========================================="
 
-apt-get update -qq > /dev/null 2>&1
-apt-get install -y python3 python3-pip python3-venv python3-psutil > /dev/null 2>&1 || apt-get install -y python3 python3-pip python3-venv python3-psutil
+if command -v apt-get > /dev/null 2>&1; then
+    apt-get update -qq > /dev/null 2>&1
+    apt-get install -y python3 python3-pip python3-venv python3-psutil > /dev/null 2>&1 || apt-get install -y python3 python3-pip python3-venv python3-psutil
+elif command -v dnf > /dev/null 2>&1; then
+    # Rocky/RHEL: venv is part of python3 there; psutil comes from pip below.
+    dnf install -y -q python3 python3-pip > /dev/null 2>&1 || dnf install -y python3 python3-pip
+else
+    echo ""
+    echo "ERROR: Neither apt-get nor dnf found. Install python3 and python3-pip yourself and re-run this script."
+    exit 1
+fi
 echo "✓ Python3 and pip installed"
 
 # Install required Python packages into a venv that the service runs from.
@@ -183,9 +193,19 @@ echo "=========================================="
 echo "Step 4: Configuring Firewall"
 echo "=========================================="
 
-# Open web editor port
-ufw allow 5000/tcp > /dev/null 2>&1
-echo "✓ Port 5000 opened for web editor"
+# Open web editor port. Rocky/RHEL run firewalld, Ubuntu ufw; some boxes have
+# neither (e.g. cloud images that rely on a security group).
+if command -v firewall-cmd > /dev/null 2>&1 && firewall-cmd --state > /dev/null 2>&1; then
+    firewall-cmd --zone=public --permanent --add-port=5000/tcp > /dev/null
+    firewall-cmd --reload > /dev/null
+    echo "✓ Port 5000 opened for web editor (firewalld)"
+elif command -v ufw > /dev/null 2>&1; then
+    ufw allow 5000/tcp > /dev/null 2>&1
+    echo "✓ Port 5000 opened for web editor"
+else
+    echo "ℹ  No running firewall found (firewalld or ufw), so no port was opened."
+    echo "   If this server is behind another firewall, allow 5000/tcp there."
+fi
 
 # Wait for service to start
 sleep 3
