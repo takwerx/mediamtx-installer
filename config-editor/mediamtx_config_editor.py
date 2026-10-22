@@ -34,7 +34,7 @@ def add_no_cache_headers(response):
     return response
 
 # Version - used by auto-update checker
-CURRENT_VERSION = "v2.1.10"
+CURRENT_VERSION = "v2.1.11"
 GITHUB_REPO = "takwerx/mediamtx-installer"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/config-editor/mediamtx_config_editor.py"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -14385,10 +14385,12 @@ def set_udp_firewall(port, allow):
         if shutil.which('ufw'):
             rc, err = _firewall_run(['ufw', 'allow', f'{port}/udp'] if allow else ['ufw', 'delete', 'allow', f'{port}/udp'])
         elif shutil.which('firewall-cmd'):
+            # Runtime + permanent, no --reload: a reload briefly drops outbound
+            # traffic and kills local senders (e.g. ffmpeg to a multicast group).
             op = '--add-port' if allow else '--remove-port'
-            rc, err = _firewall_run(['firewall-cmd', '--permanent', f'{op}={port}/udp'])
+            rc, err = _firewall_run(['firewall-cmd', f'{op}={port}/udp'])
             if rc == 0:
-                rc, err = _firewall_run(['firewall-cmd', '--reload'])
+                rc, err = _firewall_run(['firewall-cmd', '--permanent', f'{op}={port}/udp'])
         else:
             return ''
     except Exception as e:
