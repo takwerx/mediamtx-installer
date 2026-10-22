@@ -60,10 +60,12 @@ echo "=========================================="
 echo "Step 3: Configuring Firewall"
 echo "=========================================="
 
-# Open HTTP and HTTPS ports for Caddy
-firewall-cmd --zone=public --permanent --add-port=80/tcp
-firewall-cmd --zone=public --permanent --add-port=443/tcp
-firewall-cmd --reload
+# Open HTTP and HTTPS ports for Caddy. Runtime + permanent, no --reload: a
+# reload kills local multicast senders.
+for port in 80/tcp 443/tcp; do
+    firewall-cmd --zone=public --add-port=$port
+    firewall-cmd --zone=public --permanent --add-port=$port
+done
 
 echo "Firewall configured (ports 80, 443 opened)"
 
