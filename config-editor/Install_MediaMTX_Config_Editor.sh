@@ -196,8 +196,9 @@ echo "=========================================="
 # Open web editor port. Rocky/RHEL run firewalld, Ubuntu ufw; some boxes have
 # neither (e.g. cloud images that rely on a security group).
 if command -v firewall-cmd > /dev/null 2>&1 && firewall-cmd --state > /dev/null 2>&1; then
+    # Runtime + permanent, no --reload (a reload kills local multicast senders).
+    firewall-cmd --zone=public --add-port=5000/tcp > /dev/null
     firewall-cmd --zone=public --permanent --add-port=5000/tcp > /dev/null
-    firewall-cmd --reload > /dev/null
     echo "✓ Port 5000 opened for web editor (firewalld)"
 elif command -v ufw > /dev/null 2>&1; then
     ufw allow 5000/tcp > /dev/null 2>&1
