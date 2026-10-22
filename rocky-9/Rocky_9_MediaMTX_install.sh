@@ -363,17 +363,13 @@ echo "=========================================="
 # Start and enable firewalld
 systemctl enable --now firewalld
 
-# Common MediaMTX ports
-firewall-cmd --zone=public --permanent --add-port=8554/tcp   # RTSP
-firewall-cmd --zone=public --permanent --add-port=1935/tcp   # RTMP
-firewall-cmd --zone=public --permanent --add-port=8888/tcp   # HLS
-firewall-cmd --zone=public --permanent --add-port=8189/udp   # WebRTC UDP
-firewall-cmd --zone=public --permanent --add-port=8000/udp   # RTP
-firewall-cmd --zone=public --permanent --add-port=8001/udp   # RTCP
-firewall-cmd --zone=public --permanent --add-port=8890/udp   # SRT
-
-# Reload firewall
-firewall-cmd --reload
+# Common MediaMTX ports: RTSP, RTMP, HLS, WebRTC UDP, RTP, RTCP, SRT.
+# Runtime + permanent, no --reload: a reload briefly drops outbound traffic and
+# kills local senders (e.g. ffmpeg to a multicast group) on a re-run.
+for port in 8554/tcp 1935/tcp 8888/tcp 8189/udp 8000/udp 8001/udp 8890/udp; do
+    firewall-cmd --zone=public --add-port=$port
+    firewall-cmd --zone=public --permanent --add-port=$port
+done
 
 echo "Firewall configured"
 
