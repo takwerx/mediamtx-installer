@@ -14385,10 +14385,12 @@ def set_udp_firewall(port, allow):
         if shutil.which('ufw'):
             rc, err = _firewall_run(['ufw', 'allow', f'{port}/udp'] if allow else ['ufw', 'delete', 'allow', f'{port}/udp'])
         elif shutil.which('firewall-cmd'):
+            # Runtime + permanent, no --reload: a reload briefly drops outbound
+            # traffic and kills local senders (e.g. ffmpeg to a multicast group).
             op = '--add-port' if allow else '--remove-port'
-            rc, err = _firewall_run(['firewall-cmd', '--permanent', f'{op}={port}/udp'])
+            rc, err = _firewall_run(['firewall-cmd', f'{op}={port}/udp'])
             if rc == 0:
-                rc, err = _firewall_run(['firewall-cmd', '--reload'])
+                rc, err = _firewall_run(['firewall-cmd', '--permanent', f'{op}={port}/udp'])
         else:
             return ''
     except Exception as e:
