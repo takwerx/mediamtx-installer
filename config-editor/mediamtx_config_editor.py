@@ -196,6 +196,29 @@ def clear_srt_passphrase_backup():
     if os.path.exists(SRT_PASSPHRASE_BACKUP_FILE):
         os.remove(SRT_PASSPHRASE_BACKUP_FILE)
 
+def _yaml_scalar_text(raw):
+    """The string a YAML scalar holds, as written on one line of the file.
+
+    save_config() writes every password as `pass: "..."`, and returning the raw
+    text kept those quotes as part of the password. The console then sent
+    `"secret"` to MediaMTX, which refused it: Watch spun forever and share links
+    failed, but only for viewers outside the box -- loopback is authorised by
+    the `any` user, so the same request from the server itself worked.
+    Unquoted values are returned as-is (a YAML parse would turn 0123 into 123).
+    """
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in '"\'':
+        try:
+            from io import StringIO
+            value = YAML(typ='safe').load(StringIO(raw))
+            if isinstance(value, str):
+                return value
+        except Exception:
+            pass
+        return raw[1:-1]
+    return raw
+
+
 def get_hlsviewer_credential():
     """Get hlsviewer credential by reading directly from config file"""
     try:
@@ -210,7 +233,7 @@ def get_hlsviewer_credential():
                     if 'pass:' in lines[j]:
                         pass_line = lines[j].strip()
                         if ':' in pass_line:
-                            password = pass_line.split(':', 1)[1].strip()
+                            password = _yaml_scalar_text(pass_line.split(':', 1)[1].strip())
                             if password:
                                 # Ensure it's in group metadata
                                 ensure_hlsviewer_in_metadata()
@@ -407,7 +430,7 @@ def webrtc_available():
     8189/udp reaches the viewer, since that leg never touches the console.
     """
     try:
-        return read_yaml_field('webrtc', 'no') == 'yes'
+        return read_yaml_flag('webrtc')
     except Exception:
         return False
 
@@ -4673,7 +4696,9 @@ HTML_TEMPLATE = '''
             if (form) {
                 if (form.dataset.editing) delete form.dataset.editing;
                 if (form.dataset.editingIps) delete form.dataset.editingIps;
-                
+                delete form.dataset.editingPass;
+                delete form.dataset.editingPerms;
+
                 // Reset button text back to "Create User"
                 const submitButton = form.querySelector('button[type="submit"]');
                 if (submitButton) {
@@ -4735,6 +4760,8 @@ HTML_TEMPLATE = '''
                     body: JSON.stringify({
                         oldUsername: editingUsername,
                         oldIps: editingIps,
+                        oldPass: form.dataset.editingPass,
+                        oldPermissions: form.dataset.editingPerms ? JSON.parse(form.dataset.editingPerms) : null,
                         groupName,
                         username,
                         password,
@@ -4746,6 +4773,8 @@ HTML_TEMPLATE = '''
                     if (data.success) {
                         delete form.dataset.editing;
                         delete form.dataset.editingIps;
+                        delete form.dataset.editingPass;
+                        delete form.dataset.editingPerms;
                         hideAddMediaMTXUserForm();
                         loadMediaMTXUsers();
                         reloadYAMLContent();
@@ -5565,7 +5594,7 @@ HTML_TEMPLATE = '''
         }
         // === END EXTERNAL SOURCES ===
 
-        function editMediaMTXUser(username, password, groupName, permissions, ips) {
+        function editMediaMTXUser(username, password, groupName, permissions, ips, listIndex) {
             // Show the add form
             document.getElementById('add-mediamtx-user-form').style.display = 'block';
             
@@ -5625,7 +5654,10 @@ HTML_TEMPLATE = '''
             const form = document.getElementById('mediamtx-user-form');
             form.dataset.editing = username;
             form.dataset.editingIps = JSON.stringify(ips || []);
-            
+            form.dataset.editingPass = password || '';
+            const listed = listedMediaMTXUsers[listIndex];
+            form.dataset.editingPerms = JSON.stringify(listed ? listed.permissions : null);
+
             // Change button text to "Update User"
             const submitButton = form.querySelector('button[type="submit"]');
             if (submitButton) {
@@ -5636,13 +5668,20 @@ HTML_TEMPLATE = '''
             document.getElementById('add-mediamtx-user-form').scrollIntoView({behavior: 'smooth'});
         }
         
-        function revokeMediaMTXUser(username, ips) {
+        // Users as last listed, so Edit and Revoke can send what tells several
+        // `any` entries apart (their permissions) without an inline onclick.
+        let listedMediaMTXUsers = [];
+
+        function revokeMediaMTXUser(index) {
+            const user = listedMediaMTXUsers[index];
+            if (!user) return;
+            const username = user.user;
             if (!confirm('Revoke access for user: ' + username + '?')) return;
-            
+
             fetch('/api/mediamtx/users/revoke', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({username, ips})
+                body: JSON.stringify({username, ips: user.ips || [], pass: user.pass || '', permissions: user.permissions || []})
             })
             .then(response => response.json())
             .then(data => {
@@ -5693,8 +5732,9 @@ HTML_TEMPLATE = '''
                     });
                     
                     let html = '';
-                    
-                    data.users.forEach(user => {
+                    listedMediaMTXUsers = data.users;
+
+                    data.users.forEach((user, userIndex) => {
                         // Check if this is unprotected (any user with no password)
                         const isUnprotected = user.user === 'any' && (!user.pass || user.pass === '');
                         const borderColor = isUnprotected ? '#ff9800' : '#2196F3';
@@ -5732,7 +5772,7 @@ HTML_TEMPLATE = '''
                         }
                         
                         html += '<p style="margin: 5px 0;"><strong>Permissions:</strong> ';
-                        const perms = user.permissions.map(p => p.action).join(', ');
+                        const perms = user.permissions.map(p => p.path ? p.action + ' (' + escapeHtml(String(p.path).replace(/^["']|["']$/g, '')) + ')' : p.action).join(', ');
                         html += perms || 'None';
                         html += '</p>';
                         html += '</div>';
@@ -5740,7 +5780,7 @@ HTML_TEMPLATE = '''
                         html += '<div style="display: flex; gap: 10px;">';
                         const permsJson = JSON.stringify(user.permissions.map(p => p.action)).replace(/"/g, '&quot;');
                         const ipsJson = JSON.stringify(user.ips || []).replace(/"/g, '&quot;');
-                        html += '<button class="btn btn-secondary" onclick="editMediaMTXUser(\\'' + user.user + '\\', \\'' + (user.pass || '') + '\\', \\'' + (user.groupName || '') + '\\', ' + permsJson + ', ' + ipsJson + ')">✏️ Edit</button>';
+                        html += '<button class="btn btn-secondary" onclick="editMediaMTXUser(\\'' + user.user + '\\', \\'' + (user.pass || '') + '\\', \\'' + (user.groupName || '') + '\\', ' + permsJson + ', ' + ipsJson + ', ' + userIndex + ')">✏️ Edit</button>';
                         
                         // Hide Revoke button for PUBLIC user (controlled by toggle)
                         const isPublicUser = user.user === 'any' && (!user.pass || user.pass === '') && user.groupName === 'PUBLIC';
@@ -5748,7 +5788,7 @@ HTML_TEMPLATE = '''
                         const isHLSViewer = user.user === 'hlsviewer';
                         
                         if (!isPublicUser && !isHLSViewer) {
-                            html += '<button class="btn btn-danger" onclick="revokeMediaMTXUser(\\'' + user.user + '\\', ' + ipsJson + ')">🗑️ Revoke</button>';
+                            html += '<button class="btn btn-danger" onclick="revokeMediaMTXUser(' + userIndex + ')">🗑️ Revoke</button>';
                         } else if (isHLSViewer) {
                             html += '<span style="color: #ff9800; font-size: 13px; margin-left: 10px;">⚠️ System User - Auto-generated for HLS playback (password edit only)</span>';
                         }
@@ -5960,9 +6000,14 @@ HTML_TEMPLATE = '''
             // Resolve relative URL to absolute so the popup (about:blank) can fetch it
             const absoluteUrl = isProxied ? (window.location.origin + streamUrl) : streamUrl;
 
-            // Stream name = second-to-last path segment (.../<name>/index.m3u8)
-            const urlParts = absoluteUrl.split('/');
-            const streamName = urlParts.length >= 2 ? urlParts[urlParts.length - 2] : 'stream';
+            // Stream name = the whole path before /index.m3u8, so nested paths such as
+            // live/drone1 keep their prefix. Taking only the last segment sent WebRTC
+            // to "drone1", a path with no stream on it. The name is written into the
+            // popup's HTML below, so anything outside stream-path characters is dropped.
+            let streamPath = decodeURIComponent(new URL(absoluteUrl).pathname);
+            if (isProxied) streamPath = streamPath.replace(/^[/]hls-proxy/, '');
+            streamPath = streamPath.replace(/^[/]+/, '').replace(/[/]index[.]m3u8$/, '');
+            const streamName = /^[A-Za-z0-9_.~-]+([/][A-Za-z0-9_.~-]+)*$/.test(streamPath) ? streamPath : 'stream';
 
             // playbackConfig is loaded once at page load; default to HLS so a
             // failed/absent fetch can never take the watch button offline.
@@ -5971,7 +6016,7 @@ HTML_TEMPLATE = '''
             // same-origin (no CORS), session-authenticated, and it lets the
             // WebRTC port stay bound to localhost like HLS already is.
             const whepUrl = (playbackConfig && playbackConfig.webrtc_available)
-                ? window.location.origin + '/whep/' + encodeURIComponent(streamName)
+                ? window.location.origin + '/whep/' + streamName.split('/').map(encodeURIComponent).join('/')
                 : '';
 
             console.log('[Watch] Resolved URL:', absoluteUrl, '| proxied:', isProxied, '| mode:', playbackMode);
@@ -8217,6 +8262,19 @@ def read_yaml_field(field_name, default=None):
         print(f"ERROR reading field {field_name}: {e}", flush=True)
     return default
 
+def read_yaml_flag(field_name, default=True):
+    """A top-level on/off switch such as `webrtc:`. The Ubuntu template writes
+    `yes`/`no` but upstream's config (Rocky) writes `true`/`false`, so comparing
+    with 'yes' read every upstream switch as off. A missing or empty key gets
+    MediaMTX's own default, which is on for every protocol."""
+    value = read_yaml_field(field_name, None)
+    if value is None:
+        return default
+    value = str(value).split(' #', 1)[0].strip().lower()
+    if not value:
+        return default
+    return value in ('yes', 'true', 'on')
+
 def read_yaml_users():
     """Read authInternalUsers directly from YAML file without ruamel.yaml.
     Returns a list of user dicts with user, pass, ips, permissions."""
@@ -9027,6 +9085,29 @@ def api_status():
     except:
         return jsonify({'status': 'unknown', 'color': 'secondary'})
 
+def is_legacy_relay_input(path_name, all_names):
+    """True for `live/X` when `X` also exists: the input half of the old FFmpeg
+    relay (publish to live/X, FFmpeg re-published it as X), which is counted as
+    viewers of X rather than listed on its own.
+
+    This used to hide every `live/` path. The relay is gone -- startup strips it
+    from mediamtx.yml -- so a `live/` path is now a real publisher, usually OBS or
+    a DJI drone on RTMP (`rtmp://host/live/<name>`). Those streams were online
+    and recording while Active Streams and the dashboard showed nothing.
+    """
+    return path_name.startswith('live/') and path_name[5:] in all_names
+
+
+STREAM_NAME_RE = re.compile(r'^[A-Za-z0-9_.~-]+(/[A-Za-z0-9_.~-]+)*$')
+
+
+def is_valid_stream_name(name):
+    """Stream path characters, one or more segments (live/drone1), and no `.` or
+    `..` segment that would climb out of the path. Checked wherever a stream name
+    from a URL reaches MediaMTX or is written into a page."""
+    return bool(STREAM_NAME_RE.match(name or '')) and not any(s in ('.', '..') for s in name.split('/'))
+
+
 @app.route('/api/streams')
 @login_required
 def api_streams():
@@ -9070,8 +9151,8 @@ def api_streams():
             
             for item in data.get('items', []):
                 path_name = item.get('name', '')
-                # Skip internal relay streams and 'all' path
-                if path_name and path_name != 'all' and not path_name.startswith('live/'):
+                # Skip legacy relay inputs and 'all' path
+                if path_name and path_name != 'all' and not is_legacy_relay_input(path_name, available_paths):
                     stream_info = {
                         'name': path_name,
                         'readers': 0,  # Will update from detail call
@@ -9602,6 +9683,54 @@ def api_add_mediamtx_user():
     
     return jsonify({'success': True})
 
+def _is_hidden_teststream_viewer(u):
+    return (u.get('user') == 'any' and not list(u.get('ips') or []) and not u.get('pass')
+            and any(p.get('path') == 'teststream' for p in (u.get('permissions') or [])))
+
+
+def _permission_key(perms):
+    """Comparable form of a permission list. Paths are unquoted because the
+    Users tab reads them with read_yaml_users(), which keeps YAML quotes."""
+    return sorted((str(p.get('action') or ''), str(p.get('path') or '').strip('\'"'))
+                  for p in (perms or []) if isinstance(p, dict))
+
+
+def _matches_mediamtx_user(u, username, ips, password=None, permissions=None):
+    """Identify the one user an edit/revoke from the Users tab refers to.
+
+    Several `user: any` entries can share `ips: []` (public access, the hidden
+    teststream viewer, hand-made publish grants). MediaMTX refuses a password on
+    `any`, so they differ only in their permissions: for 'any', the password and
+    permissions the client listed are compared too when it sends them. The
+    teststream viewer is hidden from the Users tab and is never matched here.
+    """
+    if str(u.get('user') or '') != username:
+        return False
+    if _is_hidden_teststream_viewer(u):
+        return False
+    if username != 'any':
+        return True
+    if list(u.get('ips') or []) != list(ips or []):
+        return False
+    if password is not None and str(u.get('pass') or '') != str(password):
+        return False
+    return permissions is None or _permission_key(u.get('permissions')) == _permission_key(permissions)
+
+
+def _merge_permissions(old_perms, actions):
+    """New permission list for the chosen actions, keeping any path scope.
+
+    The Users form only knows action names. Rebuilding as bare {'action': a}
+    turned "publish to live/game only" into "publish anywhere" -- on an 'any'
+    user, that let anyone on the internet publish to any path.
+    """
+    merged = []
+    for action in actions:
+        scoped = [p for p in (old_perms or []) if p.get('action') == action]
+        merged.extend(scoped if scoped else [{'action': action}])
+    return merged
+
+
 @app.route('/api/mediamtx/users/update', methods=['POST'])
 @admin_required
 def api_update_mediamtx_user():
@@ -9639,29 +9768,16 @@ def api_update_mediamtx_user():
     if 'authInternalUsers' not in config:
         return jsonify({'success': False, 'error': 'No users configured'}), 400
     
-    # Find the specific user to update (match by username AND ips to handle multiple 'any' users)
+    # Find the specific user to update (see _matches_mediamtx_user for 'any' users)
     user_found = False
     for user in config['authInternalUsers']:
-        if user.get('user') == old_username:
-            # For 'any' users, also check IPs to find the right one
-            if old_username == 'any':
-                user_ips = user.get('ips', [])
-                # Match the specific 'any' user by IPs
-                if user_ips == old_ips:
-                    # Update this user
-                    user['user'] = username
-                    # Force password as quoted string to prevent YAML number parsing
-                    user['pass'] = DoubleQuotedScalarString(str(password)) if password else ''
-                    user['permissions'] = [{'action': perm} for perm in permissions]
-                    user_found = True
-                    break
-            else:
-                # For non-'any' users, just match username
-                user['user'] = username
-                user['pass'] = DoubleQuotedScalarString(str(password)) if password else ''
-                user['permissions'] = [{'action': perm} for perm in permissions]
-                user_found = True
-                break
+        if _matches_mediamtx_user(user, old_username, old_ips, data.get('oldPass'), data.get('oldPermissions')):
+            user['user'] = username
+            # Force password as quoted string to prevent YAML number parsing
+            user['pass'] = DoubleQuotedScalarString(str(password)) if password else ''
+            user['permissions'] = _merge_permissions(user.get('permissions'), permissions)
+            user_found = True
+            break
     
     if not user_found:
         return jsonify({'success': False, 'error': 'User not found'}), 404
@@ -9705,18 +9821,13 @@ def api_revoke_mediamtx_user():
     if username == 'any' and ips and '127.0.0.1' in ips:
         return jsonify({'success': False, 'error': 'Cannot delete localhost exemption (required for FFmpeg)'}), 400
     
-    # Remove the specific user (match by username AND ips for 'any' users)
-    original_count = len(config['authInternalUsers'])
-    if username == 'any':
-        # For 'any' users, match by IPs to delete the right one
-        config['authInternalUsers'] = [u for u in config['authInternalUsers'] 
-                                        if not (u.get('user') == username and u.get('ips', []) == ips)]
-    else:
-        # For other users, just match username
-        config['authInternalUsers'] = [u for u in config['authInternalUsers'] if u.get('user') != username]
-    
-    if len(config['authInternalUsers']) == original_count:
+    # Remove exactly one user. Filtering every 'any' entry with matching IPs also
+    # deleted the hidden teststream viewer, which shares `user: any, ips: []`.
+    idx = next((i for i, u in enumerate(config['authInternalUsers'])
+                if _matches_mediamtx_user(u, username, ips, data.get('pass'), data.get('permissions'))), None)
+    if idx is None:
         return jsonify({'success': False, 'error': 'User not found'}), 404
+    del config['authInternalUsers'][idx]
     
     # Remove from group metadata
     group_metadata = load_group_metadata()
@@ -11067,7 +11178,7 @@ def get_stream_urls():
         # Browser-only, video without audio/KLV. MediaMTX serves its own player at
         # this path and the WHEP endpoint at <path>/whep. Only surfaced when the
         # protocol is actually enabled, so the UI never shows a dead link.
-        'webrtc': f'{protocol}://{domain}:8889/teststream' if read_yaml_field('webrtc', 'no') == 'yes' else None
+        'webrtc': f'{protocol}://{domain}:8889/teststream' if read_yaml_flag('webrtc') else None
     }
 
     return jsonify(urls)
@@ -11481,11 +11592,11 @@ def get_protocols_status():
     """Get enable/disable status for all protocols"""
     try:
         return jsonify({
-            'rtsp': read_yaml_field('rtsp', 'yes') == 'yes',
-            'rtmp': read_yaml_field('rtmp', 'yes') == 'yes',
-            'hls': read_yaml_field('hls', 'yes') == 'yes',
-            'webrtc': read_yaml_field('webrtc', 'yes') == 'yes',
-            'srt': read_yaml_field('srt', 'yes') == 'yes'
+            'rtsp': read_yaml_flag('rtsp'),
+            'rtmp': read_yaml_flag('rtmp'),
+            'hls': read_yaml_flag('hls'),
+            'webrtc': read_yaml_flag('webrtc'),
+            'srt': read_yaml_flag('srt')
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -15268,7 +15379,8 @@ def whep_negotiate(stream, sdp_offer):
     import urllib.error
     import urllib.request
 
-    if not re.match(r'^[A-Za-z0-9_.-]+$', stream or ''):
+    # Nested paths (live/drone1) are valid: MediaMTX serves WHEP at /live/drone1/whep.
+    if not is_valid_stream_name(stream):
         return None, 'Invalid stream name'
     try:
         enc = str(read_yaml_field('webrtcEncryption', 'no')).lower() in ('yes', 'true')
@@ -15297,10 +15409,12 @@ def whep_negotiate(stream, sdp_offer):
         return None, str(e)[:200]
 
 
-@app.route('/whep/<stream_name>', methods=['POST'])
+@app.route('/whep/<path:stream_name>', methods=['POST'])
 @login_required
 def whep_authenticated(stream_name):
-    """WHEP for logged-in console users (Active Streams watch button)."""
+    """WHEP for logged-in console users (Active Streams watch button).
+    `path:` so nested stream paths such as live/drone1 reach MediaMTX;
+    whep_negotiate() checks the name."""
     answer, err = whep_negotiate(stream_name, request.get_data(as_text=True))
     if err:
         return Response(err, status=502, content_type='text/plain')
@@ -15437,6 +15551,10 @@ def api_share_links_revoke():
 
 def _watch_stream_impl(stream_name):
     """Shareable HLS player page - credentials embedded server-side"""
+    # The name is written into the page's HTML and JS below, and the route takes
+    # nested paths (live/drone1), so allow only stream-path characters.
+    if not is_valid_stream_name(stream_name):
+        return "Stream not found", 404
     try:
         # Get HLS viewer credentials
         cred = get_hlsviewer_credential()
@@ -15587,7 +15705,7 @@ def _watch_stream_impl(stream_name):
 # The overlay provides its own visibility-aware /watch/ route; registering both
 # crashes Flask with "View function mapping is overwriting an existing endpoint".
 if not LDAP_OVERLAY_ACTIVE:
-    watch_stream = app.route('/watch/<stream_name>', endpoint='watch_stream')(_watch_stream_impl)
+    watch_stream = app.route('/watch/<path:stream_name>', endpoint='watch_stream')(_watch_stream_impl)
 
 # === END SHAREABLE WATCH LINKS ===
 
@@ -15632,10 +15750,11 @@ def get_dashboard_metrics():
                                 live_paths[stream_name] = max(0, (readers_data or 0) - 1)
                     
                     # Process main paths and add live/ viewers
+                    all_names = {p.get('name', '') for p in paths_data['items']}
                     for path in paths_data['items']:
                         path_name = path.get('name', '')
-                        # Skip internal paths and live/ paths
-                        if path_name and path_name != 'all' and not path_name.startswith('live/'):
+                        # Skip internal paths and legacy relay inputs
+                        if path_name and path_name != 'all' and not is_legacy_relay_input(path_name, all_names):
                             # Count streams that are ready (have active source)
                             if path.get('ready', False):
                                 active_streams += 1
