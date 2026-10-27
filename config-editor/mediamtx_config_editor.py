@@ -1652,7 +1652,8 @@ HTML_TEMPLATE = '''
                 {{ message }}
             </div>
             <script>
-                // Auto-dismiss flash messages after 3 seconds
+                // Auto-dismiss flash messages after 3 seconds (errors, which can carry
+                // a firewall warning, stay 15 seconds so they can be read)
                 setTimeout(function() {
                     const msg = document.getElementById('flash-message');
                     if (msg) {
@@ -1667,7 +1668,7 @@ HTML_TEMPLATE = '''
                             window.history.replaceState({}, '', url);
                         }, 500);
                     }
-                }, 3000);
+                }, {{ 15000 if message_type == 'danger' else 3000 }});
             </script>
             {% endif %}
             
@@ -10074,28 +10075,31 @@ def save_protocols():
             if result.returncode == 0:
                 subprocess.run(['sed', '-i', 's/^  srtReadPassphrase:.*/  srtReadPassphrase:/', CONFIG_FILE], check=True)
         
-        # Auto-manage UFW for port changes and encryption
-        try:
-            # Ensure protocol ports are open in UFW
-            if rtsp_port:
-                subprocess.run(['sudo', 'ufw', 'allow', f'{rtsp_port}/tcp'], capture_output=True, timeout=10)
-            if rtsps_port and rtsp_encryption in ['optional', 'strict']:
-                subprocess.run(['sudo', 'ufw', 'allow', f'{rtsps_port}/tcp'], capture_output=True, timeout=10)
-            if rtmp_port:
-                subprocess.run(['sudo', 'ufw', 'allow', f'{rtmp_port}/tcp'], capture_output=True, timeout=10)
-            if rtmps_port and rtmp_encryption in ['optional', 'strict']:
-                subprocess.run(['sudo', 'ufw', 'allow', f'{rtmps_port}/tcp'], capture_output=True, timeout=10)
-            if hls_port:
-                subprocess.run(['sudo', 'ufw', 'allow', f'{hls_port}/tcp'], capture_output=True, timeout=10)
-            if srt_port:
-                subprocess.run(['sudo', 'ufw', 'allow', f'{srt_port}/udp'], capture_output=True, timeout=10)
-            print("✓ UFW rules updated for protocol ports", flush=True)
-        except Exception as e:
-            print(f"WARNING: UFW update failed: {e}", flush=True)
-        
+        # Firewall: open what the saved settings listen on. RTMP is handled as a
+        # pair so RTMPS is opened with "optional"/"strict" and closed with "no".
+        # HLS is skipped when bound to loopback: infra-TAK serves it through Caddy
+        # and its port must stay closed.
+        fw_changes = []
+        if rtsp_port:
+            fw_changes.append(('allow', rtsp_port, 'tcp'))
+        if rtsps_port and rtsp_encryption in ['optional', 'strict']:
+            fw_changes.append(('allow', rtsps_port, 'tcp'))
+        if rtmp_port or rtmps_port or rtmp_encryption:
+            fw_changes += rtmp_firewall_changes(
+                read_yaml_flag('rtmp'),
+                rtmp_encryption or read_yaml_field('rtmpEncryption', 'no'),
+                rtmp_port, rtmps_port)
+        if hls_port and not is_hls_localhost_bound():
+            fw_changes.append(('allow', hls_port, 'tcp'))
+        if srt_port:
+            fw_changes.append(('allow', srt_port, 'udp'))
+        fw_warning = firewall_warning(fw_apply(fw_changes))
+
         # Restart MediaMTX
         mtx_restart_checked()
         time.sleep(3)
+        if fw_warning:
+            return redirect(f'/?message={quote("Protocol settings saved and MediaMTX restarted. " + fw_warning)}&message_type=danger&tab={tab}')
         return redirect(f'/?message=Protocol settings saved and MediaMTX restarted successfully!&message_type=success&tab={tab}')
         
     except Exception as e:
@@ -11633,10 +11637,9 @@ def toggle_protocol():
             except Exception as e:
                 print(f"Warning: could not pin webrtcAddress to loopback: {e}", flush=True)
 
-        # Auto-manage UFW for protocol ports
+        # Auto-manage the firewall for protocol ports
         protocol_ports = {
             'rtsp': [('8554', 'tcp')],
-            'rtmp': [('1935', 'tcp')],
             'hls': [('8888', 'tcp')],
             'srt': [('8890', 'udp')],
             # 8189/udp only. WHEP signalling is proxied via /whep/<stream> and
@@ -11649,23 +11652,25 @@ def toggle_protocol():
             'webrtc': [('8189', 'udp')],
         }
         
-        if protocol in protocol_ports:
-            try:
-                for port, proto in protocol_ports[protocol]:
-                    if enabled:
-                        subprocess.run(['sudo', 'ufw', 'allow', f'{port}/{proto}'], capture_output=True, timeout=10)
-                        print(f"✓ UFW rule created: allow {port}/{proto} ({protocol.upper()})", flush=True)
-                    else:
-                        subprocess.run(['sudo', 'ufw', 'delete', 'allow', f'{port}/{proto}'], capture_output=True, timeout=10)
-                        print(f"✓ UFW rule removed: {port}/{proto} ({protocol.upper()})", flush=True)
-            except:
-                pass
-        
+        if protocol == 'rtmp':
+            # Configured ports, and RTMPS alongside RTMP when encryption is on.
+            fw_changes = rtmp_firewall_changes(enabled, read_yaml_field('rtmpEncryption', 'no'))
+        elif protocol == 'hls':
+            # Loopback-bound HLS is served through Caddy; its port stays closed.
+            fw_changes = [] if is_hls_localhost_bound() else [
+                ('allow' if enabled else 'delete', _listen_port('hlsAddress', '8888'), 'tcp')]
+        else:
+            fw_changes = [('allow' if enabled else 'delete', port, proto)
+                          for port, proto in protocol_ports.get(protocol, [])]
+        fw_warning = firewall_warning(fw_apply(fw_changes))
+
         mtx_restart_checked()
         time.sleep(3)
         
         message = f'{protocol.upper()} {"enabled" if enabled else "disabled"}'
-        return jsonify({'success': True, 'enabled': enabled, 'message': message})
+        if fw_warning:
+            message += '\n\n' + fw_warning
+        return jsonify({'success': True, 'enabled': enabled, 'message': message, 'firewall_warning': fw_warning})
             
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -12650,14 +12655,39 @@ def get_ssh_port():
         pass
     return '22'
 
+def firewalld_rules_response():
+    """Firewall tab data for a firewalld box (no ufw): the open ports in the default zone."""
+    rc, out, err = _firewall_exec(['firewall-cmd', '--list-ports'], timeout=10)
+    if rc != 0:
+        if 'not running' in (err + out).lower():
+            return jsonify({'success': True, 'status': 'inactive', 'rules': [], 'protected_ports': sorted(protected_firewall_ports())})
+        return jsonify({'success': False, 'error': 'Could not read firewall status: ' + ((err or out).strip()[:200] or f'exit {rc}')})
+    protected = protected_firewall_ports()
+    ssh_port = get_ssh_port()
+    rules = []
+    for port_proto in out.split():
+        port, _, proto = port_proto.partition('/')
+        description = KNOWN_PORTS.get(port_proto, ('',))[0]
+        if not description and port == ssh_port and proto == 'tcp':
+            description = f'SSH (port {ssh_port})'
+        rules.append({'port': port, 'proto': proto, 'action': 'ALLOW',
+                      'protected': port_proto in protected, 'description': description,
+                      'rule_text': port_proto})
+    return jsonify({'success': True, 'status': 'active', 'rules': rules, 'protected_ports': sorted(protected)})
+
+
 @app.route('/api/firewall/rules')
 @admin_required
 def get_firewall_rules():
     """Get current UFW rules"""
     try:
-        # Get UFW status
-        result = subprocess.run(['sudo', 'ufw', 'status'], capture_output=True, text=True, timeout=10)
-        output = result.stdout
+        # Same privilege path as rule changes, so an unprivileged console reports
+        # the real rules instead of an empty "inactive".
+        if firewall_tool() == 'firewalld':
+            return firewalld_rules_response()
+        rc, output, err = _firewall_exec(['ufw', 'status'], timeout=10)
+        if rc != 0:
+            return jsonify({'success': False, 'error': 'Could not read firewall status: ' + ((err or output).strip()[:200] or f'exit {rc}')})
         
         # Parse status
         status = 'inactive'
@@ -12667,11 +12697,7 @@ def get_firewall_rules():
         # Detect SSH port for protection
         ssh_port = get_ssh_port()
         
-        # Build dynamic protected ports list
-        protected = [f'{ssh_port}/tcp', '80/tcp', '443/tcp', '5000/tcp']
-        # Add TAK ports if TAK Server exists
-        if os.path.exists('/opt/tak'):
-            protected.extend(['8089/tcp', '8443/tcp', '8446/tcp', '8444/tcp'])
+        protected = sorted(protected_firewall_ports())
         
         # Parse rules
         rules = []
@@ -12743,14 +12769,13 @@ def add_firewall_rule():
         if not port or not isinstance(port, int) or port < 1 or port > 65535:
             return jsonify({'success': False, 'error': 'Invalid port number'}), 400
         
-        if protocol == 'both':
-            subprocess.run(['sudo', 'ufw', 'allow', f'{port}/tcp'], capture_output=True, timeout=10)
-            subprocess.run(['sudo', 'ufw', 'allow', f'{port}/udp'], capture_output=True, timeout=10)
-            print(f"✓ UFW rules created: allow {port}/tcp and {port}/udp", flush=True)
-        else:
-            subprocess.run(['sudo', 'ufw', 'allow', f'{port}/{protocol}'], capture_output=True, timeout=10)
-            print(f"✓ UFW rule created: allow {port}/{protocol}", flush=True)
-        
+        if protocol not in ('tcp', 'udp', 'both'):
+            return jsonify({'success': False, 'error': 'Invalid protocol'}), 400
+        protos = ['tcp', 'udp'] if protocol == 'both' else [protocol]
+        failures = fw_apply([('allow', port, p) for p in protos])
+        if failures:
+            return jsonify({'success': False, 'error': firewall_warning(failures)}), 500
+
         return jsonify({'success': True})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -12767,21 +12792,14 @@ def remove_firewall_rule():
             return jsonify({'success': False, 'error': 'Invalid rule'}), 400
         
         # Safety check - don't allow removing protected ports
-        ssh_port = get_ssh_port()
-        protected = [f'{ssh_port}/tcp', '80/tcp', '443/tcp', '5000/tcp']
-        if os.path.exists('/opt/tak'):
-            protected.extend(['8089/tcp', '8443/tcp', '8446/tcp', '8444/tcp'])
-        
-        if rule in protected:
+        if rule in protected_firewall_ports():
             return jsonify({'success': False, 'error': 'Cannot remove protected port'}), 403
-        
-        result = subprocess.run(['sudo', 'ufw', 'delete', 'allow', rule], 
-                              capture_output=True, text=True, timeout=10)
-        
-        if result.returncode != 0:
-            return jsonify({'success': False, 'error': result.stderr or 'Failed to remove rule'}), 500
-        
-        print(f"✓ UFW rule removed: {rule}", flush=True)
+
+        port, proto = rule.split('/', 1)
+        ok, msg = fw_port('delete', port, proto)
+        if not ok:
+            return jsonify({'success': False, 'error': msg}), 500
+
         return jsonify({'success': True})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -14360,18 +14378,135 @@ def udp_listen_port(source_url):
         return None
 
 
-def _firewall_run(argv, timeout=20):
+def _firewall_exec(argv, timeout=20):
     """Run a ufw / firewall-cmd command as root: in-process when root, else via the
-    infra-TAK broker (hardened boxes, console unprivileged), else sudo -n. Returns
-    (returncode, error_text)."""
+    infra-TAK broker (hardened boxes, console unprivileged), else `sudo -n` (fails
+    fast instead of waiting on a password prompt). Returns (returncode, stdout, stderr)
+    as text.
+
+    Every firewall call used to be `subprocess.run(['sudo', 'ufw', ...])` with the
+    result thrown away. On infra-TAK boxes the console runs as an unprivileged user
+    with no sudo, so each call failed ("a password is required") and nothing said so:
+    saving the Protocols page reported success while the port stayed closed."""
     if os.geteuid() == 0:
         r = subprocess.run(argv, capture_output=True, timeout=timeout)
-        return r.returncode, r.stderr.decode(errors='replace')
+        return r.returncode, r.stdout.decode(errors='replace'), r.stderr.decode(errors='replace')
     br = _mtx_broker_exec(argv, timeout=timeout)
     if br is not None:
-        return br[0], br[2].decode(errors='replace')
-    r = subprocess.run(['sudo', '-n'] + argv, capture_output=True, timeout=timeout)
-    return r.returncode, r.stderr.decode(errors='replace')
+        return br[0], br[1].decode(errors='replace'), br[2].decode(errors='replace')
+    r = subprocess.run(['sudo', '-n'] + list(argv), capture_output=True, timeout=timeout)
+    return r.returncode, r.stdout.decode(errors='replace'), r.stderr.decode(errors='replace')
+
+
+def _firewall_run(argv, timeout=20):
+    """_firewall_exec without stdout. Returns (returncode, error_text)."""
+    rc, _out, err = _firewall_exec(argv, timeout=timeout)
+    return rc, err
+
+
+def firewall_tool():
+    """'ufw', 'firewalld', or None. ufw wins when both exist (infra-TAK installs a
+    ufw shim on RHEL, and the Firewall tab reads ufw's status). Checks the sbin
+    paths directly: a console service running as a plain user often has no sbin on
+    its PATH, so shutil.which alone reported "no firewall" on a box that had one."""
+    if shutil.which('ufw') or any(os.path.exists(p) for p in ('/usr/sbin/ufw', '/sbin/ufw', '/usr/bin/ufw')):
+        return 'ufw'
+    if shutil.which('firewall-cmd') or os.path.exists('/usr/bin/firewall-cmd'):
+        return 'firewalld'
+    return None
+
+
+def protected_firewall_ports():
+    """Rules that are never closed from this console: SSH, web, the console itself
+    and, when TAK Server is installed, its ports. Losing one locks the operator out."""
+    protected = {f'{get_ssh_port()}/tcp', '22/tcp', '80/tcp', '443/tcp', '5000/tcp'}
+    if os.path.exists('/opt/tak'):
+        protected.update(['8089/tcp', '8443/tcp', '8446/tcp', '8444/tcp'])
+    return protected
+
+
+def fw_port(action, port, proto='tcp'):
+    """Open (action='allow') or close (action='delete') one port. Returns (ok, message).
+
+    A protected port is never closed; that is reported as ok, because the port is
+    in the state the operator needs. Callers must surface a failure: a firewall
+    rule that silently did not apply looks exactly like a working one until someone
+    outside tries to connect."""
+    port = str(port).strip()
+    if not port.isdigit() or not (1 <= int(port) <= 65535) or proto not in ('tcp', 'udp'):
+        return False, f'invalid port {port}/{proto}'
+    port = str(int(port))
+    allow = action == 'allow'
+    if not allow and f'{port}/{proto}' in protected_firewall_ports():
+        print(f"Firewall: left {port}/{proto} open (protected port)", flush=True)
+        return True, f'{port}/{proto} is a protected port and stays open'
+    tool = firewall_tool()
+    if tool is None:
+        return False, f'{port}/{proto}: no firewall tool (ufw or firewall-cmd) found'
+    try:
+        if tool == 'ufw':
+            rc, err = _firewall_run(['ufw', 'allow', f'{port}/{proto}'] if allow
+                                    else ['ufw', 'delete', 'allow', f'{port}/{proto}'])
+        else:
+            # Runtime + permanent, no --reload: a reload briefly drops outbound
+            # traffic and kills local senders (e.g. ffmpeg to a multicast group).
+            op = '--add-port' if allow else '--remove-port'
+            rc, err = _firewall_run(['firewall-cmd', f'{op}={port}/{proto}'])
+            if rc != 0 and 'not running' in err.lower():
+                # Nothing is filtering, so nothing to open or close.
+                return True, 'firewalld is not running'
+            if rc == 0:
+                rc, err = _firewall_run(['firewall-cmd', '--permanent', f'{op}={port}/{proto}'])
+    except Exception as e:
+        return False, f'{port}/{proto}: {e}'
+    if rc != 0:
+        detail = [l for l in err.strip().splitlines() if l.strip()]
+        return False, f'{port}/{proto}: ' + (detail[-1][:160] if detail else f'exit {rc}')
+    verb = 'opened' if allow else 'closed'
+    print(f"✓ Firewall: {verb} {port}/{proto} ({tool})", flush=True)
+    return True, f'{port}/{proto} {verb}'
+
+
+def fw_apply(changes):
+    """Apply [(action, port, proto), ...]. Returns a list of failure messages."""
+    failures = []
+    for action, port, proto in changes:
+        ok, msg = fw_port(action, port, proto)
+        if not ok:
+            print(f"Warning: firewall {action} failed: {msg}", flush=True)
+            failures.append(msg)
+    return failures
+
+
+def firewall_warning(failures):
+    """One sentence for the UI, or '' when every rule applied."""
+    if not failures:
+        return ''
+    return ('Firewall not updated: ' + '; '.join(failures) +
+            '. Open the port(s) by hand or check the Firewall tab.')
+
+
+def _listen_port(field, default):
+    """Port number of a listener field such as `rtmpAddress: :1935`."""
+    value = str(read_yaml_field(field, '') or '')
+    port = value.rsplit(':', 1)[-1].strip()
+    return port if port.isdigit() else default
+
+
+def rtmp_firewall_changes(enabled, encryption, rtmp_port=None, rtmps_port=None):
+    """The firewall state RTMP needs: 1935 open unless encryption is strict, 1936
+    open when encryption is optional or strict, both closed when RTMP is off.
+    Only 1935 used to be handled, so RTMPS listened behind a closed port."""
+    rtmp_port = str(rtmp_port or _listen_port('rtmpAddress', '1935'))
+    rtmps_port = str(rtmps_port or _listen_port('rtmpsAddress', '1936'))
+    plain = enabled and encryption != 'strict'
+    tls = enabled and encryption in ('optional', 'strict')
+    changes = [('allow' if plain else 'delete', rtmp_port, 'tcp'),
+               ('allow' if tls else 'delete', rtmps_port, 'tcp')]
+    # Same port in both slots: never let the close undo the open.
+    if rtmp_port == rtmps_port:
+        changes = [c for c in changes if c[0] == 'allow'] or changes[:1]
+    return changes
 
 
 def set_udp_firewall(port, allow):
@@ -14381,24 +14516,12 @@ def set_udp_firewall(port, allow):
     for the operator (the source itself is saved either way)."""
     if not port or (not allow and port in MTX_RESERVED_UDP_PORTS):
         return ''
-    try:
-        if shutil.which('ufw'):
-            rc, err = _firewall_run(['ufw', 'allow', f'{port}/udp'] if allow else ['ufw', 'delete', 'allow', f'{port}/udp'])
-        elif shutil.which('firewall-cmd'):
-            # Runtime + permanent, no --reload: a reload briefly drops outbound
-            # traffic and kills local senders (e.g. ffmpeg to a multicast group).
-            op = '--add-port' if allow else '--remove-port'
-            rc, err = _firewall_run(['firewall-cmd', f'{op}={port}/udp'])
-            if rc == 0:
-                rc, err = _firewall_run(['firewall-cmd', '--permanent', f'{op}={port}/udp'])
-        else:
-            return ''
-    except Exception as e:
-        rc, err = 1, str(e)
-    if rc == 0:
-        print(f"✓ Firewall: {'allowed' if allow else 'removed'} {port}/udp", flush=True)
+    if firewall_tool() is None:
         return ''
-    print(f"Warning: could not {'open' if allow else 'close'} {port}/udp in the firewall: {err.strip()[:200]}", flush=True)
+    ok, msg = fw_port('allow' if allow else 'delete', port, 'udp')
+    if ok:
+        return ''
+    print(f"Warning: could not {'open' if allow else 'close'} {port}/udp in the firewall: {msg}", flush=True)
     if allow:
         return f'Could not open UDP port {port} in the firewall. Allow {port}/udp by hand, or the stream will not arrive.'
     return ''
