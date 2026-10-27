@@ -327,6 +327,19 @@ DJI drones (Avata, Mini series, etc.) stream via RTMP:
 For encrypted RTMPS (requires Caddy SSL):
 - Enter: `rtmps://YOUR-DOMAIN:1936/drone1`
 
+### With a stream key
+
+1. Go to **Configuration → Stream Keys**, enter a label (e.g. `Drone 1`); the path fills in as `live/drone-1`
+2. Click **Create Stream Key**, then **Show publish settings**. MediaMTX does not restart and live streams are not interrupted
+3. DJI: paste the **RTMP URL** (it carries `?user=...&pass=...`). OBS: paste **Server** and **Stream Key** separately
+4. Verify `live/drone-1` appears in **Active Streams**
+5. Publish to a different path with the same credentials: MediaMTX must refuse it
+6. **Rotate** the key: the encoder is disconnected, the old settings are refused, the new settings work, and other streams stay up
+7. **Revoke** the key: the encoder is disconnected, the key disappears from the list and from **Advanced YAML**
+8. Check **Users & Auth**: stream keys never appear there
+9. Try a path starting with `~` or containing `..`: it must be refused
+10. Turn on public access with publish allowed: the Stream Keys tab shows a warning that keys protect nothing
+
 ---
 
 ## 20. Mobile / Responsive Testing

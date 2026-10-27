@@ -70,6 +70,7 @@ This re-syncs the LDAP overlay and restarts the editor. **v2.0.1** fixes this at
 - ✅ User management with agency/group labels
 - ✅ Recording management with retention periods
 - ✅ Public access toggle
+- ✅ **Stream keys** — Publish-only credentials locked to one stream path, with ready-to-paste OBS, DJI, SRT and RTSP settings; rotate or revoke per encoder without restarting MediaMTX
 - ✅ Theme/styling customization
 - ✅ Advanced YAML editor
 - ✅ Service control (start/stop/restart)

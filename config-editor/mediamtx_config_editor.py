@@ -1611,6 +1611,7 @@ HTML_TEMPLATE = '''
                     <div class="sidebar-group-items">
                         <button class="sidebar-item {% if tab == 'basic' %}active{% endif %}" onclick="showTab('basic', event)"><span class="sidebar-label">Basic Settings</span></button>
                         <button class="sidebar-item {% if tab == 'users' %}active{% endif %}" onclick="showTab('users', event)"><span class="sidebar-label">Users & Auth</span></button>
+                        <button class="sidebar-item {% if tab == 'streamkeys' %}active{% endif %}" onclick="showTab('streamkeys', event)"><span class="sidebar-label">Stream Keys</span></button>
                         <button class="sidebar-item {% if tab == 'protocols' %}active{% endif %}" onclick="showTab('protocols', event)"><span class="sidebar-label">Protocols</span></button>
                         <button class="sidebar-item {% if tab == 'hls' %}active{% endif %}" onclick="showTab('hls', event)"><span class="sidebar-label">HLS Tuning</span></button>
                         <button class="sidebar-item {% if tab == 'advanced' %}active{% endif %}" onclick="showTab('advanced', event)"><span class="sidebar-label">Advanced YAML</span></button>
@@ -1890,6 +1891,43 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
             
+            <!-- Stream Keys Tab -->
+            <div id="streamkeys" class="tab-content {% if tab == 'streamkeys' %}active{% endif %}">
+                <h2 class="section-title">Stream Keys</h2>
+                <p class="help-text">Publish-only credentials for encoders (OBS, DJI drones, hardware encoders). Each key can publish to one stream path and nothing else: it cannot watch, and it cannot publish anywhere else.</p>
+
+                <div id="stream-keys-public-warning" class="alert alert-danger" style="display: none; margin-top: 20px;"></div>
+                <div id="stream-keys-rtmp-warning" class="alert alert-warning" style="display: none; margin-top: 20px;"></div>
+
+                <div class="alert alert-info" style="margin-top: 20px;">
+                    <strong>💡 How it works:</strong><br>
+                    Viewers watch the stream path (e.g. <code>live/field-camera</code>) with their own read credentials. Only the encoder holds the key, so knowing the path is not enough to publish over a live feed.<br>
+                    Rotating a key issues a new password and disconnects the encoder using the old one; revoking a key disconnects it for good. Other streams are not interrupted.
+                </div>
+
+                <div style="margin-top: 20px; padding: 20px; background: #2d2d2d; border-radius: 8px;">
+                    <h3 style="margin-top: 0;">Create Stream Key</h3>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 15px;">
+                        <div class="form-group">
+                            <label>Label</label>
+                            <input type="text" id="sk-label" maxlength="60" placeholder="e.g., Field Camera" oninput="suggestStreamKeyPath()">
+                            <p class="help-text">Who or what uses this key</p>
+                        </div>
+                        <div class="form-group">
+                            <label>Stream Path</label>
+                            <input type="text" id="sk-path" placeholder="live/field-camera" oninput="this.dataset.touched = '1'">
+                            <p class="help-text">Where the encoder publishes. Format: <code>app/name</code>, e.g. <code>live/field-camera</code></p>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" onclick="createStreamKey()">+ Create Stream Key</button>
+                </div>
+
+                <h3 style="margin-top: 30px;">Stream Keys</h3>
+                <div id="stream-keys-list">
+                    <p style="color: #999;">Loading...</p>
+                </div>
+            </div>
+
             <!-- Protocols Tab -->
             <div id="protocols" class="tab-content {% if tab == 'protocols' %}active{% endif %}">
                 <h2 class="section-title">Protocol Settings</h2>
@@ -3727,6 +3765,10 @@ HTML_TEMPLATE = '''
                 loadMediaMTXUsers();
             }
             
+            if (tabName === 'streamkeys' && typeof loadStreamKeys === 'function') {
+                loadStreamKeys();
+            }
+
             // Load external sources when External Sources tab is opened
             if (tabName === 'sources' && typeof loadExternalSources === 'function') {
                 if (typeof loadNetbirdStatus === 'function') loadNetbirdStatus();
@@ -5593,6 +5635,155 @@ HTML_TEMPLATE = '''
                 .catch(err => alert('Error loading source: ' + err.message));
         }
         // === END EXTERNAL SOURCES ===
+
+        // === STREAM KEYS ===
+        const streamKeyLabels = {};
+
+        function suggestStreamKeyPath() {
+            const pathField = document.getElementById('sk-path');
+            if (pathField.dataset.touched) return;
+            const slug = document.getElementById('sk-label').value.toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+            pathField.value = slug ? 'live/' + slug : '';
+        }
+
+        // The key's user name and path only ever go through data- attributes and
+        // escapeHtml(); no credential is written into an inline handler.
+        function streamKeyRow(label, value) {
+            return '<div style="margin: 8px 0;">' +
+                '<div style="color: #999; font-size: 12px; margin-bottom: 3px;">' + escapeHtml(label) + '</div>' +
+                '<div style="display: flex; gap: 8px; align-items: center;">' +
+                '<code style="flex: 1; min-width: 0; overflow-wrap: anywhere; background: #1a1a1a; padding: 6px 8px; border-radius: 4px;">' + escapeHtml(value) + '</code>' +
+                '<button class="btn btn-secondary" style="padding: 4px 10px;" onclick="copyStreamKeyValue(this)">Copy</button>' +
+                '</div></div>';
+        }
+
+        function copyStreamKeyValue(button) {
+            copyToClipboard(button.parentNode.querySelector('code').textContent);
+        }
+
+        function loadStreamKeys() {
+            fetch('/api/stream-keys')
+                .then(r => r.json())
+                .then(data => {
+                    const publicWarning = document.getElementById('stream-keys-public-warning');
+                    if (data.public_can_publish) {
+                        publicWarning.innerHTML = '<strong>⚠️ Public access lets anyone publish.</strong> While it is on, these keys protect nothing: anyone can publish to any path without a key. Turn it off, or remove the publish permission, in <a href="#" onclick="showTab(&quot;users&quot;, event); return false;">Users &amp; Auth</a>.';
+                        publicWarning.style.display = 'block';
+                    } else {
+                        publicWarning.style.display = 'none';
+                    }
+
+                    const warning = document.getElementById('stream-keys-rtmp-warning');
+                    if (!data.rtmp_enabled) {
+                        warning.innerHTML = '<strong>⚠️ RTMP is disabled.</strong> Keys still work over SRT and RTSP, but OBS and DJI need RTMP. Enable it in <a href="#" onclick="showTab(&quot;protocols&quot;, event); return false;">Configuration → Protocols</a>.';
+                        warning.style.display = 'block';
+                    } else {
+                        warning.style.display = 'none';
+                    }
+
+                    const container = document.getElementById('stream-keys-list');
+                    if (!data.keys || data.keys.length === 0) {
+                        container.innerHTML = '<p style="color: #999;">No stream keys yet.</p>';
+                        return;
+                    }
+                    let html = '';
+                    data.keys.forEach(k => {
+                        const u = k.urls || {};
+                        streamKeyLabels[k.user] = k.label;
+                        html += '<div style="background: #2d2d2d; padding: 20px; border-radius: 8px; margin-bottom: 15px; border-left: 4px solid #4CAF50;">';
+                        html += '<div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex-wrap: wrap;">';
+                        html += '<div><h4 style="margin: 0;">' + escapeHtml(k.label) + '</h4>';
+                        html += '<p style="margin: 5px 0; color: #999;">Publishes to <code>' + escapeHtml(k.path) + '</code> · user <code>' + escapeHtml(k.user) + '</code></p></div>';
+                        html += '<div style="display: flex; gap: 10px;">';
+                        html += '<button class="btn btn-secondary" data-user="' + escapeHtml(k.user) + '" onclick="rotateStreamKey(this.dataset.user)">🔄 Rotate</button>';
+                        html += '<button class="btn btn-danger" data-user="' + escapeHtml(k.user) + '" onclick="revokeStreamKey(this.dataset.user)">🗑️ Revoke</button>';
+                        html += '</div></div>';
+
+                        html += '<details style="margin-top: 10px;"><summary style="cursor: pointer;">Show publish settings</summary>';
+                        if (u.obs_server) {
+                            html += '<h4 style="margin: 15px 0 5px 0;">OBS / encoders with separate Server + Key</h4>';
+                            html += streamKeyRow('Server', u.obs_server);
+                            html += streamKeyRow('Stream Key', u.obs_key);
+                        }
+                        if (u.obs_server_tls) {
+                            html += streamKeyRow('Server (RTMPS, encrypted)', u.obs_server_tls);
+                            if (!u.obs_server) html += streamKeyRow('Stream Key', u.obs_key);
+                        }
+                        if (u.rtmp || u.rtmps) {
+                            html += '<h4 style="margin: 15px 0 5px 0;">DJI / single-URL encoders</h4>';
+                            if (u.rtmp) html += streamKeyRow('RTMP URL', u.rtmp);
+                            if (u.rtmps) html += streamKeyRow('RTMPS URL (encrypted)', u.rtmps);
+                        }
+                        if (u.srt || u.rtsp || u.rtsps) {
+                            html += '<h4 style="margin: 15px 0 5px 0;">Other protocols</h4>';
+                            if (u.srt) html += streamKeyRow('SRT URL', u.srt);
+                            if (u.rtsp) html += streamKeyRow('RTSP URL', u.rtsp);
+                            if (u.rtsps) html += streamKeyRow('RTSPS URL (encrypted)', u.rtsps);
+                        }
+                        html += '</details></div>';
+                    });
+                    container.innerHTML = html;
+                })
+                .catch(err => {
+                    document.getElementById('stream-keys-list').innerHTML = '<p style="color: #f44336;">Could not load stream keys: ' + escapeHtml(String(err)) + '</p>';
+                });
+        }
+
+        function streamKeyAction(url, body, doneMessage) {
+            return fetch(url, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    loadStreamKeys();
+                    if (typeof reloadYAMLContent === 'function') reloadYAMLContent();
+                    alert(doneMessage + (data.restarted ? ' MediaMTX had to restart to apply it, so live streams reconnected.' : ''));
+                } else {
+                    alert('Error: ' + data.error);
+                }
+                return data;
+            })
+            .catch(err => alert('Error: ' + err));
+        }
+
+        function createStreamKey() {
+            const label = document.getElementById('sk-label').value.trim();
+            const path = document.getElementById('sk-path').value.trim().replace(/^[/]+|[/]+$/g, '');
+            if (!label) { alert('Enter a label'); return; }
+            if (!/^[A-Za-z0-9_.~-]+([/][A-Za-z0-9_.~-]+)+$/.test(path)) {
+                alert('Stream path must look like live/name (letters, numbers, - _ . ~ and at least one "/")');
+                return;
+            }
+            if (path.charAt(0) === '~') { alert('Stream path cannot start with ~ (MediaMTX reads that as a regular expression)'); return; }
+            if (path.split('/').some(seg => seg === '.' || seg === '..')) { alert('Stream path cannot contain "." or ".." segments'); return; }
+            streamKeyAction('/api/stream-keys/create', {label, path}, 'Stream key created.')
+                .then(data => {
+                    if (data && data.success) {
+                        document.getElementById('sk-label').value = '';
+                        const pathField = document.getElementById('sk-path');
+                        pathField.value = '';
+                        delete pathField.dataset.touched;
+                    }
+                });
+        }
+
+        function rotateStreamKey(user) {
+            if (!confirm('Issue a new password for this key? The encoder using the current key will be disconnected and refused when it reconnects.')) return;
+            streamKeyAction('/api/stream-keys/rotate', {user}, 'Key rotated. Update the encoder with the new settings.');
+        }
+
+        function revokeStreamKey(user) {
+            if (!confirm('Revoke stream key "' + (streamKeyLabels[user] || user) + '"? The encoder using it will be disconnected and can no longer publish.')) return;
+            streamKeyAction('/api/stream-keys/revoke', {user}, 'Stream key revoked.');
+        }
+
+        if (document.getElementById('streamkeys')?.classList.contains('active')) {
+            loadStreamKeys();
+        }
 
         function editMediaMTXUser(username, password, groupName, permissions, ips, listIndex) {
             // Show the add form
@@ -9562,6 +9753,378 @@ def api_email_test():
     else:
         return jsonify({'success': False, 'error': error})
 
+# === STREAM KEYS ===
+#
+# A stream key is a MediaMTX user that may publish to exactly one path and do
+# nothing else:
+#
+#     # Stream Key: Field Camera
+#     - user: sk_3f9a1c2e
+#       pass: "Xq7..."
+#       ips: []
+#       permissions:
+#       - action: publish
+#         path: live/field-camera
+#
+# The credentials ride in the RTMP query string, so OBS gets
+# Server `rtmp://host:1935/live` and Stream Key `field-camera?user=..&pass=..`.
+# Keeping the secret in the credentials rather than the path is the point: a
+# viewer has to know the path to watch, and a path-as-secret key would hand every
+# viewer the ability to publish over the live feed.
+#
+# Keys are recognised by the `sk_` user prefix AND that structure, so a
+# hand-written user such as `drone1` with one scoped publish grant stays on the
+# Users & Auth tab. The label is stored as the user's group name, so
+# add_group_comments_to_yaml_FIXED() keeps the comment above it through ruamel
+# saves made elsewhere in the editor.
+#
+# MediaMTX hot-reloads mediamtx.yml, so creating a key does not restart it (a
+# restart drops every live feed). Rotate and revoke only end the sessions that
+# are publishing on that key's path. If the reload cannot be confirmed through
+# the API, the change falls back to a restart rather than leaving the old
+# credentials in force.
+
+STREAM_KEY_USER_PREFIX = 'sk_'
+STREAM_KEY_LABEL_PREFIX = 'Stream Key: '
+STREAM_PATH_RE = re.compile(r'^[A-Za-z0-9_.~-]+(/[A-Za-z0-9_.~-]+)+$')
+# Control characters, plus every C1 control (U+0085 NEL among them) and U+2028 /
+# U+2029: YAML treats all of these as line breaks, so one in a label would end the
+# `# Stream Key:` comment and let the rest of the label be read as config.
+STREAM_LABEL_STRIP_RE = re.compile('[\x00-\x1f\x7f-\x9f  ]')
+
+
+def clean_stream_key_label(raw):
+    return STREAM_LABEL_STRIP_RE.sub('', str(raw or '')).strip()[:60]
+
+
+def stream_key_path_error(path):
+    """Why `path` cannot be a stream key's path, or None if it can."""
+    if not STREAM_PATH_RE.match(path):
+        return 'Stream path must look like live/name (letters, numbers, - _ . ~ and at least one "/")'
+    if path.startswith('~'):
+        return 'Stream path cannot start with ~ (MediaMTX reads that as a regular expression)'
+    if any(seg in ('.', '..') for seg in path.split('/')):
+        return 'Stream path cannot contain "." or ".." segments'
+    return None
+
+
+def is_stream_key_user(u):
+    perms = list(u.get('permissions') or [])
+    return (str(u.get('user') or '').startswith(STREAM_KEY_USER_PREFIX) and bool(u.get('pass'))
+            and len(perms) == 1 and perms[0].get('action') == 'publish'
+            and bool(str(perms[0].get('path') or '').strip('\'"')))
+
+
+def _stream_key_block(lines, username):
+    """(start, end) of the `- user: <username>` entry, including the `# Stream Key:`
+    label comment directly above it. Works for both layouts (see find_auth_users_section)."""
+    section = find_auth_users_section(lines)
+    if not section:
+        return None
+    key, end, _ = section
+    for i in range(key + 1, end):
+        stripped = lines[i].strip()
+        if not stripped.startswith('- user:'):
+            continue
+        if stripped.split(':', 1)[1].strip().strip('\'"') != username:
+            continue
+        indent = len(lines[i]) - len(lines[i].lstrip())
+        j = i + 1
+        while j < end:
+            nxt = lines[j].rstrip('\n')
+            if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= indent:
+                break
+            j += 1
+        start = i
+        if i > 0 and lines[i - 1].lstrip().startswith('# ' + STREAM_KEY_LABEL_PREFIX):
+            start = i - 1
+        return start, j
+    return None
+
+
+def _write_config_lines(lines):
+    """Validate, back up, then write mediamtx.yml. Returns an error string or None."""
+    text = ''.join(lines)
+    try:
+        parsed = YAML(typ='safe').load(text)
+        if not isinstance(parsed, dict) or 'authInternalUsers' not in parsed:
+            raise ValueError('authInternalUsers missing')
+    except Exception as e:
+        return f'The result would not be valid config ({e}); mediamtx.yml was left unchanged'
+    backup_file = os.path.join(BACKUP_DIR, f'mediamtx.yml.{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+    subprocess.run(['cp', CONFIG_FILE, backup_file], check=True)
+    with open(CONFIG_FILE, 'w') as f:
+        f.write(text)
+    return None
+
+
+def _mtx_api_get(path):
+    import requests
+    r = requests.get('http://localhost:9997' + path, auth=('any', ''), timeout=3)
+    return r.json() if r.status_code == 200 else None
+
+
+def _mtx_users_applied(check, wait=6.0):
+    """True once MediaMTX's running config satisfies check(authInternalUsers), polling
+    while it hot-reloads. False if it never does or the API cannot be read. (The API
+    shows passwords as <redacted>, so a check can tell users apart, not passwords.)"""
+    deadline = time.time() + wait
+    while True:
+        try:
+            conf = _mtx_api_get('/v3/config/global/get') or {}
+            users = conf.get('authInternalUsers')
+            if users is not None and check(users):
+                return True
+        except Exception:
+            pass
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.5)
+
+
+PUBLISHER_LISTS = ('rtmpconns', 'rtmpsconns', 'rtspsessions', 'rtspssessions', 'srtconns', 'webrtcsessions')
+
+
+def kick_publishers(path):
+    """End the sessions publishing to `path`, and nothing else. Only the encoder
+    using the key can be publishing there, and MediaMTX does not drop a session when
+    its credentials change, so a rotated or revoked key keeps streaming until kicked.
+    Returns how many sessions were ended."""
+    import requests
+    kicked = 0
+    for kind in PUBLISHER_LISTS:
+        try:
+            items = (_mtx_api_get(f'/v3/{kind}/list') or {}).get('items') or []
+        except Exception:
+            continue
+        for item in items:
+            if item.get('path') != path or item.get('state') != 'publish' or not item.get('id'):
+                continue
+            try:
+                r = requests.post(f'http://localhost:9997/v3/{kind}/kick/{item["id"]}', auth=('any', ''), timeout=3)
+                if r.status_code == 200:
+                    kicked += 1
+            except Exception as e:
+                print(f"Warning: could not end {kind} session on {path}: {e}", flush=True)
+    return kicked
+
+
+def _apply_key_change(check, path=None, settle=0):
+    """After mediamtx.yml changed: wait for the hot reload, restarting MediaMTX only
+    if it cannot be confirmed; then end that key's publishers if `path` is given.
+    `settle` is a pause (seconds) to let a change the API cannot show, such as a new
+    password, take effect before the sessions are ended. Returns True if MediaMTX
+    had to be restarted."""
+    restarted = False
+    ok = _mtx_users_applied(check)
+    if ok and settle:
+        time.sleep(settle)
+    if not ok:
+        print("Stream keys: hot reload not confirmed, restarting MediaMTX", flush=True)
+        try:
+            mtx_restart_checked()
+            time.sleep(3)
+            restarted = True
+        except Exception as e:
+            print(f"WARNING: MediaMTX restart after stream key change failed: {e}", flush=True)
+    elif path:
+        kick_publishers(path)
+    return restarted
+
+
+def public_access_can_publish():
+    """True when the public (no-login) `any` user may publish: then a stream key
+    protects nothing, because anyone can publish to the same path without it."""
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            lines = f.read().split('\n')
+        block = find_public_any_block(lines)
+        if not block:
+            return False
+        return any(re.match(r'\s*(-\s+)?action:\s*publish\b', ln) for ln in lines[block[0]:block[1]])
+    except Exception:
+        return False
+
+
+def _stream_key_host():
+    domain = get_streaming_domain().get('domain')
+    return domain or request.host.split(':')[0]
+
+
+def _stream_key_port(field, default):
+    """Port number of a listener field such as `rtmpAddress: :1935`."""
+    value = str(read_yaml_field(field, '') or '')
+    port = value.rsplit(':', 1)[-1].strip()
+    return port if port.isdigit() else default
+
+
+def stream_key_urls(path, user, password, host):
+    """Publish settings for one key, only for protocols that are switched on."""
+    app_name, _, stream_name = path.rpartition('/')
+    creds = f'user={user}&pass={password}'
+    urls = {}
+    if read_yaml_flag('rtmp'):
+        enc = read_yaml_field('rtmpEncryption', 'no')
+        if enc != 'strict':
+            port = _stream_key_port('rtmpAddress', '1935')
+            urls['rtmp'] = f'rtmp://{host}:{port}/{path}?{creds}'
+            urls['obs_server'] = f'rtmp://{host}:{port}/{app_name}'
+        if enc in ('optional', 'strict'):
+            port = _stream_key_port('rtmpsAddress', '1936')
+            urls['rtmps'] = f'rtmps://{host}:{port}/{path}?{creds}'
+            urls['obs_server_tls'] = f'rtmps://{host}:{port}/{app_name}'
+        urls['obs_key'] = f'{stream_name}?{creds}'
+    if read_yaml_flag('srt'):
+        srt = f'srt://{host}:{_stream_key_port("srtAddress", "8890")}?streamid=publish:{path}:{user}:{password}'
+        passphrase = ''
+        try:
+            passphrase = str((load_config() or {}).get('pathDefaults', {}).get('srtPublishPassphrase') or '')
+        except Exception:
+            pass
+        if passphrase:
+            srt += '&passphrase=' + quote(passphrase, safe='')
+        urls['srt'] = srt
+    if read_yaml_flag('rtsp'):
+        enc = read_yaml_field('rtspEncryption', 'no')
+        if enc != 'strict':
+            urls['rtsp'] = f'rtsp://{user}:{password}@{host}:{_stream_key_port("rtspAddress", "8554")}/{path}'
+        if enc in ('optional', 'strict'):
+            urls['rtsps'] = f'rtsps://{user}:{password}@{host}:{_stream_key_port("rtspsAddress", "8322")}/{path}'
+    return urls
+
+
+def _new_stream_key_password():
+    alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+    return ''.join(secrets.choice(alphabet) for _ in range(24))
+
+
+@app.route('/api/stream-keys')
+@admin_required
+def api_list_stream_keys():
+    group_metadata = load_group_metadata()
+    host = _stream_key_host()
+    keys = []
+    for u in read_yaml_users():
+        if not is_stream_key_user(u):
+            continue
+        label = group_metadata.get(u['user'], '')
+        if label.startswith(STREAM_KEY_LABEL_PREFIX):
+            label = label[len(STREAM_KEY_LABEL_PREFIX):]
+        path = str(u['permissions'][0]['path']).strip('\'"')
+        keys.append({
+            'user': u['user'],
+            'label': label or u['user'],
+            'path': path,
+            'urls': stream_key_urls(path, u['user'], u['pass'], host),
+        })
+    return jsonify({
+        'keys': keys,
+        'rtmp_enabled': read_yaml_flag('rtmp'),
+        'rtmp_encryption': read_yaml_field('rtmpEncryption', 'no'),
+        'public_can_publish': public_access_can_publish(),
+    })
+
+
+@app.route('/api/stream-keys/create', methods=['POST'])
+@admin_required
+def api_create_stream_key():
+    data = request.get_json(silent=True) or {}
+    label = clean_stream_key_label(data.get('label'))
+    path = str(data.get('path', '')).strip().strip('/')
+    if not label:
+        return jsonify({'success': False, 'error': 'A label is required'}), 400
+    path_error = stream_key_path_error(path)
+    if path_error:
+        return jsonify({'success': False, 'error': path_error}), 400
+
+    existing = {u['user'] for u in read_yaml_users()}
+    user = STREAM_KEY_USER_PREFIX + secrets.token_hex(4)
+    while user in existing:
+        user = STREAM_KEY_USER_PREFIX + secrets.token_hex(4)
+    password = _new_stream_key_password()
+
+    with open(CONFIG_FILE, 'r') as f:
+        lines = f.readlines()
+    new_lines = with_auth_user_entry(
+        lines,
+        [f'- user: {user}', f'  pass: "{password}"', '  ips: []', '  permissions:',
+         '  - action: publish', f'    path: {path}'],
+        STREAM_KEY_LABEL_PREFIX + label)
+    if new_lines is None:
+        return jsonify({'success': False, 'error': 'Could not find the authInternalUsers list in mediamtx.yml'}), 500
+    err = _write_config_lines(new_lines)
+    if err:
+        return jsonify({'success': False, 'error': err}), 500
+
+    group_metadata = load_group_metadata()
+    group_metadata[user] = STREAM_KEY_LABEL_PREFIX + label
+    save_group_metadata(group_metadata)
+
+    restarted = _apply_key_change(lambda users: any(u.get('user') == user for u in users))
+    return jsonify({'success': True, 'user': user, 'restarted': restarted})
+
+
+def _find_stream_key(user):
+    for u in read_yaml_users():
+        if u['user'] == user and is_stream_key_user(u):
+            return u
+    return None
+
+
+@app.route('/api/stream-keys/rotate', methods=['POST'])
+@admin_required
+def api_rotate_stream_key():
+    """New password, same user and path. The encoder using the old key is
+    disconnected and refused when it reconnects."""
+    user = str((request.get_json(silent=True) or {}).get('user', ''))
+    key = _find_stream_key(user)
+    if not key:
+        return jsonify({'success': False, 'error': 'Stream key not found'}), 404
+    with open(CONFIG_FILE, 'r') as f:
+        lines = f.readlines()
+    block = _stream_key_block(lines, user)
+    if not block:
+        return jsonify({'success': False, 'error': 'Stream key not found'}), 404
+    password = _new_stream_key_password()
+    for i in range(block[0], block[1]):
+        if lines[i].strip().startswith('pass:'):
+            lines[i] = lines[i][:len(lines[i]) - len(lines[i].lstrip())] + f'pass: "{password}"\n'
+            break
+    else:
+        return jsonify({'success': False, 'error': 'Stream key has no password line'}), 500
+    err = _write_config_lines(lines)
+    if err:
+        return jsonify({'success': False, 'error': err}), 500
+    path = str(key['permissions'][0]['path']).strip('\'"')
+    restarted = _apply_key_change(lambda users: any(u.get('user') == user for u in users), path, settle=1.5)
+    return jsonify({'success': True, 'restarted': restarted})
+
+
+@app.route('/api/stream-keys/revoke', methods=['POST'])
+@admin_required
+def api_revoke_stream_key():
+    user = str((request.get_json(silent=True) or {}).get('user', ''))
+    key = _find_stream_key(user)
+    if not key:
+        return jsonify({'success': False, 'error': 'Stream key not found'}), 404
+    with open(CONFIG_FILE, 'r') as f:
+        lines = f.readlines()
+    block = _stream_key_block(lines, user)
+    if not block:
+        return jsonify({'success': False, 'error': 'Stream key not found'}), 404
+    err = _write_config_lines(lines[:block[0]] + lines[block[1]:])
+    if err:
+        return jsonify({'success': False, 'error': err}), 500
+    group_metadata = load_group_metadata()
+    if group_metadata.pop(user, None) is not None:
+        save_group_metadata(group_metadata)
+    path = str(key['permissions'][0]['path']).strip('\'"')
+    restarted = _apply_key_change(lambda users: all(u.get('user') != user for u in users), path)
+    return jsonify({'success': True, 'restarted': restarted})
+
+# === END STREAM KEYS ===
+
+
 @app.route('/api/mediamtx/users')
 @login_required
 def api_get_mediamtx_users():
@@ -9587,6 +10150,10 @@ def api_get_mediamtx_users():
         if username == 'any' and '127.0.0.1' in ips:
             continue
         
+        # Stream keys are managed on their own tab
+        if is_stream_key_user(user):
+            continue
+
         # Skip hidden teststream viewer (has path: teststream)
         if username == 'any' and ips == [] and user.get('pass', '') == '':
             has_teststream_path = any(p.get('path') == 'teststream' for p in perms)
@@ -11217,32 +11784,42 @@ def find_auth_users_section(lines):
     return (key, end, 2 if item_indent is None else item_indent)
 
 
-def insert_auth_user_entry(entry, comment=None):
-    """Append one user to authInternalUsers in the file's own layout.
+def with_auth_user_entry(lines, entry, comment=None):
+    """`lines` with one user appended to authInternalUsers in the file's own layout,
+    or None if there is no block authInternalUsers list to add to.
 
     `entry` is the user written for column 0 (`- user: x`, `  pass: ...`); it is
-    shifted to the existing entries' indent. Returns False if there is no block
-    authInternalUsers list to add to.
+    shifted to the existing entries' indent.
     """
-    with open(CONFIG_FILE, 'r') as f:
-        lines = f.readlines()
+    lines = list(lines)
     section = find_auth_users_section(lines)
     if not section:
-        return False
+        return None
     key, end, indent = section
     value = lines[key].split(':', 1)[1].split('#', 1)[0].strip()
     if value == '[]':
         lines[key] = 'authInternalUsers:\n'
     elif value:
-        return False
+        return None
     pad = ' ' * indent
     block = [f"{pad}# {comment}\n"] if comment else []
     block += [f"{pad}{ln}\n" for ln in entry]
     if end > 0 and not lines[end - 1].endswith('\n'):
         lines[end - 1] += '\n'
     lines[end:end] = block
+    return lines
+
+
+def insert_auth_user_entry(entry, comment=None):
+    """Append one user to authInternalUsers in mediamtx.yml. Returns False if there
+    is no block authInternalUsers list to add to."""
+    with open(CONFIG_FILE, 'r') as f:
+        lines = f.readlines()
+    new_lines = with_auth_user_entry(lines, entry, comment)
+    if new_lines is None:
+        return False
     with open(CONFIG_FILE, 'w') as f:
-        f.writelines(lines)
+        f.writelines(new_lines)
     return True
 
 
