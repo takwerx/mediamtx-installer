@@ -1,0 +1,116 @@
+name: Bug report
+description: "Something in the MediaMTX Installer or its web console is broken"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The version and platform fields below are required because they
+        decide whether this is an already-fixed bug or a live one; without them the first reply
+        is always "which version?".
+
+        **This repository is public.** Before you paste a log or attach a screenshot, remove
+        passwords, tokens, keys, callsigns, coordinates, hostnames and IP addresses you do not want published.
+  - type: input
+    id: version
+    attributes:
+      label: "MediaMTX Installer version"
+      description: "Shown in the web console. If you can't find it, say so and give the date you installed or last updated."
+      placeholder: "e.g. v2.1.12"
+    validations:
+      required: true
+  - type: dropdown
+    id: channel
+    attributes:
+      label: "Update channel"
+      options:
+        - "Main (releases)"
+        - "Dev"
+        - "Not sure"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: "OS and version"
+      placeholder: "e.g. Ubuntu 22.04, Rocky Linux 9"
+    validations:
+      required: true
+  - type: dropdown
+    id: arch
+    attributes:
+      label: "Architecture"
+      options:
+        - "x86_64"
+        - "ARM64 / aarch64"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: "How it is installed"
+      options:
+        - "Standalone MediaMTX Installer"
+        - "Deployed by infra-TAK"
+        - "Docker"
+        - "Other (say which below)"
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: "Where it runs"
+      options:
+        - "Cloud (AWS, Azure, Oracle, other)"
+        - "On-prem or home lab"
+        - "Not sure"
+    validations:
+      required: true
+  - type: input
+    id: mediamtx
+    attributes:
+      label: "MediaMTX version"
+      description: "Optional. Shown in the console, or `mediamtx --version`."
+    validations:
+      required: false
+  - type: checkboxes
+    id: area
+    attributes:
+      label: "What is involved?"
+      options:
+        - label: "Web console (pages stuck on \"Loading...\", buttons, tabs)"
+        - label: "RTSP"
+        - label: "RTMP"
+        - label: "HLS"
+        - label: "SRT"
+        - label: "KLV / GStreamer"
+        - label: "LDAP login"
+        - label: "Recording"
+        - label: "Update / self-update"
+  - type: textarea
+    id: what
+    attributes:
+      label: "What happened"
+      description: |
+        What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: "Steps to reproduce"
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Logs"
+      description: |
+        Console output, `journalctl -u mediamtx` or the console's service, and for the web console any red errors from the browser's developer console. Paste as text rather than a screenshot where you can.
+      render: shell
+    validations:
+      required: false
