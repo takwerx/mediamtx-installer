@@ -1,0 +1,48 @@
+name: PR checks
+
+# Automatic checks on every PR (ops #329, same shape as infra-TAK's PR checks). No Claude involved.
+# A red check blocks the merge once `checks-ok` is made a required check. Run the same things locally:
+#   bash .github/ci/static_checks.sh      (needs shellcheck and PyYAML)
+on:
+  pull_request:
+    branches: [dev, main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# GitHub-hosted runners only (public repo; fork PRs must never reach the self-hosted Studio runners).
+# Pinned to ubuntu-24.04, not ubuntu-latest, so the checks mean the same thing every run.
+jobs:
+  # bash -n, shellcheck (errors fail, warnings are listed), JSON/YAML parse, Python compile.
+  static:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.9'
+      # shellcheck pinned so "error" means the same thing every run (the runner image's own moves).
+      - run: pip install shellcheck-py==0.11.0.1 pyyaml && shellcheck --version
+      - run: bash .github/ci/static_checks.sh
+
+  # One stable name to require in branch protection. A failed or cancelled job fails it.
+  checks-ok:
+    if: always()
+    needs: [static]
+    runs-on: ubuntu-24.04
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          case " $RESULTS " in
+            *" failure "*|*" cancelled "*) echo "::error::a required check failed"; exit 1 ;;
+          esac
