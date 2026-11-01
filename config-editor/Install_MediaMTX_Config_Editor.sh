@@ -22,7 +22,9 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # Check if MediaMTX is installed
-if ! command -v mediamtx &> /dev/null || [ ! -f /usr/local/etc/mediamtx.yml ]; then
+# Look for the binary by path too: on Rocky/RHEL, sudo's secure_path leaves out
+# /usr/local/bin, so `command -v` alone misses where the installers put it.
+if { ! command -v mediamtx &> /dev/null && [ ! -x /usr/local/bin/mediamtx ]; } || [ ! -f /usr/local/etc/mediamtx.yml ]; then
     echo "ERROR: MediaMTX is not installed!"
     echo "Please run the MediaMTX installer first:"
     echo "  sudo ./ubuntu-22.04/Ubuntu_22.04_MediaMTX_install.sh   (Ubuntu)"
