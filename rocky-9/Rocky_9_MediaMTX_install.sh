@@ -149,6 +149,14 @@ echo "=========================================="
 mv mediamtx /usr/local/bin/
 chmod +x /usr/local/bin/mediamtx
 
+# SELinux: the file was extracted in a temp folder, and mv keeps that folder's
+# label (user_tmp_t). systemd (init_t) is not allowed to execute that label, so
+# the service would fail with status 203/EXEC "Permission denied". Relabel it to
+# the default for /usr/local/bin. No-op where SELinux is off or missing.
+if command -v restorecon > /dev/null 2>&1; then
+    restorecon -v /usr/local/bin/mediamtx || true
+fi
+
 # Create config directory
 mkdir -p /usr/local/etc
 
@@ -180,6 +188,11 @@ if grep -qE '^[[:space:]]*moq:' /usr/local/etc/mediamtx.yml; then
     sed -i -E 's/^([[:space:]]*)moq:[[:space:]]*(yes|true)[[:space:]]*$/\1moq: no/' /usr/local/etc/mediamtx.yml
 else
     printf '\n# Disabled by the infra-TAK MediaMTX installer - see notes in the Ubuntu script.\nmoq: no\n' >> /usr/local/etc/mediamtx.yml
+fi
+
+# Same SELinux relabel for the config (it was also moved out of the temp folder).
+if command -v restorecon > /dev/null 2>&1; then
+    restorecon -v /usr/local/etc/mediamtx.yml || true
 fi
 
 echo "MediaMTX installed to /usr/local/bin/"

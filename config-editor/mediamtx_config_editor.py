@@ -34,7 +34,7 @@ def add_no_cache_headers(response):
     return response
 
 # Version - used by auto-update checker
-CURRENT_VERSION = "v2.1.13"
+CURRENT_VERSION = "v2.1.14"
 GITHUB_REPO = "takwerx/mediamtx-installer"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/config-editor/mediamtx_config_editor.py"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -9883,7 +9883,17 @@ def _mtx_users_applied(check, wait=6.0):
         time.sleep(0.5)
 
 
-PUBLISHER_LISTS = ('rtmpconns', 'rtmpsconns', 'rtspsessions', 'rtspssessions', 'srtconns', 'webrtcsessions')
+# (v1.21.0 and newer name, older name). MediaMTX renamed these API paths in v1.21.0 and
+# still answers the old ones as aliases, but upstream may drop them, so try the new
+# name first and fall back to the old one when it 404s (older MediaMTX).
+PUBLISHER_LISTS = (
+    ('rtmp/conns', 'rtmpconns'),
+    ('rtmps/conns', 'rtmpsconns'),
+    ('rtsp/sessions', 'rtspsessions'),
+    ('rtsps/sessions', 'rtspssessions'),
+    ('srt/conns', 'srtconns'),
+    ('webrtc/sessions', 'webrtcsessions'),
+)
 
 
 def kick_publishers(path):
@@ -9893,20 +9903,24 @@ def kick_publishers(path):
     Returns how many sessions were ended."""
     import requests
     kicked = 0
-    for kind in PUBLISHER_LISTS:
-        try:
-            items = (_mtx_api_get(f'/v3/{kind}/list') or {}).get('items') or []
-        except Exception:
-            continue
-        for item in items:
-            if item.get('path') != path or item.get('state') != 'publish' or not item.get('id'):
-                continue
+    for kinds in PUBLISHER_LISTS:
+        for kind in kinds:
             try:
-                r = requests.post(f'http://localhost:9997/v3/{kind}/kick/{item["id"]}', auth=('any', ''), timeout=3)
-                if r.status_code == 200:
-                    kicked += 1
-            except Exception as e:
-                print(f"Warning: could not end {kind} session on {path}: {e}", flush=True)
+                data = _mtx_api_get(f'/v3/{kind}/list')
+            except Exception:
+                continue
+            if data is None:
+                continue  # this name is not known to this MediaMTX, try the other
+            for item in data.get('items') or []:
+                if item.get('path') != path or item.get('state') != 'publish' or not item.get('id'):
+                    continue
+                try:
+                    r = requests.post(f'http://localhost:9997/v3/{kind}/kick/{item["id"]}', auth=('any', ''), timeout=3)
+                    if r.status_code == 200:
+                        kicked += 1
+                except Exception as e:
+                    print(f"Warning: could not end {kind} session on {path}: {e}", flush=True)
+            break  # listed fine under this name; do not list the same sessions again under the alias
     return kicked
 
 

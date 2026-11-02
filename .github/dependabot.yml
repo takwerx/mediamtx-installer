@@ -1,0 +1,20 @@
+# Dependabot version updates (ops #241). Weekly, grouped into one PR per ecosystem,
+# at most 3 open PRs. Major versions are ignored here on purpose: a major bump
+# gets its own ops issue and a test instead of an automatic PR. Security
+# updates are a separate repo setting and are not limited by this file.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      timezone: "America/Los_Angeles"
+    open-pull-requests-limit: 3
+    target-branch: dev
+    groups:
+      actions:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
