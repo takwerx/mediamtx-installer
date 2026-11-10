@@ -6,6 +6,7 @@ https://github.com/takwerx/mediamtx-installer
 """
 
 from flask import Flask, render_template_string, request, jsonify, redirect, url_for, session, send_file, Response
+from werkzeug.utils import secure_filename
 from functools import wraps
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
@@ -10943,15 +10944,18 @@ if not os.path.exists(TEST_VIDEO_DIR):
 @app.route('/api/test/upload', methods=['POST'])
 @login_required
 def upload_test_video():
-    """Upload test video"""
+    """Upload test video (admin only)"""
+    if session.get('role') != 'admin':
+        return jsonify({'success': False, 'error': 'Admin privileges required'}), 403
     if 'test_file' not in request.files:
         return jsonify({'success': False, 'error': 'No file'}), 400
     file = request.files['test_file']
     if file.filename == '':
         return jsonify({'success': False, 'error': 'No file selected'}), 400
-    if not file.filename.endswith('.ts'):
+    # Never use the client's raw name: it can carry path parts like ../
+    filename = secure_filename(file.filename)
+    if not filename.endswith('.ts') or filename == '.ts':
         return jsonify({'success': False, 'error': 'Only .ts files'}), 400
-    filename = file.filename
     filepath = os.path.join(TEST_VIDEO_DIR, filename)
     try:
         file.save(filepath)
