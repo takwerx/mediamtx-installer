@@ -7,6 +7,7 @@ https://github.com/takwerx/mediamtx-installer
 
 from flask import Flask, render_template_string, request, jsonify, redirect, url_for, session, send_file, Response
 from functools import wraps
+from werkzeug.security import generate_password_hash, check_password_hash
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 import os
@@ -14,6 +15,7 @@ import subprocess
 import time
 from datetime import datetime, timedelta
 import secrets
+import hmac
 import json
 import re
 import socket
@@ -510,29 +512,50 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+USERS_FILE = '/opt/mediamtx-webeditor/users.json'
+
+# Console passwords are stored as werkzeug hashes ("scrypt:..$salt$hash" or
+# "pbkdf2:..$salt$hash"). Entries written by older versions are plain text and
+# are converted at the next successful login (users) or on approval (pending).
+_PASSWORD_HASH_RE = re.compile(r'^(scrypt|pbkdf2):[^$]+\$[^$]+\$[0-9a-f]+$')
+
+def hash_password(password):
+    """Hash a console password for storage"""
+    return generate_password_hash(password)
+
+def is_password_hashed(stored):
+    """True if the stored value is a werkzeug hash rather than plain text"""
+    return isinstance(stored, str) and _PASSWORD_HASH_RE.match(stored) is not None
+
+def verify_password(stored, password):
+    """Check a password against a stored value (hash, or legacy plain text)"""
+    if not isinstance(stored, str) or not isinstance(password, str):
+        return False
+    if is_password_hashed(stored):
+        return check_password_hash(stored, password)
+    return hmac.compare_digest(stored.encode('utf-8'), password.encode('utf-8'))
+
 def load_users():
     """Load all users from JSON file"""
-    users_file = '/opt/mediamtx-webeditor/users.json'
-    if os.path.exists(users_file):
+    if os.path.exists(USERS_FILE):
         try:
-            with open(users_file, 'r') as f:
+            with open(USERS_FILE, 'r') as f:
                 return json.load(f)
         except:
             pass
     # Default admin user
     default_users = [
-        {'username': 'admin', 'password': 'admin', 'role': 'admin'}
+        {'username': 'admin', 'password': hash_password('admin'), 'role': 'admin'}
     ]
     save_users(default_users)
     return default_users
 
 def save_users(users):
     """Save users to JSON file"""
-    users_file = '/opt/mediamtx-webeditor/users.json'
-    os.makedirs(os.path.dirname(users_file), exist_ok=True)
-    with open(users_file, 'w') as f:
+    os.makedirs(os.path.dirname(USERS_FILE), exist_ok=True)
+    with open(USERS_FILE, 'w') as f:
         json.dump(users, f, indent=2)
-    os.chmod(users_file, 0o600)
+    os.chmod(USERS_FILE, 0o600)
 
 PENDING_REG_FILE = '/opt/mediamtx-webeditor/pending_registrations.json'
 
@@ -646,9 +669,17 @@ def authenticate_user(username, password):
     """Authenticate user and return role"""
     users = load_users()
     for user in users:
-        if user['username'] == username and user['password'] == password:
+        if user['username'] == username and verify_password(user['password'], password):
+            if not is_password_hashed(user['password']):
+                # Legacy plain-text entry: convert it now that the password is known
+                user['password'] = hash_password(password)
+                save_users(users)
             return user['role']
     return None
+
+def is_default_admin_password(user):
+    """True if this user is the built-in admin still using the default password"""
+    return user.get('username') == 'admin' and verify_password(user.get('password'), 'admin')
 
 # Login Page Template
 LOGIN_TEMPLATE = '''
@@ -8908,7 +8939,7 @@ def login():
     
     # Check if this is first time (default credentials still in use)
     users = load_users()
-    first_time = any(u['username'] == 'admin' and u['password'] == 'admin' for u in users)
+    first_time = any(is_default_admin_password(u) for u in users)
     
     return render_template_string(LOGIN_TEMPLATE, first_time=first_time, error=None, theme=theme, logo_exists=logo_exists, registration_enabled=reg_enabled, message=message)
 
@@ -8977,7 +9008,7 @@ def register():
             'email': email,
             'agency': agency,
             'username': username,
-            'password': password,
+            'password': hash_password(password),
             'requested_at': datetime.datetime.now().isoformat()
         }
         if reason:
@@ -9153,7 +9184,7 @@ def reset_password():
             users = load_users()
             for u in users:
                 if u['username'] == username:
-                    u['password'] = new_password
+                    u['password'] = hash_password(new_password)
                     break
             save_users(users)
             
@@ -9238,7 +9269,7 @@ def change_password():
         return redirect(f'/?message=User not found&message_type=danger&tab={tab}')
     
     # Verify current password
-    if current_password != current_user['password']:
+    if not verify_password(current_user['password'], current_password):
         return redirect(f'/?message=Current password is incorrect&message_type=danger&tab={tab}')
     
     # Verify new passwords match
@@ -9250,7 +9281,7 @@ def change_password():
         return redirect(f'/?message=New password must be at least 4 characters&message_type=danger&tab={tab}')
     
     # Update password
-    current_user['password'] = new_password
+    current_user['password'] = hash_password(new_password)
     save_users(users)
     
     return redirect(f'/?message=Password changed successfully&message_type=success&tab={tab}')
@@ -9517,7 +9548,7 @@ def api_add_webeditor_user():
     if any(u['username'] == username for u in users):
         return jsonify({'success': False, 'error': 'Username already exists'}), 400
     
-    users.append({'username': username, 'email': email, 'password': password, 'role': role})
+    users.append({'username': username, 'email': email, 'password': hash_password(password), 'role': role})
     save_users(users)
     
     return jsonify({'success': True})
@@ -9637,7 +9668,8 @@ def api_approve_registration():
     
     users.append({
         'username': reg['username'],
-        'password': reg['password'],
+        # Registrations saved by older versions hold plain text: hash them here
+        'password': reg['password'] if is_password_hashed(reg['password']) else hash_password(reg['password']),
         'role': role,
         'full_name': reg.get('full_name', ''),
         'email': reg.get('email', ''),
