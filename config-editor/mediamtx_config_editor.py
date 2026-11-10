@@ -552,26 +552,64 @@ def password_problem(password):
         return 'That password is not allowed. Pick a different one.'
     return None
 
-def _write_initial_password_file(entries):
-    """Save the generated passwords (list of (username, password)) for the server admin. 0600, no race."""
+def _write_initial_password_file(entries, heading='first login'):
+    """Save the generated passwords (list of (username, password)) for the server admin. 0600, no race.
+    Returns True when the file was written."""
     try:
         os.makedirs(os.path.dirname(INITIAL_PASSWORD_FILE), exist_ok=True)
         fd = os.open(INITIAL_PASSWORD_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, 'w') as f:
-            f.write('# MediaMTX web editor: first login. Sign in, then change this password (Account tab).\n')
+            f.write(f'# MediaMTX web editor: {heading}. Sign in, then change this password (Account tab).\n')
             f.write('# This file is deleted when the password is changed.\n')
             for name, pw in entries:
                 f.write(f'{name}: {pw}\n')
         os.chmod(INITIAL_PASSWORD_FILE, 0o600)
         print(f"INFO: a new web editor password was generated; it is in {INITIAL_PASSWORD_FILE} (root only)", flush=True)
+        return True
     except OSError as e:
         print(f"WARNING: could not write {INITIAL_PASSWORD_FILE}: {e}", flush=True)
+        return False
 
 def clear_initial_password_file():
     try:
         os.remove(INITIAL_PASSWORD_FILE)
     except OSError:
         pass
+
+def build_understands_hashed_passwords(path):
+    """True if the console file at path can check hashed passwords (v2.1.15 and later)."""
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            return 'def is_password_hashed(' in f.read()
+    except OSError:
+        return False
+
+def reset_hashed_passwords_for_old_build():
+    """Give every account with a hashed password a new random one, stored as plain text.
+
+    A console from before password hashing (v2.1.14 and earlier) compares what was typed with the
+    stored text, so after a rollback every hashed account would be locked out. Hashes cannot be
+    turned back into passwords, so each such account gets a new random password. The new
+    passwords go to INITIAL_PASSWORD_FILE (root only) first; users.json changes only after that
+    file is safely written. The next update converts them back to hashes at each login.
+    Returns the usernames that were reset, or None when the password file could not be written."""
+    try:
+        with open(USERS_FILE, 'r') as f:
+            users = json.load(f)
+    except (OSError, ValueError):
+        return []
+    entries = []
+    for user in users:
+        if isinstance(user, dict) and is_password_hashed(user.get('password')):
+            new_password = secrets.token_urlsafe(12)
+            user['password'] = new_password
+            entries.append((user.get('username', ''), new_password))
+    if not entries:
+        return []
+    if not _write_initial_password_file(entries, heading='new passwords after a rollback to an older version'):
+        return None
+    save_users(users)
+    return [name for name, _pw in entries]
 
 def load_users():
     """Load all users from JSON file.
@@ -8009,7 +8047,7 @@ HTML_TEMPLATE = '''
             .then(res => res.json())
             .then(data => {
                 if (data.success) {
-                    alert("✅ Web Editor rolled back to " + (data.restored_version || "previous version") + ". Page will reload.");
+                    alert("✅ Web Editor rolled back to " + (data.restored_version || "previous version") + ". Page will reload." + (data.notice ? " " + data.notice : ""));
                     setTimeout(function() {
                         window.location.href = '/?tab=versions&message=Rolled back to ' + (data.restored_version || 'previous version') + '&message_type=success';
                     }, 3000);
@@ -13448,6 +13486,15 @@ def rollback_webeditor():
         if not os.path.exists(backup_path):
             return jsonify({'success': False, 'error': 'Backup file not found'}), 404
         
+        # A build from before password hashing cannot read hashed passwords: without this every
+        # login would fail after the restart (ops #646). Done first, so a failure leaves the
+        # current version running with logins that still work.
+        passwords_reset = []
+        if not build_understands_hashed_passwords(backup_path):
+            passwords_reset = reset_hashed_passwords_for_old_build()
+            if passwords_reset is None:
+                return jsonify({'success': False, 'error': 'Rollback stopped: could not save new passwords to ' + INITIAL_PASSWORD_FILE + '. Nothing was changed.'}), 500
+
         # Backup current version before rollback
         current_backup = webeditor_file + f'.backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
         shutil.copy2(webeditor_file, current_backup)
@@ -13472,12 +13519,19 @@ def rollback_webeditor():
         # Restart onto the restored file (after the response goes out)
         restarted = schedule_editor_self_restart()
 
-        return jsonify({
+        result = {
             'success': True,
             'restored_version': restored_version,
             'backup_of_current': current_backup,
-            'restarted': restarted
-        })
+            'restarted': restarted,
+            'passwords_reset': passwords_reset
+        }
+        if passwords_reset:
+            result['password_file'] = INITIAL_PASSWORD_FILE
+            result['notice'] = ('That version is older than password hashing, so every account got a new password: '
+                                + ', '.join(passwords_reset) + '. A server admin reads them as root in '
+                                + INITIAL_PASSWORD_FILE + '. Update again later to store them hashed.')
+        return jsonify(result)
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -13988,6 +14042,23 @@ def mtx_restart_checked(timeout=25):
     return res
 
 
+def mtx_selinux_relabel(path):
+    """Reset the SELinux label of path to the policy default, when restorecon exists.
+
+    shutil.copy2 carries the source's label along, so a binary staged in /tmp lands in
+    /usr/local/bin as user_tmp_t and systemd then cannot start it (status=203/EXEC on
+    Rocky 9, SELinux Enforcing). Best effort: boxes without SELinux have no restorecon."""
+    restorecon = shutil.which('restorecon') or next(
+        (p for p in ('/usr/sbin/restorecon', '/sbin/restorecon') if os.path.exists(p)), None)
+    if not restorecon:
+        return False
+    try:
+        r = subprocess.run([restorecon, path], capture_output=True, timeout=10)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def mtx_install_binary(src_path):
     """Back up the current MediaMTX binary and install src_path over it.
     Returns the backup path ('' if there was nothing to back up). Raises on
@@ -13999,6 +14070,7 @@ def mtx_install_binary(src_path):
             shutil.copy2(MEDIAMTX_BINARY, backup)
         shutil.copy2(src_path, MEDIAMTX_BINARY)
         os.chmod(MEDIAMTX_BINARY, 0o755)
+        mtx_selinux_relabel(MEDIAMTX_BINARY)
         return backup
 
     # Broker path: stage the candidate into an editor-owned, broker-writable dir
