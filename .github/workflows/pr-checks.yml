@@ -3,6 +3,7 @@ name: PR checks
 # Automatic checks on every PR (ops #329, same shape as infra-TAK's PR checks). No Claude involved.
 # A red check blocks the merge once `checks-ok` is made a required check. Run the same things locally:
 #   bash .github/ci/static_checks.sh      (needs shellcheck and PyYAML)
+#   python3 -m pytest tests -q            (needs flask ruamel.yaml requests psutil pytest)
 on:
   pull_request:
     branches: [dev, main]
@@ -33,6 +34,21 @@ jobs:
       - run: pip install shellcheck-py==0.11.0.1 pyyaml && shellcheck --version
       - run: bash .github/ci/static_checks.sh
 
+  # Unit tests in tests/: console and Ku-band security (ops #618), email links not taken from the Host header (ops #622). Run locally with
+  #   python3 -m pytest tests -q      (needs flask ruamel.yaml requests psutil pytest)
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.9'
+      - run: pip install flask ruamel.yaml requests psutil pytest
+      - run: python3 -m pytest tests -q
+
   # Version file vs newest tag, and the newest release's notes (ops #371). Needs the GitHub API.
   release-hygiene:
     runs-on: ubuntu-24.04
@@ -49,24 +65,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
-  # Unit tests in tests/ (ops #622: email links must not come from the Host header).
-  unit-tests:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.9'
-      - run: pip install flask ruamel.yaml psutil requests
-      - run: python3 -I -W ignore -m unittest discover -s tests -v
-
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, release-hygiene, unit-tests]
+    needs: [static, unit, release-hygiene]
     runs-on: ubuntu-24.04
     steps:
       - env:
