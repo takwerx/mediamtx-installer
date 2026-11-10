@@ -1,4 +1,4 @@
-"""Test-video upload must keep files inside the test video folder, and be admin only.
+"""Test-video upload, delete and optimize must keep files inside the test video folder, and be admin only.
 
 Run: python3 -m unittest discover -s tests -v   (needs flask, ruamel.yaml, psutil, requests)
 
@@ -31,7 +31,7 @@ def import_editor(sandbox):
     return mod
 
 
-class UploadTestVideo(unittest.TestCase):
+class Base(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory(prefix='mtx_upload_')
@@ -50,6 +50,8 @@ class UploadTestVideo(unittest.TestCase):
             s['username'] = 'tester'
         return c
 
+
+class UploadTestVideo(Base):
     def post(self, client, name):
         return client.post('/api/test/upload', data={'test_file': (io.BytesIO(b'ts-bytes'), name)},
                            content_type='multipart/form-data')
@@ -93,6 +95,55 @@ class UploadTestVideo(unittest.TestCase):
         r = self.post(self.client('viewer'), 'viewer_clip.ts')
         self.assertEqual(r.status_code, 403)
         self.assertFalse(os.path.exists(os.path.join(self.video_dir, 'viewer_clip.ts')))
+
+
+class DeleteAndOptimizeTestVideo(Base):
+    def make(self, name):
+        path = os.path.join(self.video_dir, name)
+        with open(path, 'wb') as f:
+            f.write(b'ts-bytes')
+        return path
+
+    def test_viewer_cannot_delete(self):
+        path = self.make('keep_me.ts')
+        r = self.client('viewer').post('/api/test/delete/keep_me.ts')
+        self.assertEqual(r.status_code, 403)
+        self.assertTrue(os.path.isfile(path))
+
+    def test_viewer_cannot_optimize(self):
+        self.make('opt_me.ts')
+        r = self.client('viewer').post('/api/test/optimize/opt_me.ts')
+        self.assertEqual(r.status_code, 403)
+        self.assertFalse(os.path.exists(os.path.join(self.video_dir, 'opt_me_optimized.ts')))
+
+    def test_admin_can_delete(self):
+        path = self.make('remove_me.ts')
+        r = self.client('admin').post('/api/test/delete/remove_me.ts')
+        self.assertEqual(r.status_code, 200, r.get_data(as_text=True))
+        self.assertFalse(os.path.exists(path))
+
+    def test_truck_60_still_protected(self):
+        path = self.make('truck_60.ts')
+        r = self.client('admin').post('/api/test/delete/truck_60.ts')
+        self.assertEqual(r.status_code, 400)
+        self.assertTrue(os.path.isfile(path))
+
+    def test_dotdot_names_do_not_reach_files_outside_folder(self):
+        outside = os.path.normpath(os.path.join(self.video_dir, '..', 'victim.ts'))
+        with open(outside, 'wb') as f:
+            f.write(b'keep')
+        for route in ('delete', 'optimize'):
+            for name in ('../victim.ts', '..%2Fvictim.ts', '..\\victim.ts'):
+                r = self.client('admin').post('/api/test/%s/%s' % (route, name))
+                self.assertIn(r.status_code, (400, 404), (route, name))
+        self.assertTrue(os.path.isfile(outside))
+
+    def test_name_that_changes_when_cleaned_is_refused(self):
+        path = self.make('my_clip.ts')
+        for route in ('delete', 'optimize'):
+            r = self.client('admin').post('/api/test/%s/my clip.ts' % route)
+            self.assertEqual(r.status_code, 400, route)
+        self.assertTrue(os.path.isfile(path))
 
 
 if __name__ == '__main__':
