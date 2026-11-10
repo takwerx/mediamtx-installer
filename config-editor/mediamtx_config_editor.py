@@ -655,6 +655,56 @@ def save_email_config(config):
         json.dump(config, f, indent=2)
     os.chmod(EMAIL_CONFIG_FILE, 0o600)
 
+def _clean_console_base_url(value):
+    """Return scheme://host[:port][/path] without a trailing slash, or '' if value is not a plain http(s) URL."""
+    from urllib.parse import urlsplit
+    value = (value or '').strip()
+    if not value or any(ch.isspace() or ch in '<>"\'\\' for ch in value):
+        return ''
+    try:
+        parts = urlsplit(value)
+        if parts.scheme not in ('http', 'https') or not parts.hostname:
+            return ''
+        parts.port  # raises ValueError on a bad port
+    except ValueError:
+        return ''
+    if parts.username or parts.password or parts.query or parts.fragment:
+        return ''
+    return f"{parts.scheme}://{parts.netloc}{parts.path.rstrip('/')}"
+
+def _local_ip():
+    """This server's own primary IP. Opens a UDP socket but sends nothing."""
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(('192.0.2.1', 9))
+            return s.getsockname()[0]
+    except OSError:
+        return '127.0.0.1'
+
+def get_console_base_url():
+    """Public base URL of this console, for links inside emails.
+
+    Never read from the request: Host and X-Forwarded-* are sent by the caller, so a
+    forged Host on /forgot-password would put an attacker's link (and the reset token)
+    in the user's mailbox. Order: MEDIAMTX_CONSOLE_URL env var, 'console_url' in
+    email_config.json, https://<certificate domain>, then this server's own IP on port 5000.
+    """
+    configured = _clean_console_base_url(os.environ.get('MEDIAMTX_CONSOLE_URL', ''))
+    if configured:
+        return configured
+    configured = _clean_console_base_url(load_email_config().get('console_url', ''))
+    if configured:
+        return configured
+    domain = get_streaming_domain().get('domain')
+    if domain:
+        return f'https://{domain}'
+    return f'http://{_local_ip()}:5000'
+
+def console_url(path=''):
+    """Absolute link to a page on this console, built from get_console_base_url()."""
+    return f"{get_console_base_url()}/{path.lstrip('/')}"
+
 def send_email(subject, body, to_email=None):
     """Send email using configured method. Returns (success, error_message)"""
     import smtplib
@@ -9186,7 +9236,7 @@ def register():
         # Send email notification to admin
         try:
             theme = load_theme()
-            login_url = request.url_root + 'login'
+            login_url = console_url('login')
             reason_html = f'<tr><td style="padding: 8px; color: #666;">Reason</td><td style="padding: 8px; color: #ff9800;">{reason}</td></tr>' if reason else ''
             subject = f"[{theme['headerTitle']}] New Access Request: {full_name}"
             body = f"""
@@ -9259,7 +9309,7 @@ def forgot_password():
                 save_reset_tokens(tokens)
                 
                 # Send reset email
-                reset_url = f"{request.url_root}reset-password?token={token}"
+                reset_url = console_url(f"reset-password?token={token}")
                 subject = f"[{theme['headerTitle']}] Password Reset"
                 body = f"""
                 <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
@@ -9866,7 +9916,7 @@ def api_approve_registration():
     # Send approval email to user
     try:
         theme = load_theme()
-        login_url = request.url_root + 'login'
+        login_url = console_url('login')
         subject = f"[{theme['headerTitle']}] Access Approved!"
         body = f"""
         <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
@@ -9941,6 +9991,10 @@ def api_email_config():
         'smtp_from': data.get('smtp_from', ''),
         'notify_email': data.get('notify_email', '')
     }
+    # No form field for this yet: keep a hand-set value so saving email settings does not drop it.
+    previous_console_url = load_email_config().get('console_url')
+    if previous_console_url:
+        config['console_url'] = previous_console_url
     
     save_email_config(config)
     return jsonify({'success': True})

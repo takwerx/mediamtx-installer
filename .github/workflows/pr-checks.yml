@@ -34,7 +34,7 @@ jobs:
       - run: pip install shellcheck-py==0.11.0.1 pyyaml && shellcheck --version
       - run: bash .github/ci/static_checks.sh
 
-  # Security tests for the web console and the Ku-band scripts (ops #618). Run locally with
+  # Unit tests in tests/: console and Ku-band security (ops #618), email links not taken from the Host header (ops #622). Run locally with
   #   python3 -m pytest tests -q      (needs flask ruamel.yaml requests psutil pytest)
   unit:
     runs-on: ubuntu-24.04
