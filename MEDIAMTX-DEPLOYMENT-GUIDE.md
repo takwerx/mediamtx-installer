@@ -164,7 +164,7 @@ sudo ./config-editor/Install_MediaMTX_Config_Editor.sh
 - UFW rule for port 5000
 
 **Access:** `http://YOUR-IP:5000`
-**Default login:** admin / admin
+**First login:** user `admin`. The installer prints a random password once and saves it in `/opt/mediamtx-webeditor/initial_admin_password.txt` (root only). Change it after you sign in.
 
 **⚠️ Change the admin password immediately after first login!**
 
@@ -250,7 +250,7 @@ Or after Caddy: `https://yourdomain.com`
 The web editor manages two independent login systems:
 
 1. **Web Editor Login** (users.json) — who can access the web editor
-   - Default: admin / admin
+   - User `admin`, with the random password the installer printed
    - Change in web editor settings
 
 2. **MediaMTX Streaming Users** (mediamtx.yml authInternalUsers) — who can publish/read streams
