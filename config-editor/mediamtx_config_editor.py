@@ -8,6 +8,7 @@ https://github.com/takwerx/mediamtx-installer
 from flask import Flask, render_template_string, request, jsonify, redirect, url_for, session, send_file, Response
 from werkzeug.utils import secure_filename
 from functools import wraps
+from werkzeug.security import generate_password_hash, check_password_hash
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 import os
@@ -514,6 +515,28 @@ def admin_required(f):
     return decorated_function
 
 USERS_FILE = '/opt/mediamtx-webeditor/users.json'
+
+# Console passwords are stored as werkzeug hashes ("scrypt:..$salt$hash" or
+# "pbkdf2:..$salt$hash"). Entries written by older versions are plain text and
+# are converted at the next successful login (users) or on approval (pending).
+_PASSWORD_HASH_RE = re.compile(r'^(scrypt|pbkdf2):[^$]+\$[^$]+\$[0-9a-f]+$')
+
+def hash_password(password):
+    """Hash a console password for storage"""
+    return generate_password_hash(password)
+
+def is_password_hashed(stored):
+    """True if the stored value is a werkzeug hash rather than plain text"""
+    return isinstance(stored, str) and _PASSWORD_HASH_RE.match(stored) is not None
+
+def verify_password(stored, password):
+    """Check a password against a stored value (hash, or legacy plain text)"""
+    if not isinstance(stored, str) or not isinstance(password, str):
+        return False
+    if is_password_hashed(stored):
+        return check_password_hash(stored, password)
+    return hmac.compare_digest(stored.encode('utf-8'), password.encode('utf-8'))
+
 # The first admin password is random and is written here (root-only, 0600) instead of
 # being printed on the login page. The file is deleted once that password is changed.
 INITIAL_PASSWORD_FILE = '/opt/mediamtx-webeditor/initial_admin_password.txt'
@@ -566,15 +589,21 @@ def load_users():
             users = None
     if users is None:
         password = secrets.token_urlsafe(12)
-        users = [{'username': 'admin', 'password': password, 'role': 'admin'}]
+        users = [{'username': 'admin', 'password': hash_password(password), 'role': 'admin'}]
         save_users(users)
         _write_initial_password_file([('admin', password)])
         return users
     rotated = []
     for user in users:
-        if _is_banned_password(user.get('password')):
-            user['password'] = secrets.token_urlsafe(12)
-            rotated.append((user.get('username', ''), user['password']))
+        stored = user.get('password')
+        if is_password_hashed(stored):
+            is_default = any(check_password_hash(stored, banned) for banned in BANNED_PASSWORDS)
+        else:
+            is_default = _is_banned_password(stored)
+        if is_default:
+            new_password = secrets.token_urlsafe(12)
+            user['password'] = hash_password(new_password)
+            rotated.append((user.get('username', ''), new_password))
     if rotated:
         save_users(users)
         _write_initial_password_file(rotated)
@@ -586,7 +615,7 @@ def save_users(users):
     os.makedirs(os.path.dirname(users_file), exist_ok=True)
     with open(users_file, 'w') as f:
         json.dump(users, f, indent=2)
-    os.chmod(users_file, 0o600)
+    os.chmod(USERS_FILE, 0o600)
 
 PENDING_REG_FILE = '/opt/mediamtx-webeditor/pending_registrations.json'
 
@@ -701,10 +730,12 @@ def authenticate_user(username, password):
     if _is_banned_password(password):
         return None
     users = load_users()
-    given = str(password or '').encode()
     for user in users:
-        stored = str(user.get('password', '')).encode()
-        if user['username'] == username and hmac.compare_digest(stored, given):
+        if user['username'] == username and verify_password(user.get('password'), password):
+            if not is_password_hashed(user.get('password')):
+                # Legacy plain-text entry: convert it now that the password is known
+                user['password'] = hash_password(password)
+                save_users(users)
             return user['role']
     return None
 
@@ -9144,7 +9175,7 @@ def register():
             'email': email,
             'agency': agency,
             'username': username,
-            'password': password,
+            'password': hash_password(password),
             'requested_at': datetime.datetime.now().isoformat()
         }
         if reason:
@@ -9322,7 +9353,7 @@ def reset_password():
             users = load_users()
             for u in users:
                 if u['username'] == username:
-                    u['password'] = new_password
+                    u['password'] = hash_password(new_password)
                     break
             save_users(users)
             if username == 'admin':
@@ -9409,7 +9440,7 @@ def change_password():
         return redirect(f'/?message=User not found&message_type=danger&tab={tab}')
     
     # Verify current password
-    if not hmac.compare_digest(str(current_password or '').encode(), str(current_user.get('password', '')).encode()):
+    if not verify_password(current_user.get('password'), current_password):
         return redirect(f'/?message=Current password is incorrect&message_type=danger&tab={tab}')
     
     # Verify new passwords match
@@ -9425,7 +9456,7 @@ def change_password():
         return redirect(f'/?message={quote(problem)}&message_type=danger&tab={tab}')
     
     # Update password
-    current_user['password'] = new_password
+    current_user['password'] = hash_password(new_password)
     save_users(users)
     if username == 'admin':
         clear_initial_password_file()
@@ -9697,7 +9728,7 @@ def api_add_webeditor_user():
     if any(u['username'] == username for u in users):
         return jsonify({'success': False, 'error': 'Username already exists'}), 400
     
-    users.append({'username': username, 'email': email, 'password': password, 'role': role})
+    users.append({'username': username, 'email': email, 'password': hash_password(password), 'role': role})
     save_users(users)
     
     return jsonify({'success': True})
@@ -9817,7 +9848,8 @@ def api_approve_registration():
     
     users.append({
         'username': reg['username'],
-        'password': reg['password'],
+        # Registrations saved by older versions hold plain text: hash them here
+        'password': reg['password'] if is_password_hashed(reg['password']) else hash_password(reg['password']),
         'role': role,
         'full_name': reg.get('full_name', ''),
         'email': reg.get('email', ''),

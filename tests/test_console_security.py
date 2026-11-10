@@ -68,6 +68,14 @@ def admin_client(ed):
     return client
 
 
+def first_password(ed):
+    """The plain first-login password, as the server admin reads it from the root-only file."""
+    for line in open(ed.INITIAL_PASSWORD_FILE).read().splitlines():
+        if line.startswith('admin: '):
+            return line[len('admin: '):]
+    raise AssertionError('no admin password in the first-login file')
+
+
 def config_text(ed):
     return open(ed.CONFIG_FILE).read()
 
@@ -77,19 +85,23 @@ def config_text(ed):
 def test_new_box_gets_random_admin_password_not_admin(ed):
     users = ed.load_users()
     assert users[0]['username'] == 'admin'
-    assert users[0]['password'] != 'admin'
-    assert len(users[0]['password']) >= 12
-    # the password is on disk for the server admin, root-only
-    saved = open(ed.INITIAL_PASSWORD_FILE).read()
-    assert users[0]['password'] in saved
+    pw = first_password(ed)
+    assert pw != 'admin'
+    assert len(pw) >= 12
+    # users.json holds only a hash; the plain password is on disk for the server admin, root-only
+    assert ed.is_password_hashed(users[0]['password'])
+    assert pw not in json.dumps(users)
+    assert ed.authenticate_user('admin', pw) == 'admin'
     assert stat.S_IMODE(os.stat(ed.INITIAL_PASSWORD_FILE).st_mode) == 0o600
     assert stat.S_IMODE(os.stat(ed.USERS_FILE).st_mode) == 0o600
 
 
 def test_two_new_boxes_do_not_share_a_password(ed):
-    first = ed.load_users()[0]['password']
+    ed.load_users()
+    first = first_password(ed)
     os.remove(ed.USERS_FILE)
-    second = ed.load_users()[0]['password']
+    ed.load_users()
+    second = first_password(ed)
     assert first != second
 
 
@@ -100,9 +112,10 @@ def test_existing_admin_admin_is_rotated_on_load(ed):
     users = ed.load_users()
     by_name = {u['username']: u for u in users}
     assert by_name['admin']['password'] != 'admin'
-    assert by_name['bob']['password'] == 'a-good-one-123'  # other logins are left alone
+    assert ed.is_password_hashed(by_name['admin']['password'])
+    assert by_name['bob']['password'] == 'a-good-one-123'  # other logins are left alone until they sign in
     assert ed.authenticate_user('admin', 'admin') is None
-    assert ed.authenticate_user('admin', by_name['admin']['password']) == 'admin'
+    assert ed.authenticate_user('admin', first_password(ed)) == 'admin'
     # the rotation was saved, not just returned
     assert json.load(open(ed.USERS_FILE))[0]['password'] == by_name['admin']['password']
 
@@ -123,7 +136,8 @@ def test_login_page_does_not_print_the_default_password(ed):
 
 
 def test_correct_password_logs_in(ed):
-    pw = ed.load_users()[0]['password']
+    ed.load_users()
+    pw = first_password(ed)
     client = ed.app.test_client()
     r = client.post('/login', data={'username': 'admin', 'password': pw})
     assert r.status_code == 302
@@ -135,12 +149,13 @@ def test_nobody_can_set_the_password_admin(ed):
     assert ed.password_problem('admin')
     assert ed.password_problem(' Admin ')
     assert not ed.password_problem('a-real-password')
-    pw = ed.load_users()[0]['password']
+    ed.load_users()
+    pw = first_password(ed)
     client = admin_client(ed)
     r = client.post('/change_password', data={'current_password': pw, 'new_password': 'admin',
                                                 'confirm_password': 'admin'})
     assert r.status_code == 302 and 'not allowed' in r.headers['Location'].replace('%20', ' ')
-    assert json.load(open(ed.USERS_FILE))[0]['password'] == pw
+    assert ed.authenticate_user('admin', pw) == 'admin'  # the password did not change
     r = client.post('/api/webeditor/users/add', json={'username': 'eve', 'email': 'e@example.com',
                                                         'password': 'admin', 'role': 'admin'})
     assert r.status_code == 400
@@ -148,7 +163,8 @@ def test_nobody_can_set_the_password_admin(ed):
 
 
 def test_changing_the_admin_password_removes_the_first_password_file(ed):
-    pw = ed.load_users()[0]['password']
+    ed.load_users()
+    pw = first_password(ed)
     assert os.path.exists(ed.INITIAL_PASSWORD_FILE)
     client = admin_client(ed)
     client.post('/change_password', data={'current_password': pw, 'new_password': 'my-new-pass-1',
@@ -160,7 +176,8 @@ def test_changing_the_admin_password_removes_the_first_password_file(ed):
 # --- login throttle -----------------------------------------------------------------------
 
 def test_login_is_locked_after_repeated_failures(ed):
-    pw = ed.load_users()[0]['password']
+    ed.load_users()
+    pw = first_password(ed)
     client = ed.app.test_client()
     for _ in range(ed.LOGIN_MAX_FAILURES):
         r = client.post('/login', data={'username': 'admin', 'password': 'wrong'})
@@ -174,7 +191,8 @@ def test_login_is_locked_after_repeated_failures(ed):
 
 
 def test_lock_also_follows_the_username_across_addresses(ed):
-    pw = ed.load_users()[0]['password']
+    ed.load_users()
+    pw = first_password(ed)
     for i in range(ed.LOGIN_MAX_FAILURES):
         c = ed.app.test_client()
         c.post('/login', data={'username': 'admin', 'password': 'wrong'},
@@ -194,7 +212,8 @@ def test_lock_expires(ed):
 
 
 def test_a_good_login_clears_the_username_count(ed):
-    pw = ed.load_users()[0]['password']
+    ed.load_users()
+    pw = first_password(ed)
     client = ed.app.test_client()
     for _ in range(ed.LOGIN_MAX_FAILURES - 1):
         client.post('/login', data={'username': 'admin', 'password': 'wrong'})
