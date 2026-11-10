@@ -160,6 +160,28 @@ else
     echo "ℹ  No test video found (optional - upload via web editor later)"
 fi
 
+# First login: a random admin password, made now and shown once at the end. A box that
+# already has a users.json keeps its logins (the editor itself retires a leftover
+# admin/admin when it starts).
+ADMIN_PW=""
+if [ ! -f "$WEB_EDITOR_DIR/users.json" ]; then
+    ADMIN_PW="$("$VENV_DIR/bin/python3" -c 'import secrets; print(secrets.token_urlsafe(12))')"
+    (umask 077; ADMIN_PW="$ADMIN_PW" WEB_EDITOR_DIR="$WEB_EDITOR_DIR" "$VENV_DIR/bin/python3" - <<'PYEOF'
+import json, os
+d = os.environ['WEB_EDITOR_DIR']
+pw = os.environ['ADMIN_PW']
+with open(os.path.join(d, 'users.json'), 'w') as f:
+    json.dump([{'username': 'admin', 'password': pw, 'role': 'admin'}], f, indent=2)
+with open(os.path.join(d, 'initial_admin_password.txt'), 'w') as f:
+    f.write('# MediaMTX web editor: first login. Sign in, then change this password (Account tab).\n')
+    f.write('# This file is deleted when the password is changed.\n')
+    f.write('admin: ' + pw + '\n')
+PYEOF
+    )
+    chmod 600 "$WEB_EDITOR_DIR/users.json" "$WEB_EDITOR_DIR/initial_admin_password.txt"
+    echo "✓ Admin login created"
+fi
+
 echo ""
 echo "=========================================="
 echo "Step 3: Creating systemd Service"
@@ -222,10 +244,17 @@ if systemctl is-active --quiet mediamtx-webeditor; then
     echo ""
     echo "  Web Editor: http://<your-server-ip>:5000"
     echo ""
-    echo "  Default Login:"
-    echo "    Username: admin"
-    echo "    Password: admin"
-    echo "    (Change after first login!)"
+    if [ -n "$ADMIN_PW" ]; then
+        echo "  First Login (shown once, write it down):"
+        echo "    Username: admin"
+        echo "    Password: $ADMIN_PW"
+        echo "    Also saved, root only, in $WEB_EDITOR_DIR/initial_admin_password.txt"
+        echo "    (it is deleted when you change the password)"
+    else
+        echo "  Login: your existing web editor logins are unchanged."
+        echo "    If the old admin / admin login was still in use, the editor replaced it with a"
+        echo "    random password: see $WEB_EDITOR_DIR/initial_admin_password.txt (root only)."
+    fi
     echo ""
     echo "  Service Commands:"
     echo "    Status:  systemctl status mediamtx-webeditor"
@@ -233,7 +262,7 @@ if systemctl is-active --quiet mediamtx-webeditor; then
     echo "    Restart: systemctl restart mediamtx-webeditor"
     echo ""
     echo "  Next Steps:"
-    echo "    1. Login and change default password"
+    echo "    1. Login and change the password"
     echo "    2. Configure streaming users in Users & Auth tab"
     echo "    3. Install Caddy for HTTPS (optional)"
     echo ""
