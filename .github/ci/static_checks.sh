@@ -6,6 +6,8 @@
 #   2. shellcheck at error severity: any finding fails. Warnings are printed, never fail.
 #   3. every tracked *.json, *.yml and *.yaml parses (needs PyYAML)
 #   4. every tracked *.py compiles (python3 -I)
+#   5. security reports go by email only (ops #626): SECURITY.md names the email address and
+#      neither it nor the new-issue screen links to GitHub's private report form
 #
 # Prints every problem it finds, then exits 1 if there was one. Exit 2 means the check itself
 # could not run (no shellcheck, no python), which also fails the PR.
@@ -77,6 +79,25 @@ for n in names:
 print("checked %d file(s), %d problem(s)" % (len(names), bad))
 sys.exit(1 if bad else 0)
 ' || { [ $? -eq 1 ] && fail=1 || exit 2; }
+
+# --- security reports by email only (ops #626) ----------------------------------------------
+echo "== security policy: email only"
+if [ -f SECURITY.md ]; then
+  grep -q 'takwerx@gmail\.com' SECURITY.md \
+    || { echo "::error file=SECURITY.md::SECURITY.md must tell people to email takwerx@gmail.com"; fail=1; }
+else
+  echo "::error::SECURITY.md is missing"; fail=1
+fi
+for f in SECURITY.md .github/ISSUE_TEMPLATE/config.yml; do
+  if [ -f "$f" ] && grep -q 'security/advisories' "$f"; then
+    echo "::error file=$f::links to GitHub's private report form; security reports go to takwerx@gmail.com"
+    fail=1
+  fi
+done
+if ! grep -q 'takwerx@gmail\.com' .github/ISSUE_TEMPLATE/config.yml 2>/dev/null; then
+  echo "::error file=.github/ISSUE_TEMPLATE/config.yml::the new-issue screen must carry the security contact link (email takwerx@gmail.com)"
+  fail=1
+fi
 
 if [ "$fail" -ne 0 ]; then
   echo "static checks FAILED" >&2
