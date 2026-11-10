@@ -133,6 +133,26 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# Check the download against the SHA-256 that MediaMTX publishes with the release (ops #623).
+# Fail closed: no checksum, no match, no install. The tarball is not unpacked before this passes.
+TARBALL_NAME="mediamtx_v${LATEST_VERSION}_linux_${MEDIAMTX_ARCH}.tar.gz"
+CHECKSUMS_URL="https://github.com/bluenviron/mediamtx/releases/download/v${LATEST_VERSION}/checksums.sha256"
+if ! wget -q -O checksums.sha256 "$CHECKSUMS_URL"; then
+    echo "Could not download the MediaMTX checksum list ($CHECKSUMS_URL). Nothing was installed."
+    exit 1
+fi
+EXPECTED_SHA=$(awk -v f="$TARBALL_NAME" '{n=$2; sub(/^\*/, "", n)} n==f {print $1}' checksums.sha256)
+ACTUAL_SHA=$(sha256sum mediamtx.tar.gz | awk '{print $1}')
+if [ -z "$EXPECTED_SHA" ]; then
+    echo "The MediaMTX checksum list has no entry for $TARBALL_NAME. Nothing was installed."
+    exit 1
+fi
+if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+    echo "Checksum mismatch for $TARBALL_NAME (expected $EXPECTED_SHA, got $ACTUAL_SHA). Nothing was installed."
+    exit 1
+fi
+echo "✓ Checksum verified (SHA-256 $ACTUAL_SHA)"
+
 echo ""
 echo "=========================================="
 echo "Step 4: Extracting MediaMTX"
