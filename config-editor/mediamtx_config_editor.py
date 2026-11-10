@@ -16342,6 +16342,29 @@ if(whep){{dbg("trying WebRTC first");startWebRTC(start);}}else{{dbg("WebRTC not 
 </script></body></html>'''
     return Response(html, content_type='text/html')
 
+SHARE_HLS_FILE_RE = re.compile(r'^[A-Za-z0-9_.~-]+$')
+
+
+def share_hls_path_allowed(stream, subpath):
+    """True only for a file directly inside the shared stream's own HLS folder.
+
+    The proxy adds the console's own viewer credential, so this check is the only
+    thing between a share link and every other stream. A plain startswith() let a
+    link for cam1 open cam10 and cam1-private; matching `stream + '/'` fixes that,
+    and the file part must be one plain segment so it cannot be `..` or reach a
+    nested stream (a link for `live` must not open `live/drone1`). MediaMTX serves
+    HLS flat (index.m3u8, stream.m3u8, init.mp4, segments), so nothing legitimate
+    needs a deeper path.
+    """
+    if not is_valid_stream_name(stream):
+        return False
+    prefix = stream + '/'
+    if not (subpath or '').startswith(prefix):
+        return False
+    name = subpath[len(prefix):]
+    return bool(SHARE_HLS_FILE_RE.fullmatch(name)) and name not in ('.', '..')
+
+
 @app.route('/shared-hls/<token>/<path:subpath>')
 def shared_hls_proxy(token, subpath):
     """Proxy HLS for shared link: validate token then stream from MediaMTX."""
@@ -16351,7 +16374,7 @@ def shared_hls_proxy(token, subpath):
         return 'Link expired or revoked', 403
     if info.get('expires') and info['expires'] < time.time():
         return 'Link expired', 403
-    if not subpath.startswith(info['stream']):
+    if not share_hls_path_allowed(info['stream'], subpath):
         return 'Forbidden', 403
     try:
         data, ct = hls_fetch_for_share(subpath, request.query_string)
