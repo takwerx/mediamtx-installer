@@ -13402,6 +13402,23 @@ def remove_firewall_rule():
 MEDIAMTX_GITHUB_API = 'https://api.github.com/repos/bluenviron/mediamtx/releases/latest'
 MEDIAMTX_BINARY = '/usr/local/bin/mediamtx'
 
+# Everything this console downloads and then runs as root is checked against a SHA-256 first
+# (ops #623). MediaMTX publishes a checksums.sha256 with every release; the GStreamer plugin
+# and NetBird's install script are pinned in this file.
+def sha256_hex(data):
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
+def parse_checksums(text):
+    """Parse sha256sum output ('<hex> *<name>' or '<hex>  <name>' per line) into {name: hex}."""
+    out = {}
+    for line in (text or '').splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and re.fullmatch(r'[0-9a-fA-F]{64}', parts[0]):
+            out[parts[1].strip().lstrip('*')] = parts[0].lower()
+    return out
+
 # Which release asset this host can actually run. Upstream names them
 # mediamtx_<ver>_linux_{amd64,arm64,armv7,armv6}.tar.gz — note arm64, NOT the
 # arm64v8 that older releases used and that the install scripts carried for
@@ -13875,9 +13892,36 @@ def upgrade_mediamtx():
         })
         
         with urllib.request.urlopen(req, timeout=60, context=ctx) as response:
-            with open(tmp_tar, 'wb') as f:
-                f.write(response.read())
-        
+            tar_bytes = response.read()
+
+        # Check the download against the SHA-256 MediaMTX publishes with the release
+        # before it is written out or unpacked (ops #623). Fail closed.
+        tar_name = download_url.rsplit('/', 1)[-1]
+        sums_url = ''
+        for asset in data.get('assets', []):
+            if asset.get('name') == 'checksums.sha256':
+                sums_url = asset.get('browser_download_url', '')
+                break
+        if not sums_url:
+            return jsonify({'success': False, 'error':
+                            f'MediaMTX {remote_version or "latest"} has no checksums.sha256 to verify '
+                            'the download against. Nothing was changed.'}), 400
+        sreq = urllib.request.Request(sums_url, headers={
+            'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION
+        })
+        with urllib.request.urlopen(sreq, timeout=30, context=ctx) as sresp:
+            expected_sha = parse_checksums(sresp.read().decode('utf-8', 'replace')).get(tar_name)
+        if not expected_sha:
+            return jsonify({'success': False, 'error':
+                            f'The MediaMTX checksum list has no entry for {tar_name}. '
+                            'Nothing was changed.'}), 400
+        if sha256_hex(tar_bytes) != expected_sha:
+            return jsonify({'success': False, 'error':
+                            f'Checksum mismatch for {tar_name}: the download does not match what '
+                            'MediaMTX published. Nothing was changed.'}), 400
+        with open(tmp_tar, 'wb') as f:
+            f.write(tar_bytes)
+
         # Step 5: Extract binary
         if os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir)
@@ -14352,6 +14396,11 @@ def rollback_status():
 # new build, which lives under its own assets/gst/el<N>/ path.
 GST_PLUGIN_DIR_RHEL = '/usr/lib64/gstreamer-1.0'
 GST_RTSPSINK_SO_REPO_PATH = 'config-editor/assets/gst/el{el}/libgstrtspclientsink.so'
+# SHA-256 of each committed .so, by EL major (ops #623). The download is refused unless it matches.
+# Rebuilding the .so means updating this too; tests/test_download_pins.py fails if they drift apart.
+GST_RTSPSINK_SO_SHA256 = {
+    '9': 'b1f4b5a5c78a980792f8907e2614d5584f743e3db838602bd040a6f82d9c8518',
+}
 
 # Editor-owned plugin dir, used when /usr/lib64/gstreamer-1.0 isn't writable.
 # infra-TAK hardened boxes run this editor as an unprivileged user with no sudo,
@@ -14661,6 +14710,12 @@ def deps_update():
                         so_bytes = resp.read()
                     if len(so_bytes) < 10000:
                         raise ValueError('downloaded .so too small')
+                    pinned_sha = GST_RTSPSINK_SO_SHA256.get(str(el))
+                    if not pinned_sha:
+                        raise ValueError(f'no pinned checksum for the el{el} plugin')
+                    if sha256_hex(so_bytes) != pinned_sha:
+                        raise ValueError('checksum mismatch: the downloaded plugin is not the one '
+                                         'this console version expects (nothing was installed)')
                     # Prefer the system dir when we can write it (standalone,
                     # running as root) so every GStreamer process on the box
                     # picks it up. Otherwise use our own dir, which needs no
@@ -15203,6 +15258,37 @@ def rtsp_transport_line(source_url):
 # --- Netbird connectivity (box-level; underpins the KLV "Netbird" transport) -
 # Mike self-hosts Netbird, so joining needs his management URL + a setup key.
 # Joined once per box; every KLV source then reaches the aggregator over the mesh.
+# NetBird's own install script, pinned to a release tag and a SHA-256 (ops #623). On apt/dnf it
+# only adds NetBird's GPG-signed package repo and installs from it. Bump both together after
+# reading the new script; tests/test_download_pins.py checks the URL shape.
+NETBIRD_INSTALL_URL = 'https://github.com/netbirdio/netbird/releases/download/v0.82.1/install.sh'
+NETBIRD_INSTALL_SHA256 = 'fbd7c034730683ee09f82db3ae50617c9e60d54418b8b0e1ead9a79922b905b7'
+
+
+def install_netbird_agent():
+    """Download NetBird's pinned install script, verify its SHA-256, then run it as root.
+    Returns None on success or an error string."""
+    import tempfile
+    import urllib.request
+    import ssl
+    ctx = ssl.create_default_context()
+    req = urllib.request.Request(NETBIRD_INSTALL_URL, headers={'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION})
+    with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
+        script = resp.read()
+    if sha256_hex(script) != NETBIRD_INSTALL_SHA256:
+        return ('The NetBird install script does not match the checksum this console pins, so it was '
+                'not run. Install the NetBird agent yourself, then connect again.')
+    tmp_dir = tempfile.mkdtemp(prefix='nb-install-')  # mode 0700, ours alone
+    try:
+        path = os.path.join(tmp_dir, 'install.sh')
+        with open(path, 'wb') as f:
+            f.write(script)
+        subprocess.run(['sudo', 'sh', path], capture_output=True, text=True, timeout=180)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    return None
+
+
 NETBIRD_LINK_FILE = '/opt/mediamtx-webeditor/netbird_link.json'  # remembers mgmt URL (never the key)
 
 
@@ -15255,8 +15341,9 @@ def api_netbird_connect():
         return jsonify({'success': False, 'error': 'Management URL is required (https://… for self-hosted Netbird)'}), 400
     try:
         if not shutil.which('netbird'):
-            subprocess.run('curl -fsSL https://pkgs.netbird.io/install.sh | sudo sh',
-                           shell=True, capture_output=True, text=True, timeout=180)
+            nb_err = install_netbird_agent()
+            if nb_err:
+                return jsonify({'success': False, 'error': nb_err}), 500
             if not shutil.which('netbird'):
                 return jsonify({'success': False, 'error': 'Netbird agent install failed'}), 500
         up = subprocess.run(['sudo', 'netbird', 'up', '--management-url', mgmt, '--setup-key', key],

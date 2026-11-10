@@ -17,3 +17,8 @@ meson setup builddir -Dtests=disabled -Dexamples=disabled -Dintrospection=disabl
 ninja -C builddir
 cp builddir/gst/rtsp-sink/libgstrtspclientsink.so /usr/lib64/gstreamer-1.0/
 ```
+
+**Pinned by checksum (ops #623).** The console refuses to install this file unless its SHA-256
+matches `GST_RTSPSINK_SO_SHA256` in `mediamtx_config_editor.py`. After a rebuild, update that
+value in the same commit (`shasum -a 256 libgstrtspclientsink.so`); `tests/test_download_pins.py`
+fails if the two drift apart.

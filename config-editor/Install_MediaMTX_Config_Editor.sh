@@ -97,13 +97,38 @@ if ! python3 -m venv --clear --system-site-packages "$VENV_DIR"; then
     echo "Install python3-venv (apt-get install python3-venv) and re-run this script."
     exit 1
 fi
-if ! "$VENV_DIR/bin/pip" install --quiet --disable-pip-version-check Flask ruamel.yaml requests psutil; then
+# Exact versions with a SHA-256 for every file (requirements*.txt), so pip refuses a swapped or
+# tampered package (ops #623). They sit beside this script (the same place the editor file is
+# looked for below).
+REQ_DIR=""
+for d in "$(dirname "$0")" "./config-editor" "."; do
+    if [ -f "$d/requirements.txt" ]; then REQ_DIR="$d"; break; fi
+done
+if [ -z "$REQ_DIR" ]; then
+    echo ""
+    echo "ERROR: requirements.txt (the pinned Python packages) was not found next to this script."
+    echo "Get the whole repository (git clone, or the release zip) and re-run this script."
+    exit 1
+fi
+PIP_INSTALL=("$VENV_DIR/bin/pip" install --quiet --disable-pip-version-check --require-hashes)
+if ! "${PIP_INSTALL[@]}" -r "$REQ_DIR/requirements.txt"; then
     echo ""
     echo "ERROR: Could not install the web editor's Python packages (see pip's output above)."
+    echo "If pip reports a hash mismatch, do not work around it: the download does not match what we pinned."
     echo "Fix that and re-run this script."
     exit 1
 fi
-echo "✓ Python packages installed (Flask, ruamel.yaml, requests, psutil)"
+# psutil: apt's python3-psutil is already visible in the venv on Ubuntu/Debian, so only pip-install
+# it when it is missing (Rocky). Keeps armv7 boards, which have no psutil wheel, working.
+if ! "$VENV_DIR/bin/python3" -c 'import psutil' > /dev/null 2>&1; then
+    if ! "${PIP_INSTALL[@]}" -r "$REQ_DIR/requirements-psutil.txt"; then
+        echo ""
+        echo "ERROR: Could not install psutil (see pip's output above)."
+        echo "Fix that and re-run this script."
+        exit 1
+    fi
+fi
+echo "✓ Python packages installed (Flask, ruamel.yaml, requests, psutil), versions and hashes pinned"
 
 echo ""
 echo "=========================================="
