@@ -11241,7 +11241,12 @@ def list_test_files():
 @app.route('/api/test/delete/<filename>', methods=['POST'])
 @login_required
 def delete_test_file(filename):
-    """Delete test file"""
+    """Delete test file (admin only)"""
+    if session.get('role') != 'admin':
+        return jsonify({'success': False, 'error': 'Admin privileges required'}), 403
+    # Same cleaning as upload: a name that changes when cleaned is not one of ours
+    if secure_filename(filename) != filename:
+        return jsonify({'success': False, 'error': 'Invalid file name'}), 400
     try:
         # Protect truck_60.ts - required for upgrade verification tests
         if filename == 'truck_60.ts':
@@ -11258,7 +11263,11 @@ def delete_test_file(filename):
 @app.route('/api/test/optimize/<filename>', methods=['POST'])
 @login_required
 def optimize_test_file(filename):
-    """Optimize test file with FFmpeg for better compatibility"""
+    """Optimize test file with FFmpeg for better compatibility (admin only)"""
+    if session.get('role') != 'admin':
+        return jsonify({'success': False, 'error': 'Admin privileges required'}), 403
+    if secure_filename(filename) != filename:
+        return jsonify({'success': False, 'error': 'Invalid file name'}), 400
     try:
         input_path = os.path.join(TEST_VIDEO_DIR, filename)
         if not os.path.exists(input_path) or not filename.endswith('.ts'):
