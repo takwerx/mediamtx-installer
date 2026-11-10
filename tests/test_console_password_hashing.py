@@ -42,7 +42,7 @@ class PasswordHashingTest(unittest.TestCase):
         cls._tmp.cleanup()
 
     def setUp(self):
-        for path in (self.m.USERS_FILE, self.m.PENDING_REG_FILE):
+        for path in (self.m.USERS_FILE, self.m.PENDING_REG_FILE, self.m.INITIAL_PASSWORD_FILE):
             if os.path.exists(path):
                 os.remove(path)
 
@@ -62,13 +62,22 @@ class PasswordHashingTest(unittest.TestCase):
             s['username'] = username
         return c
 
-    def test_default_admin_is_stored_hashed(self):
+    def first_password(self):
+        with open(self.m.INITIAL_PASSWORD_FILE) as f:
+            return [l for l in f.read().splitlines() if l.startswith('admin: ')][0][len('admin: '):]
+
+    def test_first_run_admin_password_is_random_and_stored_hashed(self):
         self.m.load_users()
         stored = self.raw_users()[0]['password']
-        self.assertNotEqual(stored, 'admin')
+        first = self.first_password()
         self.assertTrue(self.m.is_password_hashed(stored))
-        self.assertEqual(self.m.authenticate_user('admin', 'admin'), 'admin')
+        self.assertNotIn(first, json.dumps(self.raw_users()))
+        self.assertEqual(self.m.authenticate_user('admin', first), 'admin')
+        self.assertIsNone(self.m.authenticate_user('admin', 'admin'))
         self.assertIsNone(self.m.authenticate_user('admin', 'wrong'))
+        # the login page still says where to find the first password
+        page = self.m.app.test_client().get('/login').get_data(as_text=True)
+        self.assertIn(self.m.INITIAL_PASSWORD_FILE, page)
 
     def test_legacy_plaintext_login_converts_to_hash(self):
         self.write_users([
@@ -91,13 +100,27 @@ class PasswordHashingTest(unittest.TestCase):
         stored = self.raw_users()[0]['password']
         self.assertIsNone(self.m.authenticate_user('admin', stored))
 
-    def test_first_time_banner_still_detects_default_admin(self):
+    def test_old_admin_admin_box_is_rotated_to_a_hashed_random_password(self):
+        for stored in ('admin', self.m.hash_password('admin')):  # plain text, and an already-hashed default
+            self.write_users([{'username': 'admin', 'password': stored, 'role': 'admin'}])
+            self.m.load_users()
+            new_stored = self.raw_users()[0]['password']
+            self.assertTrue(self.m.is_password_hashed(new_stored))
+            self.assertFalse(self.m.verify_password(new_stored, 'admin'))
+            self.assertEqual(self.m.authenticate_user('admin', self.first_password()), 'admin')
+            self.assertIsNone(self.m.authenticate_user('admin', 'admin'))
+
+    def test_changing_the_first_password_stores_a_hash_and_removes_the_file(self):
         self.m.load_users()
-        self.assertTrue(self.m.is_default_admin_password(self.raw_users()[0]))
-        self.write_users([{'username': 'admin', 'password': 'admin', 'role': 'admin'}])
-        self.assertTrue(self.m.is_default_admin_password(self.raw_users()[0]))
-        self.write_users([{'username': 'admin', 'password': self.m.hash_password('changed'), 'role': 'admin'}])
-        self.assertFalse(self.m.is_default_admin_password(self.raw_users()[0]))
+        first = self.first_password()
+        c = self.client(username='admin')
+        r = c.post('/change_password', data={
+            'current_password': first, 'new_password': 'my-own-pass', 'confirm_password': 'my-own-pass'})
+        self.assertIn('changed', r.headers['Location'])
+        self.assertFalse(os.path.exists(self.m.INITIAL_PASSWORD_FILE))
+        self.assertTrue(self.m.is_password_hashed(self.raw_users()[0]['password']))
+        self.assertEqual(self.m.authenticate_user('admin', 'my-own-pass'), 'admin')
+        self.assertIsNone(self.m.authenticate_user('admin', first))
 
     def test_add_user_stores_hash(self):
         r = self.client().post('/api/webeditor/users/add', json={

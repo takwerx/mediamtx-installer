@@ -66,7 +66,7 @@ sudo ./config-editor/Install_MediaMTX_Config_Editor.sh
 > **Note:** The `mediamtx_config_editor.py` file must be in `./config-editor/` or the current directory.
 
 **Access:** `http://YOUR-IP:5000`
-**Default login:** admin / admin
+**First login:** user `admin`. The installer prints a random password once and saves it in `/opt/mediamtx-webeditor/initial_admin_password.txt` (root only). Change it after you sign in.
 
 **Change the admin password immediately after first login!**
 
@@ -172,7 +172,7 @@ All user management is done through the Web Editor at `http://YOUR-IP:5000` → 
 
 | Item | Value |
 |------|-------|
-| Web editor login | admin / admin |
+| Web editor login | `admin` + the random password the installer printed |
 | HLS viewer | hlsviewer / (random, shown at install) |
 | Teststream | No auth required |
 

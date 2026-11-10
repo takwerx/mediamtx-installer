@@ -160,7 +160,7 @@ sudo ./config-editor/Install_MediaMTX_Config_Editor.sh
 - Creates systemd service on port 5000
 
 **Access:** `http://YOUR-IP:5000`
-**Default login:** admin / admin (change immediately!)
+**First login:** user `admin`. The installer prints a random password once and saves it in `/opt/mediamtx-webeditor/initial_admin_password.txt` (root only). Change it after you sign in.
 
 ---
 
@@ -225,7 +225,7 @@ All additional users are managed through the Web Editor → Users & Auth tab.
 ## 🔒 Security Notes
 
 ### Default Credentials
-- **Web Editor:** admin / admin (change immediately!)
+- **Web Editor:** user `admin`, random password printed by the installer
 - **HLS Viewer:** hlsviewer / (random, shown at install)
 - **Teststream:** No auth required (read-only, teststream path only)
 

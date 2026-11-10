@@ -11,18 +11,43 @@ if [ ! -f "$CONFIG" ]; then
   echo "Missing $CONFIG. Copy ku_band_simulator.conf.example and set SOURCE_IP and INTERFACE."
   exit 1
 fi
-# shellcheck source=ku_band_simulator.conf
-source "$CONFIG"
+# This script runs as root. Read the config as data (KEY=value lines), never `source` it:
+# sourcing would run anything written in the file. Every value is checked before use.
+conf_get() {
+  grep -m1 -E "^$1=" "$CONFIG" | cut -d= -f2- | tr -d '"\047\r' || true
+}
+# conf_or KEY DEFAULT: the config value, else DEFAULT
+conf_or() {
+  local v
+  v="$(conf_get "$1")"
+  printf '%s' "${v:-$2}"
+}
+SOURCE_IP="$(conf_get SOURCE_IP)"
+INTERFACE="$(conf_get INTERFACE)"
 
 if [ -z "$SOURCE_IP" ] || [ -z "$INTERFACE" ]; then
   echo "Set SOURCE_IP (sending MediaMTX IP) and INTERFACE (e.g. eth0) in $CONFIG"
   exit 1
 fi
+if ! [[ "$SOURCE_IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+  echo "SOURCE_IP in $CONFIG is not an IPv4 address."
+  exit 1
+fi
+if ! [[ "$INTERFACE" =~ ^[A-Za-z0-9_][A-Za-z0-9_.:@-]{0,14}$ ]]; then
+  echo "INTERFACE in $CONFIG is not a valid interface name."
+  exit 1
+fi
 
-# Ku-band-like: high RTT, jitter, some loss (tweak as needed)
-DELAY_MS="${DELAY_MS:-600}"
-JITTER_MS="${JITTER_MS:-100}"
-LOSS_PCT="${LOSS_PCT:-1}"
+# Ku-band-like: high RTT, jitter, some loss (tweak as needed). Config value, else environment, else default.
+DELAY_MS="$(conf_or DELAY_MS "${DELAY_MS:-600}")"
+JITTER_MS="$(conf_or JITTER_MS "${JITTER_MS:-100}")"
+LOSS_PCT="$(conf_or LOSS_PCT "${LOSS_PCT:-1}")"
+for v in "$DELAY_MS" "$JITTER_MS" "$LOSS_PCT"; do
+  if ! [[ "$v" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "DELAY_MS, JITTER_MS and LOSS_PCT in $CONFIG must be numbers."
+    exit 1
+  fi
+done
 
 # Already on?
 if tc qdisc show dev "$INTERFACE" | grep -q ingress; then

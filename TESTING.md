@@ -8,7 +8,7 @@ This guide walks through every feature of the MediaMTX Web Editor so you can ver
 
 - MediaMTX installed and running
 - Web Editor installed and accessible at `http://YOUR-IP:5000`
-- Default login: `admin` / `admin` (change this immediately)
+- Login: `admin` + the password the installer printed (also in `/opt/mediamtx-webeditor/initial_admin_password.txt`)
 - **For streaming tests:** FFmpeg installed on a client machine (`sudo apt install ffmpeg` or `brew install ffmpeg`)
 
 ---
@@ -16,7 +16,7 @@ This guide walks through every feature of the MediaMTX Web Editor so you can ver
 ## 1. Login & Authentication
 
 1. Open `http://YOUR-IP:5000` in a browser
-2. Log in with `admin` / `admin`
+2. Log in with `admin` and that password
 3. You should land on the **Dashboard**
 
 **Password Change:**
