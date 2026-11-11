@@ -264,6 +264,48 @@ class PythonPackagePinTest(unittest.TestCase):
         for pkg in ('flask', 'ruamel.yaml', 'requests', 'psutil'):
             self.assertIn(pkg + '==', names)
 
+    def test_python_39_extras_are_pinned(self):
+        # Python below 3.10 (Rocky 9) pulls importlib-metadata and zipp in for flask and click.
+        names = self._text('config-editor/requirements.txt').lower()
+        for pkg in ('importlib-metadata', 'zipp'):
+            self.assertRegex(names, r'(?m)^' + pkg + r'==', pkg)
+
+    def test_python_39_dependency_tree_is_pinned(self):
+        # What pip pulls in on Python 3.9 (Rocky 9) must all be pinned with == and hashes, or the
+        # installer stops with "all requirements must have their versions pinned with ==" (ops #646).
+        # pip's own resolver reads markers for the Python that runs it, so read each pinned release's
+        # published requirements from PyPI and apply the 3.9 markers here. Needs network; skipped without.
+        try:
+            from packaging.markers import Marker
+            from packaging.requirements import Requirement
+        except ImportError:
+            from pip._vendor.packaging.markers import Marker
+            from pip._vendor.packaging.requirements import Requirement
+        import json
+        env = {'python_version': '3.9', 'python_full_version': '3.9.25', 'sys_platform': 'linux',
+               'platform_system': 'Linux', 'os_name': 'posix', 'implementation_name': 'cpython',
+               'platform_python_implementation': 'CPython', 'extra': ''}
+        norm = lambda n: re.sub(r'[-_.]+', '-', n).lower()
+        pinned = {}
+        for rel in ('config-editor/requirements.txt', 'config-editor/requirements-psutil.txt'):
+            for m in re.finditer(r'(?m)^([A-Za-z0-9_.\-]+)==([^\s\\]+)', self._text(rel)):
+                pinned[norm(m.group(1))] = m.group(2)
+        self.assertTrue(pinned)
+        missing = set()
+        for name, ver in sorted(pinned.items()):
+            try:
+                with urllib.request.urlopen('https://pypi.org/pypi/%s/%s/json' % (name, ver), timeout=30) as r:
+                    info = json.load(r)['info']
+            except OSError as e:
+                self.skipTest('PyPI not reachable: %s' % e)
+            for line in info.get('requires_dist') or []:
+                req = Requirement(line)
+                if req.marker is not None and not req.marker.evaluate(env):
+                    continue
+                if norm(req.name) not in pinned:
+                    missing.add('%s (needed by %s==%s)' % (req.name, name, ver))
+        self.assertEqual(sorted(missing), [], 'not pinned with == and hashes in requirements.txt')
+
     def test_installer_installs_only_with_require_hashes(self):
         src = self._text('config-editor/Install_MediaMTX_Config_Editor.sh')
         self.assertIn('--require-hashes', src)
