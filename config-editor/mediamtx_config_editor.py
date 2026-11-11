@@ -6,7 +6,9 @@ https://github.com/takwerx/mediamtx-installer
 """
 
 from flask import Flask, render_template_string, request, jsonify, redirect, url_for, session, send_file, Response
+from werkzeug.utils import secure_filename
 from functools import wraps
+from werkzeug.security import generate_password_hash, check_password_hash
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 import os
@@ -14,6 +16,8 @@ import subprocess
 import time
 from datetime import datetime, timedelta
 import secrets
+import hmac
+import threading
 import json
 import re
 import socket
@@ -34,7 +38,7 @@ def add_no_cache_headers(response):
     return response
 
 # Version - used by auto-update checker
-CURRENT_VERSION = "v2.1.14"
+CURRENT_VERSION = "v2.1.15"
 GITHUB_REPO = "takwerx/mediamtx-installer"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/config-editor/mediamtx_config_editor.py"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -510,29 +514,146 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+USERS_FILE = '/opt/mediamtx-webeditor/users.json'
+
+# Console passwords are stored as werkzeug hashes ("scrypt:..$salt$hash" or
+# "pbkdf2:..$salt$hash"). Entries written by older versions are plain text and
+# are converted at the next successful login (users) or on approval (pending).
+_PASSWORD_HASH_RE = re.compile(r'^(scrypt|pbkdf2):[^$]+\$[^$]+\$[0-9a-f]+$')
+
+def hash_password(password):
+    """Hash a console password for storage"""
+    return generate_password_hash(password)
+
+def is_password_hashed(stored):
+    """True if the stored value is a werkzeug hash rather than plain text"""
+    return isinstance(stored, str) and _PASSWORD_HASH_RE.match(stored) is not None
+
+def verify_password(stored, password):
+    """Check a password against a stored value (hash, or legacy plain text)"""
+    if not isinstance(stored, str) or not isinstance(password, str):
+        return False
+    if is_password_hashed(stored):
+        return check_password_hash(stored, password)
+    return hmac.compare_digest(stored.encode('utf-8'), password.encode('utf-8'))
+
+# The first admin password is random and is written here (root-only, 0600) instead of
+# being printed on the login page. The file is deleted once that password is changed.
+INITIAL_PASSWORD_FILE = '/opt/mediamtx-webeditor/initial_admin_password.txt'
+# The old built-in login. No stored account may keep this password, and nobody may set it.
+BANNED_PASSWORDS = ('admin',)
+
+def _is_banned_password(password):
+    return str(password or '').strip().lower() in BANNED_PASSWORDS
+
+def password_problem(password):
+    """Return a message when a new password is not allowed, else None."""
+    if _is_banned_password(password):
+        return 'That password is not allowed. Pick a different one.'
+    return None
+
+def _write_initial_password_file(entries, heading='first login'):
+    """Save the generated passwords (list of (username, password)) for the server admin. 0600, no race.
+    Returns True when the file was written."""
+    try:
+        os.makedirs(os.path.dirname(INITIAL_PASSWORD_FILE), exist_ok=True)
+        fd = os.open(INITIAL_PASSWORD_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as f:
+            f.write(f'# MediaMTX web editor: {heading}. Sign in, then change this password (Account tab).\n')
+            f.write('# This file is deleted when the password is changed.\n')
+            for name, pw in entries:
+                f.write(f'{name}: {pw}\n')
+        os.chmod(INITIAL_PASSWORD_FILE, 0o600)
+        print(f"INFO: a new web editor password was generated; it is in {INITIAL_PASSWORD_FILE} (root only)", flush=True)
+        return True
+    except OSError as e:
+        print(f"WARNING: could not write {INITIAL_PASSWORD_FILE}: {e}", flush=True)
+        return False
+
+def clear_initial_password_file():
+    try:
+        os.remove(INITIAL_PASSWORD_FILE)
+    except OSError:
+        pass
+
+def build_understands_hashed_passwords(path):
+    """True if the console file at path can check hashed passwords (v2.1.15 and later)."""
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            return 'def is_password_hashed(' in f.read()
+    except OSError:
+        return False
+
+def reset_hashed_passwords_for_old_build():
+    """Give every account with a hashed password a new random one, stored as plain text.
+
+    A console from before password hashing (v2.1.14 and earlier) compares what was typed with the
+    stored text, so after a rollback every hashed account would be locked out. Hashes cannot be
+    turned back into passwords, so each such account gets a new random password. The new
+    passwords go to INITIAL_PASSWORD_FILE (root only) first; users.json changes only after that
+    file is safely written. The next update converts them back to hashes at each login.
+    Returns the usernames that were reset, or None when the password file could not be written."""
+    try:
+        with open(USERS_FILE, 'r') as f:
+            users = json.load(f)
+    except (OSError, ValueError):
+        return []
+    entries = []
+    for user in users:
+        if isinstance(user, dict) and is_password_hashed(user.get('password')):
+            new_password = secrets.token_urlsafe(12)
+            user['password'] = new_password
+            entries.append((user.get('username', ''), new_password))
+    if not entries:
+        return []
+    if not _write_initial_password_file(entries, heading='new passwords after a rollback to an older version'):
+        return None
+    save_users(users)
+    return [name for name, _pw in entries]
+
 def load_users():
-    """Load all users from JSON file"""
-    users_file = '/opt/mediamtx-webeditor/users.json'
-    if os.path.exists(users_file):
+    """Load all users from JSON file.
+
+    A first run creates `admin` with a random password (saved to INITIAL_PASSWORD_FILE).
+    A box that still has the old `admin` / `admin` login is rotated the same way, so
+    the default can never be used again.
+    """
+    users = None
+    if os.path.exists(USERS_FILE):
         try:
-            with open(users_file, 'r') as f:
-                return json.load(f)
-        except:
-            pass
-    # Default admin user
-    default_users = [
-        {'username': 'admin', 'password': 'admin', 'role': 'admin'}
-    ]
-    save_users(default_users)
-    return default_users
+            with open(USERS_FILE, 'r') as f:
+                users = json.load(f)
+        except Exception:
+            users = None
+    if users is None:
+        password = secrets.token_urlsafe(12)
+        users = [{'username': 'admin', 'password': hash_password(password), 'role': 'admin'}]
+        save_users(users)
+        _write_initial_password_file([('admin', password)])
+        return users
+    rotated = []
+    for user in users:
+        stored = user.get('password')
+        if is_password_hashed(stored):
+            is_default = any(check_password_hash(stored, banned) for banned in BANNED_PASSWORDS)
+        else:
+            is_default = _is_banned_password(stored)
+        if is_default:
+            new_password = secrets.token_urlsafe(12)
+            user['password'] = hash_password(new_password)
+            rotated.append((user.get('username', ''), new_password))
+    if rotated:
+        save_users(users)
+        _write_initial_password_file(rotated)
+    return users
 
 def save_users(users):
     """Save users to JSON file"""
-    users_file = '/opt/mediamtx-webeditor/users.json'
+    users_file = USERS_FILE
     os.makedirs(os.path.dirname(users_file), exist_ok=True)
     with open(users_file, 'w') as f:
         json.dump(users, f, indent=2)
-    os.chmod(users_file, 0o600)
+    os.chmod(USERS_FILE, 0o600)
 
 PENDING_REG_FILE = '/opt/mediamtx-webeditor/pending_registrations.json'
 
@@ -571,6 +692,56 @@ def save_email_config(config):
     with open(EMAIL_CONFIG_FILE, 'w') as f:
         json.dump(config, f, indent=2)
     os.chmod(EMAIL_CONFIG_FILE, 0o600)
+
+def _clean_console_base_url(value):
+    """Return scheme://host[:port][/path] without a trailing slash, or '' if value is not a plain http(s) URL."""
+    from urllib.parse import urlsplit
+    value = (value or '').strip()
+    if not value or any(ch.isspace() or ch in '<>"\'\\' for ch in value):
+        return ''
+    try:
+        parts = urlsplit(value)
+        if parts.scheme not in ('http', 'https') or not parts.hostname:
+            return ''
+        parts.port  # raises ValueError on a bad port
+    except ValueError:
+        return ''
+    if parts.username or parts.password or parts.query or parts.fragment:
+        return ''
+    return f"{parts.scheme}://{parts.netloc}{parts.path.rstrip('/')}"
+
+def _local_ip():
+    """This server's own primary IP. Opens a UDP socket but sends nothing."""
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(('192.0.2.1', 9))
+            return s.getsockname()[0]
+    except OSError:
+        return '127.0.0.1'
+
+def get_console_base_url():
+    """Public base URL of this console, for links inside emails.
+
+    Never read from the request: Host and X-Forwarded-* are sent by the caller, so a
+    forged Host on /forgot-password would put an attacker's link (and the reset token)
+    in the user's mailbox. Order: MEDIAMTX_CONSOLE_URL env var, 'console_url' in
+    email_config.json, https://<certificate domain>, then this server's own IP on port 5000.
+    """
+    configured = _clean_console_base_url(os.environ.get('MEDIAMTX_CONSOLE_URL', ''))
+    if configured:
+        return configured
+    configured = _clean_console_base_url(load_email_config().get('console_url', ''))
+    if configured:
+        return configured
+    domain = get_streaming_domain().get('domain')
+    if domain:
+        return f'https://{domain}'
+    return f'http://{_local_ip()}:5000'
+
+def console_url(path=''):
+    """Absolute link to a page on this console, built from get_console_base_url()."""
+    return f"{get_console_base_url()}/{path.lstrip('/')}"
 
 def send_email(subject, body, to_email=None):
     """Send email using configured method. Returns (success, error_message)"""
@@ -644,11 +815,52 @@ def send_email(subject, body, to_email=None):
 
 def authenticate_user(username, password):
     """Authenticate user and return role"""
+    if _is_banned_password(password):
+        return None
     users = load_users()
     for user in users:
-        if user['username'] == username and user['password'] == password:
+        if user['username'] == username and verify_password(user.get('password'), password):
+            if not is_password_hashed(user.get('password')):
+                # Legacy plain-text entry: convert it now that the password is known
+                user['password'] = hash_password(password)
+                save_users(users)
             return user['role']
     return None
+
+# Login throttle: too many failures from one address, or against one username, lock
+# that address / username out for a while. Kept in memory (a restart clears it).
+LOGIN_MAX_FAILURES = 5
+LOGIN_WINDOW_SECONDS = 300
+_login_failures = {}
+_login_failures_lock = threading.Lock()
+
+def _login_keys(username):
+    return ('ip:' + str(request.remote_addr or '?'), 'user:' + str(username or '').strip().lower()[:64])
+
+def login_wait_seconds(username, now=None):
+    """Seconds this login must wait, or 0 if it may try."""
+    now = time.time() if now is None else now
+    wait = 0
+    with _login_failures_lock:
+        for key in _login_keys(username):
+            recent = [t for t in _login_failures.get(key, []) if now - t < LOGIN_WINDOW_SECONDS]
+            if recent:
+                _login_failures[key] = recent
+            else:
+                _login_failures.pop(key, None)
+            if len(recent) >= LOGIN_MAX_FAILURES:
+                wait = max(wait, int(LOGIN_WINDOW_SECONDS - (now - recent[0])) + 1)
+    return wait
+
+def record_login_failure(username, now=None):
+    now = time.time() if now is None else now
+    with _login_failures_lock:
+        for key in _login_keys(username):
+            _login_failures.setdefault(key, []).append(now)
+
+def clear_login_failures(username):
+    with _login_failures_lock:
+        _login_failures.pop(_login_keys(username)[1], None)
 
 # Login Page Template
 LOGIN_TEMPLATE = '''
@@ -850,8 +1062,9 @@ LOGIN_TEMPLATE = '''
         {% if first_time %}
         <div class="first-time-notice">
             <strong>⚠️ First Time Login</strong>
-            Default credentials: admin / admin<br>
-            Change your password immediately after logging in!
+            Username: admin. The password was made at install and is saved on the server in<br>
+            <code>{{ initial_password_file }}</code> (root only).<br>
+            Change your password after logging in.
         </div>
         {% endif %}
         
@@ -7834,7 +8047,7 @@ HTML_TEMPLATE = '''
             .then(res => res.json())
             .then(data => {
                 if (data.success) {
-                    alert("✅ Web Editor rolled back to " + (data.restored_version || "previous version") + ". Page will reload.");
+                    alert("✅ Web Editor rolled back to " + (data.restored_version || "previous version") + ". Page will reload." + (data.notice ? " " + data.notice : ""));
                     setTimeout(function() {
                         window.location.href = '/?tab=versions&message=Rolled back to ' + (data.restored_version || 'previous version') + '&message_type=success';
                     }, 3000);
@@ -8559,6 +8772,82 @@ def read_yaml_users():
         traceback.print_exc()
         return []
 
+_CFG_CONTROL_CHARS = re.compile(r'[\x00-\x1f\x7f]')
+
+def config_value(value, pattern, label):
+    """Return `value` (trimmed) when it fully matches `pattern`, else raise ValueError.
+
+    Every form value that ends up in mediamtx.yml goes through here (or through
+    set_config_line's control-character check), so a value can never carry a line
+    break or anything else that changes what the line means.
+    """
+    text = '' if value is None else str(value).strip()
+    if not re.fullmatch(pattern, text):
+        raise ValueError(f'Invalid value for {label}')
+    return text
+
+CFG_PORT = r'\d{1,5}'
+CFG_INT = r'\d{1,9}'
+CFG_DURATION = r'\d+(\.\d+)?(ms|s|m|h|d)?'
+CFG_SIZE = r'\d+(\.\d+)?[KMGkmg]?[Bb]?'
+CFG_HOST_CHARS = r'[A-Za-z0-9._:\[\]-]*'
+
+def config_port(value, label):
+    text = config_value(value, CFG_PORT, label)
+    if not 1 <= int(text) <= 65535:
+        raise ValueError(f'Invalid value for {label}')
+    return text
+
+def set_config_line(prefix, new_lines, insert_after=None, insert_before=None):
+    """Set a line in mediamtx.yml without a shell or sed.
+
+    Every line that starts with `prefix` is replaced by the first of `new_lines`
+    (a string or a list of strings, no line breaks). `prefix=None` skips the
+    replace. When no line matched, `new_lines` are inserted after the first line
+    that starts with `insert_after`, or before the first that starts with
+    `insert_before`. Returns True when the file was changed.
+
+    This replaces `sed -i "s/^key: .*/key: {value}/"`: GNU sed reads `/`, `&`, `\\`,
+    and the `e` and `w` flags inside the value, so a form value could run a command
+    as root or write a file. Here the value is only ever data.
+    """
+    if isinstance(new_lines, str):
+        new_lines = [new_lines]
+    for line in new_lines:
+        if _CFG_CONTROL_CHARS.search(line):
+            raise ValueError('Config values cannot contain line breaks or control characters')
+    with open(CONFIG_FILE, 'r') as f:
+        lines = f.readlines()
+    out = []
+    found = False
+    for line in lines:
+        if prefix is not None and line.startswith(prefix):
+            out.append(new_lines[0] + '\n')
+            found = True
+        else:
+            out.append(line)
+    if not found:
+        anchor = insert_after if insert_after is not None else insert_before
+        if anchor is None:
+            return False
+        block = [l + '\n' for l in new_lines]
+        out2 = []
+        done = False
+        for line in out:
+            if not done and insert_before is not None and line.startswith(insert_before):
+                out2.extend(block)
+                done = True
+            out2.append(line)
+            if not done and insert_after is not None and line.startswith(insert_after):
+                out2.extend(block)
+                done = True
+        if not done:
+            return False
+        out = out2
+    with open(CONFIG_FILE, 'w') as f:
+        f.writelines(out)
+    return True
+
 def set_listen_address(field, port):
     """Change a listener's port while preserving whatever host it is bound to.
 
@@ -8573,29 +8862,17 @@ def set_listen_address(field, port):
     :8888 URLs.
     """
     try:
+        port = config_port(port, field)
         current = str(read_yaml_field(field, '') or '')
         host = current.rsplit(':', 1)[0] if ':' in current else ''
-        if '/' in host:
+        if not re.fullmatch(CFG_HOST_CHARS, host):
             host = ''
-        subprocess.run(['sed', '-i', f's/^{field}: .*/{field}: {host}:{port}/', CONFIG_FILE], check=True)
+        set_config_line(f'{field}:', f'{field}: {host}:{port}')
         return True
     except Exception as e:
         print(f"ERROR in set_listen_address({field}): {e}", flush=True)
         return False
 
-
-def save_config_sed(field, value):
-    """Save a single field using sed - avoids YAML corruption"""
-    try:
-        # Escape special characters for sed
-        value_escaped = str(value).replace('/', '\\/')
-        
-        # Use sed to update the field
-        subprocess.run(['sed', '-i', f's/^{field}: .*/{field}: {value_escaped}/', CONFIG_FILE], check=True)
-        return True
-    except Exception as e:
-        print(f"ERROR in save_config_sed: {e}", flush=True)
-        return False
 
 def set_scalar_field(field, value, after_field=None):
     """Set a top-level scalar field, tolerating the next-line value style.
@@ -8895,22 +9172,29 @@ def login():
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
-        
+
+        wait = login_wait_seconds(username)
+        if wait:
+            minutes = (wait + 59) // 60
+            return render_template_string(LOGIN_TEMPLATE, error=f'Too many failed logins. Try again in {minutes} minute(s).', first_time=False, theme=theme, logo_exists=logo_exists, registration_enabled=reg_enabled, message=None), 429
+
         role = authenticate_user(username, password)
         
         if role:
+            clear_login_failures(username)
             session['logged_in'] = True
             session['username'] = username
             session['role'] = role
             return redirect(url_for('index'))
         else:
+            record_login_failure(username)
             return render_template_string(LOGIN_TEMPLATE, error='Invalid username or password', first_time=False, theme=theme, logo_exists=logo_exists, registration_enabled=reg_enabled, message=None)
     
     # Check if this is first time (default credentials still in use)
-    users = load_users()
-    first_time = any(u['username'] == 'admin' and u['password'] == 'admin' for u in users)
+    load_users()  # creates the first admin (random password) on a new box
+    first_time = os.path.exists(INITIAL_PASSWORD_FILE)
     
-    return render_template_string(LOGIN_TEMPLATE, first_time=first_time, error=None, theme=theme, logo_exists=logo_exists, registration_enabled=reg_enabled, message=message)
+    return render_template_string(LOGIN_TEMPLATE, first_time=first_time, initial_password_file=INITIAL_PASSWORD_FILE, error=None, theme=theme, logo_exists=logo_exists, registration_enabled=reg_enabled, message=message)
 
 @app.route('/logout')
 def logout():
@@ -8951,6 +9235,8 @@ def register():
             error = 'Username must be at least 3 characters'
         elif len(password) < 6:
             error = 'Password must be at least 6 characters'
+        elif password_problem(password):
+            error = password_problem(password)
         elif password != confirm:
             error = 'Passwords do not match'
         elif not all(c.isalnum() or c == '_' for c in username):
@@ -8977,7 +9263,7 @@ def register():
             'email': email,
             'agency': agency,
             'username': username,
-            'password': password,
+            'password': hash_password(password),
             'requested_at': datetime.datetime.now().isoformat()
         }
         if reason:
@@ -8988,7 +9274,7 @@ def register():
         # Send email notification to admin
         try:
             theme = load_theme()
-            login_url = request.url_root + 'login'
+            login_url = console_url('login')
             reason_html = f'<tr><td style="padding: 8px; color: #666;">Reason</td><td style="padding: 8px; color: #ff9800;">{reason}</td></tr>' if reason else ''
             subject = f"[{theme['headerTitle']}] New Access Request: {full_name}"
             body = f"""
@@ -9061,7 +9347,7 @@ def forgot_password():
                 save_reset_tokens(tokens)
                 
                 # Send reset email
-                reset_url = f"{request.url_root}reset-password?token={token}"
+                reset_url = console_url(f"reset-password?token={token}")
                 subject = f"[{theme['headerTitle']}] Password Reset"
                 body = f"""
                 <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
@@ -9145,6 +9431,8 @@ def reset_password():
         
         if len(new_password) < 6:
             error = 'Password must be at least 6 characters'
+        elif password_problem(new_password):
+            error = password_problem(new_password)
         elif new_password != confirm_password:
             error = 'Passwords do not match'
         else:
@@ -9153,9 +9441,11 @@ def reset_password():
             users = load_users()
             for u in users:
                 if u['username'] == username:
-                    u['password'] = new_password
+                    u['password'] = hash_password(new_password)
                     break
             save_users(users)
+            if username == 'admin':
+                clear_initial_password_file()
             
             # Delete used token
             del tokens[token]
@@ -9238,7 +9528,7 @@ def change_password():
         return redirect(f'/?message=User not found&message_type=danger&tab={tab}')
     
     # Verify current password
-    if current_password != current_user['password']:
+    if not verify_password(current_user.get('password'), current_password):
         return redirect(f'/?message=Current password is incorrect&message_type=danger&tab={tab}')
     
     # Verify new passwords match
@@ -9248,10 +9538,16 @@ def change_password():
     # Verify new password is not empty
     if not new_password or len(new_password) < 4:
         return redirect(f'/?message=New password must be at least 4 characters&message_type=danger&tab={tab}')
+
+    problem = password_problem(new_password)
+    if problem:
+        return redirect(f'/?message={quote(problem)}&message_type=danger&tab={tab}')
     
     # Update password
-    current_user['password'] = new_password
+    current_user['password'] = hash_password(new_password)
     save_users(users)
+    if username == 'admin':
+        clear_initial_password_file()
     
     return redirect(f'/?message=Password changed successfully&message_type=success&tab={tab}')
 
@@ -9507,6 +9803,9 @@ def api_add_webeditor_user():
     
     if not email:
         return jsonify({'success': False, 'error': 'Email required'}), 400
+
+    if password_problem(password):
+        return jsonify({'success': False, 'error': password_problem(password)}), 400
     
     if role not in ['admin', 'viewer']:
         return jsonify({'success': False, 'error': 'Invalid role'}), 400
@@ -9517,7 +9816,7 @@ def api_add_webeditor_user():
     if any(u['username'] == username for u in users):
         return jsonify({'success': False, 'error': 'Username already exists'}), 400
     
-    users.append({'username': username, 'email': email, 'password': password, 'role': role})
+    users.append({'username': username, 'email': email, 'password': hash_password(password), 'role': role})
     save_users(users)
     
     return jsonify({'success': True})
@@ -9637,7 +9936,8 @@ def api_approve_registration():
     
     users.append({
         'username': reg['username'],
-        'password': reg['password'],
+        # Registrations saved by older versions hold plain text: hash them here
+        'password': reg['password'] if is_password_hashed(reg['password']) else hash_password(reg['password']),
         'role': role,
         'full_name': reg.get('full_name', ''),
         'email': reg.get('email', ''),
@@ -9654,7 +9954,7 @@ def api_approve_registration():
     # Send approval email to user
     try:
         theme = load_theme()
-        login_url = request.url_root + 'login'
+        login_url = console_url('login')
         subject = f"[{theme['headerTitle']}] Access Approved!"
         body = f"""
         <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
@@ -9729,6 +10029,10 @@ def api_email_config():
         'smtp_from': data.get('smtp_from', ''),
         'notify_email': data.get('notify_email', '')
     }
+    # No form field for this yet: keep a hand-set value so saving email settings does not drop it.
+    previous_console_url = load_email_config().get('console_url')
+    if previous_console_url:
+        config['console_url'] = previous_console_url
     
     save_email_config(config)
     return jsonify({'success': True})
@@ -10507,16 +10811,18 @@ def save_basic():
         subprocess.run(['cp', CONFIG_FILE, backup_file], check=True)
         
         # Get form values
-        log_level = request.form.get('logLevel')
-        read_timeout = request.form.get('readTimeout')
-        write_timeout = request.form.get('writeTimeout')
+        log_level = config_value(request.form.get('logLevel'), r'error|warn|info|debug', 'Log Level')
+        read_timeout = config_value(request.form.get('readTimeout'), CFG_DURATION, 'Read Timeout')
+        write_timeout = config_value(request.form.get('writeTimeout'), CFG_DURATION, 'Write Timeout')
         
-        # Use sed to update values directly (avoid ruamel.yaml corruption)
-        subprocess.run(['sed', '-i', f's/^logLevel: .*/logLevel: {log_level}/', CONFIG_FILE], check=True)
-        subprocess.run(['sed', '-i', f's/^readTimeout: .*/readTimeout: {read_timeout}/', CONFIG_FILE], check=True)
-        subprocess.run(['sed', '-i', f's/^writeTimeout: .*/writeTimeout: {write_timeout}/', CONFIG_FILE], check=True)
+        # Edit the lines in Python (avoid ruamel.yaml corruption, and never hand a form value to a shell)
+        set_config_line('logLevel:', f'logLevel: {log_level}')
+        set_config_line('readTimeout:', f'readTimeout: {read_timeout}')
+        set_config_line('writeTimeout:', f'writeTimeout: {write_timeout}')
         
         return redirect(f'/?message=Basic settings saved successfully&message_type=success&tab={tab}')
+    except ValueError as e:
+        return redirect(f'/?message={quote(str(e))}&message_type=danger&tab={tab}')
     except Exception as e:
         print(f"ERROR saving basic settings: {e}", flush=True)
         return redirect(f'/?message=Failed to save settings&message_type=danger&tab={tab}')
@@ -10546,6 +10852,24 @@ def save_protocols():
         webrtc_port = request.form.get('webrtcAddress')
         webrtc_encryption = request.form.get('webrtcEncryption')
         webrtc_hosts = request.form.get('webrtcAdditionalHosts', '').strip()
+
+        # Check every value before anything is written: these end up in mediamtx.yml.
+        for label, raw in (('RTSP port', rtsp_port), ('RTSPS port', rtsps_port), ('RTMP port', rtmp_port),
+                           ('RTMPS port', rtmps_port), ('HLS port', hls_port), ('SRT port', srt_port),
+                           ('WebRTC port', webrtc_port)):
+            if raw:
+                config_port(raw, label)
+        if rtsp_transports:
+            rtsp_transports = ','.join(config_value(t, r'udp|multicast|tcp', 'RTSP transport')
+                                       for t in rtsp_transports.split(','))
+        for label, raw in (('RTSP encryption', rtsp_encryption), ('RTMP encryption', rtmp_encryption)):
+            if raw:
+                config_value(raw, r'no|optional|strict', label)
+        if webrtc_encryption:
+            config_value(webrtc_encryption, r'yes|no', 'WebRTC encryption')
+        for label, raw in (('SRT Publish Passphrase', srt_publish), ('SRT Read Passphrase', srt_read)):
+            if _CFG_CONTROL_CHARS.search(raw):
+                raise ValueError(f'{label} cannot contain line breaks or control characters')
         
         # Validate RTSP encryption
         if rtsp_encryption in ['optional', 'strict']:
@@ -10580,22 +10904,17 @@ def save_protocols():
         if srt_read and (len(srt_read) < 10 or len(srt_read) > 79):
             return redirect(f'/?message=SRT Read Passphrase must be 10-79 characters&message_type=danger&tab={tab}')
         
-        # Use sed to update protocol settings directly - only write values that exist in the form
+        # Update protocol settings directly - only write values that exist in the form
         if rtsp_port:
             set_listen_address('rtspAddress', rtsp_port)
         # RTSP transport protocols (list format)
         if rtsp_transports:
             # Convert comma-separated to YAML list format: [tcp] or [udp, tcp] or [udp, multicast, tcp]
             transport_list = '[' + ', '.join(rtsp_transports.split(',')) + ']'
-            result = subprocess.run(['grep', '-c', '^rtspTransports:', CONFIG_FILE], capture_output=True, text=True)
-            if result.stdout.strip() != '0':
-                subprocess.run(['sed', '-i', f's/^rtspTransports: .*/rtspTransports: {transport_list}/', CONFIG_FILE], check=True)
-            else:
-                # Insert after rtspAddress line
-                subprocess.run(['sed', '-i', f'/^rtspAddress:/a rtspTransports: {transport_list}', CONFIG_FILE], check=True)
+            set_config_line('rtspTransports:', f'rtspTransports: {transport_list}', insert_after='rtspAddress:')
         # RTSP/RTMP encryption need quotes - they take string values ("no", "optional", "strict")
         if rtsp_encryption and rtsp_encryption in ['no', 'optional', 'strict']:
-            subprocess.run(['sed', '-i', f's/^rtspEncryption: .*/rtspEncryption: "{rtsp_encryption}"/', CONFIG_FILE], check=True)
+            set_config_line('rtspEncryption:', f'rtspEncryption: "{rtsp_encryption}"')
         if rtsps_port:
             set_listen_address('rtspsAddress', rtsps_port)
         if rtmp_port:
@@ -10603,7 +10922,7 @@ def save_protocols():
         if rtmps_port:
             set_listen_address('rtmpsAddress', rtmps_port)
         if rtmp_encryption and rtmp_encryption in ['no', 'optional', 'strict']:
-            subprocess.run(['sed', '-i', f's/^rtmpEncryption: .*/rtmpEncryption: "{rtmp_encryption}"/', CONFIG_FILE], check=True)
+            set_config_line('rtmpEncryption:', f'rtmpEncryption: "{rtmp_encryption}"')
         if hls_port:
             set_listen_address('hlsAddress', hls_port)
         if srt_port:
@@ -10613,48 +10932,33 @@ def save_protocols():
         # webrtcEncryption is a real YAML bool here, unlike rtsp/rtmp which take
         # quoted "no"/"optional"/"strict" strings.
         if webrtc_encryption in ['yes', 'no']:
-            subprocess.run(['sed', '-i', f's/^webrtcEncryption: .*/webrtcEncryption: {webrtc_encryption}/', CONFIG_FILE], check=True)
+            set_config_line('webrtcEncryption:', f'webrtcEncryption: {webrtc_encryption}')
         if webrtc_cert_adopted:
             adopted_cert, adopted_key = webrtc_cert_adopted
             set_scalar_field('webrtcServerCert', adopted_cert, after_field='webrtcEncryption')
             set_scalar_field('webrtcServerKey', adopted_key, after_field='webrtcEncryption')
-        # webrtcAdditionalHosts is a YAML list. Sanitise before it reaches sed:
-        # only hostname/IP characters survive, so a stray quote or slash can't
-        # break out of the expression and corrupt the config.
+        # webrtcAdditionalHosts is a YAML list. Sanitise it: only hostname/IP
+        # characters survive, so a stray quote or slash can't corrupt the config.
         if webrtc_hosts is not None:
             cleaned = [re.sub(r'[^A-Za-z0-9._:-]', '', h.strip()) for h in webrtc_hosts.split(',')]
             cleaned = [h for h in cleaned if h]
             host_list = '[' + ', '.join(f"'{h}'" for h in cleaned) + ']'
-            result = subprocess.run(['grep', '-c', '^webrtcAdditionalHosts:', CONFIG_FILE], capture_output=True, text=True)
-            if result.stdout.strip() != '0':
-                subprocess.run(['sed', '-i', f's/^webrtcAdditionalHosts: .*/webrtcAdditionalHosts: {host_list}/', CONFIG_FILE], check=True)
-            elif cleaned:
-                subprocess.run(['sed', '-i', f'/^webrtcAddress:/a webrtcAdditionalHosts: {host_list}', CONFIG_FILE], check=True)
-        
-        # Handle SRT passphrases - use sed to update, insert if line doesn't exist
-        if srt_publish:
-            # Try to replace existing line
-            result = subprocess.run(['grep', '-q', '^  srtPublishPassphrase:', CONFIG_FILE])
-            if result.returncode == 0:
-                subprocess.run(['sed', '-i', f's/^  srtPublishPassphrase:.*/  srtPublishPassphrase: {srt_publish}/', CONFIG_FILE], check=True)
+            if cleaned:
+                set_config_line('webrtcAdditionalHosts:', f'webrtcAdditionalHosts: {host_list}', insert_after='webrtcAddress:')
             else:
-                subprocess.run(['sed', '-i', f'/^  overridePublisher:/a\\  srtPublishPassphrase: {srt_publish}', CONFIG_FILE], check=True)
+                set_config_line('webrtcAdditionalHosts:', f'webrtcAdditionalHosts: {host_list}')
+        
+        # Handle SRT passphrases - update the line, insert it if it doesn't exist.
+        # An empty passphrase clears the value but keeps the line.
+        if srt_publish:
+            set_config_line('  srtPublishPassphrase:', f'  srtPublishPassphrase: {srt_publish}', insert_after='  overridePublisher:')
         else:
-            # Clear value but keep the line
-            result = subprocess.run(['grep', '-q', '^  srtPublishPassphrase:', CONFIG_FILE])
-            if result.returncode == 0:
-                subprocess.run(['sed', '-i', 's/^  srtPublishPassphrase:.*/  srtPublishPassphrase:/', CONFIG_FILE], check=True)
+            set_config_line('  srtPublishPassphrase:', '  srtPublishPassphrase:')
         
         if srt_read:
-            result = subprocess.run(['grep', '-q', '^  srtReadPassphrase:', CONFIG_FILE])
-            if result.returncode == 0:
-                subprocess.run(['sed', '-i', f's/^  srtReadPassphrase:.*/  srtReadPassphrase: {srt_read}/', CONFIG_FILE], check=True)
-            else:
-                subprocess.run(['sed', '-i', f'/^  maxReaders:/a\\  srtReadPassphrase: {srt_read}', CONFIG_FILE], check=True)
+            set_config_line('  srtReadPassphrase:', f'  srtReadPassphrase: {srt_read}', insert_after='  maxReaders:')
         else:
-            result = subprocess.run(['grep', '-q', '^  srtReadPassphrase:', CONFIG_FILE])
-            if result.returncode == 0:
-                subprocess.run(['sed', '-i', 's/^  srtReadPassphrase:.*/  srtReadPassphrase:/', CONFIG_FILE], check=True)
+            set_config_line('  srtReadPassphrase:', '  srtReadPassphrase:')
         
         # Firewall: open what the saved settings listen on. RTMP is handled as a
         # pair so RTMPS is opened with "optional"/"strict" and closed with "no".
@@ -10695,14 +10999,15 @@ def save_hls():
         backup_file = os.path.join(BACKUP_DIR, f'mediamtx.yml.{datetime.now().strftime("%Y%m%d_%H%M%S")}')
         subprocess.run(['cp', CONFIG_FILE, backup_file], check=True)
 
-        hls_variant = request.form.get('hlsVariant', 'mpegts')
-        hls_segment_count = request.form.get('hlsSegmentCount', '7')
-        hls_segment_duration = request.form.get('hlsSegmentDuration', '1s')
-        hls_part_duration = request.form.get('hlsPartDuration', '200ms')
-        hls_segment_max_size = request.form.get('hlsSegmentMaxSize', '50M')
-        hls_always_remux = request.form.get('hlsAlwaysRemux', 'no')
-        hls_muxer_close_after = request.form.get('hlsMuxerCloseAfter', '60s')
-        write_queue_size = request.form.get('writeQueueSize', '512')
+        # Every value is checked here, before anything is written to mediamtx.yml.
+        hls_variant = config_value(request.form.get('hlsVariant', 'mpegts'), r'mpegts|fmp4|lowLatency', 'HLS Variant')
+        hls_segment_count = config_value(request.form.get('hlsSegmentCount', '7'), CFG_INT, 'Segment Count')
+        hls_segment_duration = config_value(request.form.get('hlsSegmentDuration', '1s'), CFG_DURATION, 'Segment Duration')
+        hls_part_duration = config_value(request.form.get('hlsPartDuration', '200ms'), CFG_DURATION, 'Part Duration')
+        hls_segment_max_size = config_value(request.form.get('hlsSegmentMaxSize', '50M'), CFG_SIZE, 'Segment Max Size')
+        hls_always_remux = config_value(request.form.get('hlsAlwaysRemux', 'no'), r'yes|no', 'Always Remux')
+        hls_muxer_close_after = config_value(request.form.get('hlsMuxerCloseAfter', '60s'), CFG_DURATION, 'Muxer Close After')
+        write_queue_size = config_value(request.form.get('writeQueueSize', '512'), CFG_INT, 'Write Queue Size')
 
         # MediaMTX hard-requires >=7 segments for Low-Latency HLS. Below that the
         # muxer is created then instantly destroyed ("Low-Latency HLS requires at
@@ -10729,24 +11034,15 @@ def save_hls():
         }
 
         for field_name, value in fields.items():
-            result = subprocess.run(['grep', '-c', f'^{field_name}:', CONFIG_FILE], capture_output=True, text=True)
-            if result.stdout.strip() != '0':
-                subprocess.run(['sed', '-i', f's/^{field_name}: .*/{field_name}: {value}/', CONFIG_FILE], check=True)
-            else:
-                subprocess.run(['sed', '-i', f'/^hls:/a {field_name}: {value}', CONFIG_FILE], check=True)
+            set_config_line(f'{field_name}:', f'{field_name}: {value}', insert_after='hls:')
 
         demux_enabled = request.form.get('rtspDemuxMpegts') == 'true'
         demux_value = 'true' if demux_enabled else 'false'
 
-        has_path_defaults = subprocess.run(['grep', '-q', '^pathDefaults:', CONFIG_FILE], capture_output=True)
-        has_demux_field = subprocess.run(['grep', '-q', '^  rtspDemuxMpegts:', CONFIG_FILE], capture_output=True)
-
-        if has_demux_field.returncode == 0:
-            subprocess.run(['sed', '-i', f's/^  rtspDemuxMpegts:.*/  rtspDemuxMpegts: {demux_value}/', CONFIG_FILE], check=True)
-        elif has_path_defaults.returncode == 0:
-            subprocess.run(['sed', '-i', f'/^pathDefaults:/a\\  rtspDemuxMpegts: {demux_value}', CONFIG_FILE], check=True)
-        else:
-            subprocess.run(['sed', '-i', f'/^paths:/i pathDefaults:\\n  rtspDemuxMpegts: {demux_value}\\n', CONFIG_FILE], check=True)
+        demux_line = f'  rtspDemuxMpegts: {demux_value}'
+        if not set_config_line('  rtspDemuxMpegts:', demux_line, insert_after='pathDefaults:'):
+            # No pathDefaults block yet: add one in front of `paths:`
+            set_config_line(None, ['pathDefaults:', demux_line, ''], insert_before='paths:')
 
         mtx_restart_checked()
         time.sleep(3)
@@ -10943,15 +11239,18 @@ if not os.path.exists(TEST_VIDEO_DIR):
 @app.route('/api/test/upload', methods=['POST'])
 @login_required
 def upload_test_video():
-    """Upload test video"""
+    """Upload test video (admin only)"""
+    if session.get('role') != 'admin':
+        return jsonify({'success': False, 'error': 'Admin privileges required'}), 403
     if 'test_file' not in request.files:
         return jsonify({'success': False, 'error': 'No file'}), 400
     file = request.files['test_file']
     if file.filename == '':
         return jsonify({'success': False, 'error': 'No file selected'}), 400
-    if not file.filename.endswith('.ts'):
+    # Never use the client's raw name: it can carry path parts like ../
+    filename = secure_filename(file.filename)
+    if not filename.endswith('.ts') or filename == '.ts':
         return jsonify({'success': False, 'error': 'Only .ts files'}), 400
-    filename = file.filename
     filepath = os.path.join(TEST_VIDEO_DIR, filename)
     try:
         file.save(filepath)
@@ -10980,7 +11279,12 @@ def list_test_files():
 @app.route('/api/test/delete/<filename>', methods=['POST'])
 @login_required
 def delete_test_file(filename):
-    """Delete test file"""
+    """Delete test file (admin only)"""
+    if session.get('role') != 'admin':
+        return jsonify({'success': False, 'error': 'Admin privileges required'}), 403
+    # Same cleaning as upload: a name that changes when cleaned is not one of ours
+    if secure_filename(filename) != filename:
+        return jsonify({'success': False, 'error': 'Invalid file name'}), 400
     try:
         # Protect truck_60.ts - required for upgrade verification tests
         if filename == 'truck_60.ts':
@@ -10997,7 +11301,11 @@ def delete_test_file(filename):
 @app.route('/api/test/optimize/<filename>', methods=['POST'])
 @login_required
 def optimize_test_file(filename):
-    """Optimize test file with FFmpeg for better compatibility"""
+    """Optimize test file with FFmpeg for better compatibility (admin only)"""
+    if session.get('role') != 'admin':
+        return jsonify({'success': False, 'error': 'Admin privileges required'}), 403
+    if secure_filename(filename) != filename:
+        return jsonify({'success': False, 'error': 'Invalid file name'}), 400
     try:
         input_path = os.path.join(TEST_VIDEO_DIR, filename)
         if not os.path.exists(input_path) or not filename.endswith('.ts'):
@@ -12209,7 +12517,7 @@ def toggle_protocol():
             return jsonify({'success': False, 'error': 'Invalid protocol'}), 400
         
         value = 'yes' if enabled else 'no'
-        subprocess.run(['sed', '-i', f's/^{protocol}: .*/{protocol}: {value}/', CONFIG_FILE], check=True)
+        set_config_line(f'{protocol}:', f'{protocol}: {value}')
 
         # Turning WebRTC on also pins its signalling to loopback. Installs made
         # before WebRTC was exposed still carry `webrtcAddress: :8889` from the
@@ -12221,9 +12529,9 @@ def toggle_protocol():
         if protocol == 'webrtc' and enabled:
             try:
                 current = str(read_yaml_field('webrtcAddress', ':8889') or ':8889')
-                port = current.rsplit(':', 1)[-1] or '8889'
+                port = config_port(current.rsplit(':', 1)[-1] or '8889', 'webrtcAddress')
                 if not current.startswith('127.0.0.1'):
-                    subprocess.run(['sed', '-i', f's/^webrtcAddress: .*/webrtcAddress: 127.0.0.1:{port}/', CONFIG_FILE], check=True)
+                    set_config_line('webrtcAddress:', f'webrtcAddress: 127.0.0.1:{port}')
                     print(f"✓ WebRTC signalling bound to 127.0.0.1:{port} (was {current})", flush=True)
             except Exception as e:
                 print(f"Warning: could not pin webrtcAddress to loopback: {e}", flush=True)
@@ -13178,6 +13486,15 @@ def rollback_webeditor():
         if not os.path.exists(backup_path):
             return jsonify({'success': False, 'error': 'Backup file not found'}), 404
         
+        # A build from before password hashing cannot read hashed passwords: without this every
+        # login would fail after the restart (ops #646). Done first, so a failure leaves the
+        # current version running with logins that still work.
+        passwords_reset = []
+        if not build_understands_hashed_passwords(backup_path):
+            passwords_reset = reset_hashed_passwords_for_old_build()
+            if passwords_reset is None:
+                return jsonify({'success': False, 'error': 'Rollback stopped: could not save new passwords to ' + INITIAL_PASSWORD_FILE + '. Nothing was changed.'}), 500
+
         # Backup current version before rollback
         current_backup = webeditor_file + f'.backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
         shutil.copy2(webeditor_file, current_backup)
@@ -13202,12 +13519,19 @@ def rollback_webeditor():
         # Restart onto the restored file (after the response goes out)
         restarted = schedule_editor_self_restart()
 
-        return jsonify({
+        result = {
             'success': True,
             'restored_version': restored_version,
             'backup_of_current': current_backup,
-            'restarted': restarted
-        })
+            'restarted': restarted,
+            'passwords_reset': passwords_reset
+        }
+        if passwords_reset:
+            result['password_file'] = INITIAL_PASSWORD_FILE
+            result['notice'] = ('That version is older than password hashing, so every account got a new password: '
+                                + ', '.join(passwords_reset) + '. A server admin reads them as root in '
+                                + INITIAL_PASSWORD_FILE + '. Update again later to store them hashed.')
+        return jsonify(result)
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -13401,6 +13725,23 @@ def remove_firewall_rule():
 
 MEDIAMTX_GITHUB_API = 'https://api.github.com/repos/bluenviron/mediamtx/releases/latest'
 MEDIAMTX_BINARY = '/usr/local/bin/mediamtx'
+
+# Everything this console downloads and then runs as root is checked against a SHA-256 first
+# (ops #623). MediaMTX publishes a checksums.sha256 with every release; the GStreamer plugin
+# and NetBird's install script are pinned in this file.
+def sha256_hex(data):
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
+def parse_checksums(text):
+    """Parse sha256sum output ('<hex> *<name>' or '<hex>  <name>' per line) into {name: hex}."""
+    out = {}
+    for line in (text or '').splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and re.fullmatch(r'[0-9a-fA-F]{64}', parts[0]):
+            out[parts[1].strip().lstrip('*')] = parts[0].lower()
+    return out
 
 # Which release asset this host can actually run. Upstream names them
 # mediamtx_<ver>_linux_{amd64,arm64,armv7,armv6}.tar.gz — note arm64, NOT the
@@ -13701,6 +14042,23 @@ def mtx_restart_checked(timeout=25):
     return res
 
 
+def mtx_selinux_relabel(path):
+    """Reset the SELinux label of path to the policy default, when restorecon exists.
+
+    shutil.copy2 carries the source's label along, so a binary staged in /tmp lands in
+    /usr/local/bin as user_tmp_t and systemd then cannot start it (status=203/EXEC on
+    Rocky 9, SELinux Enforcing). Best effort: boxes without SELinux have no restorecon."""
+    restorecon = shutil.which('restorecon') or next(
+        (p for p in ('/usr/sbin/restorecon', '/sbin/restorecon') if os.path.exists(p)), None)
+    if not restorecon:
+        return False
+    try:
+        r = subprocess.run([restorecon, path], capture_output=True, timeout=10)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def mtx_install_binary(src_path):
     """Back up the current MediaMTX binary and install src_path over it.
     Returns the backup path ('' if there was nothing to back up). Raises on
@@ -13712,6 +14070,7 @@ def mtx_install_binary(src_path):
             shutil.copy2(MEDIAMTX_BINARY, backup)
         shutil.copy2(src_path, MEDIAMTX_BINARY)
         os.chmod(MEDIAMTX_BINARY, 0o755)
+        mtx_selinux_relabel(MEDIAMTX_BINARY)
         return backup
 
     # Broker path: stage the candidate into an editor-owned, broker-writable dir
@@ -13875,9 +14234,36 @@ def upgrade_mediamtx():
         })
         
         with urllib.request.urlopen(req, timeout=60, context=ctx) as response:
-            with open(tmp_tar, 'wb') as f:
-                f.write(response.read())
-        
+            tar_bytes = response.read()
+
+        # Check the download against the SHA-256 MediaMTX publishes with the release
+        # before it is written out or unpacked (ops #623). Fail closed.
+        tar_name = download_url.rsplit('/', 1)[-1]
+        sums_url = ''
+        for asset in data.get('assets', []):
+            if asset.get('name') == 'checksums.sha256':
+                sums_url = asset.get('browser_download_url', '')
+                break
+        if not sums_url:
+            return jsonify({'success': False, 'error':
+                            f'MediaMTX {remote_version or "latest"} has no checksums.sha256 to verify '
+                            'the download against. Nothing was changed.'}), 400
+        sreq = urllib.request.Request(sums_url, headers={
+            'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION
+        })
+        with urllib.request.urlopen(sreq, timeout=30, context=ctx) as sresp:
+            expected_sha = parse_checksums(sresp.read().decode('utf-8', 'replace')).get(tar_name)
+        if not expected_sha:
+            return jsonify({'success': False, 'error':
+                            f'The MediaMTX checksum list has no entry for {tar_name}. '
+                            'Nothing was changed.'}), 400
+        if sha256_hex(tar_bytes) != expected_sha:
+            return jsonify({'success': False, 'error':
+                            f'Checksum mismatch for {tar_name}: the download does not match what '
+                            'MediaMTX published. Nothing was changed.'}), 400
+        with open(tmp_tar, 'wb') as f:
+            f.write(tar_bytes)
+
         # Step 5: Extract binary
         if os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir)
@@ -14352,6 +14738,11 @@ def rollback_status():
 # new build, which lives under its own assets/gst/el<N>/ path.
 GST_PLUGIN_DIR_RHEL = '/usr/lib64/gstreamer-1.0'
 GST_RTSPSINK_SO_REPO_PATH = 'config-editor/assets/gst/el{el}/libgstrtspclientsink.so'
+# SHA-256 of each committed .so, by EL major (ops #623). The download is refused unless it matches.
+# Rebuilding the .so means updating this too; tests/test_download_pins.py fails if they drift apart.
+GST_RTSPSINK_SO_SHA256 = {
+    '9': 'b1f4b5a5c78a980792f8907e2614d5584f743e3db838602bd040a6f82d9c8518',
+}
 
 # Editor-owned plugin dir, used when /usr/lib64/gstreamer-1.0 isn't writable.
 # infra-TAK hardened boxes run this editor as an unprivileged user with no sudo,
@@ -14661,6 +15052,12 @@ def deps_update():
                         so_bytes = resp.read()
                     if len(so_bytes) < 10000:
                         raise ValueError('downloaded .so too small')
+                    pinned_sha = GST_RTSPSINK_SO_SHA256.get(str(el))
+                    if not pinned_sha:
+                        raise ValueError(f'no pinned checksum for the el{el} plugin')
+                    if sha256_hex(so_bytes) != pinned_sha:
+                        raise ValueError('checksum mismatch: the downloaded plugin is not the one '
+                                         'this console version expects (nothing was installed)')
                     # Prefer the system dir when we can write it (standalone,
                     # running as root) so every GStreamer process on the box
                     # picks it up. Otherwise use our own dir, which needs no
@@ -15203,6 +15600,37 @@ def rtsp_transport_line(source_url):
 # --- Netbird connectivity (box-level; underpins the KLV "Netbird" transport) -
 # Mike self-hosts Netbird, so joining needs his management URL + a setup key.
 # Joined once per box; every KLV source then reaches the aggregator over the mesh.
+# NetBird's own install script, pinned to a release tag and a SHA-256 (ops #623). On apt/dnf it
+# only adds NetBird's GPG-signed package repo and installs from it. Bump both together after
+# reading the new script; tests/test_download_pins.py checks the URL shape.
+NETBIRD_INSTALL_URL = 'https://github.com/netbirdio/netbird/releases/download/v0.82.1/install.sh'
+NETBIRD_INSTALL_SHA256 = 'fbd7c034730683ee09f82db3ae50617c9e60d54418b8b0e1ead9a79922b905b7'
+
+
+def install_netbird_agent():
+    """Download NetBird's pinned install script, verify its SHA-256, then run it as root.
+    Returns None on success or an error string."""
+    import tempfile
+    import urllib.request
+    import ssl
+    ctx = ssl.create_default_context()
+    req = urllib.request.Request(NETBIRD_INSTALL_URL, headers={'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION})
+    with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
+        script = resp.read()
+    if sha256_hex(script) != NETBIRD_INSTALL_SHA256:
+        return ('The NetBird install script does not match the checksum this console pins, so it was '
+                'not run. Install the NetBird agent yourself, then connect again.')
+    tmp_dir = tempfile.mkdtemp(prefix='nb-install-')  # mode 0700, ours alone
+    try:
+        path = os.path.join(tmp_dir, 'install.sh')
+        with open(path, 'wb') as f:
+            f.write(script)
+        subprocess.run(['sudo', 'sh', path], capture_output=True, text=True, timeout=180)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    return None
+
+
 NETBIRD_LINK_FILE = '/opt/mediamtx-webeditor/netbird_link.json'  # remembers mgmt URL (never the key)
 
 
@@ -15255,8 +15683,9 @@ def api_netbird_connect():
         return jsonify({'success': False, 'error': 'Management URL is required (https://… for self-hosted Netbird)'}), 400
     try:
         if not shutil.which('netbird'):
-            subprocess.run('curl -fsSL https://pkgs.netbird.io/install.sh | sudo sh',
-                           shell=True, capture_output=True, text=True, timeout=180)
+            nb_err = install_netbird_agent()
+            if nb_err:
+                return jsonify({'success': False, 'error': nb_err}), 500
             if not shutil.which('netbird'):
                 return jsonify({'success': False, 'error': 'Netbird agent install failed'}), 500
         up = subprocess.run(['sudo', 'netbird', 'up', '--management-url', mgmt, '--setup-key', key],
@@ -15804,6 +16233,24 @@ def api_edit_external_source():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+# A Linux interface name is at most 15 characters. The conf file is read by a root script,
+# so nothing else (no space, quote, `;`, `$`, backtick) may ever be written into it.
+SIMULATOR_INTERFACE_RE = r'[A-Za-z0-9_][A-Za-z0-9_.:@-]{0,14}'
+
+def valid_simulator_interface(name):
+    return bool(re.fullmatch(SIMULATOR_INTERFACE_RE, str(name or '')))
+
+def update_simulator_conf_text(text, source_ip, interface):
+    """Set SOURCE_IP and INTERFACE in ku_band_simulator.conf text. Raises ValueError on a bad value."""
+    import ipaddress
+    if not valid_simulator_interface(interface):
+        raise ValueError('Invalid network interface name')
+    source_ip = str(ipaddress.ip_address(str(source_ip)))  # ValueError if it is not an IP address
+    text = re.sub(r'^SOURCE_IP=.*', lambda m: f'SOURCE_IP={source_ip}', text, flags=re.MULTILINE)
+    text = re.sub(r'^INTERFACE=.*', lambda m: f'INTERFACE={interface}', text, flags=re.MULTILINE)
+    return text
+
+
 def _get_default_network_interface():
     """Return the default route interface (e.g. ens3, eth0). Used when eth0 does not exist (common on cloud VPS)."""
     try:
@@ -15845,6 +16292,8 @@ def api_ku_band_simulator_on_for_source():
         data = request.get_json() or {}
         source_url = (data.get('sourceUrl') or '').strip()
         interface = (data.get('interface') or '').strip() or 'eth0'
+        if not valid_simulator_interface(interface):
+            return jsonify({'ok': False, 'error': 'Invalid network interface name'}), 400
         # On many VPS the default interface is ens3, ens18, etc. If eth0 doesn't exist, use default route interface.
         if interface == 'eth0':
             r = subprocess.run(['ip', 'link', 'show', 'eth0'], capture_output=True, timeout=3)
@@ -15870,8 +16319,7 @@ def api_ku_band_simulator_on_for_source():
         if not os.path.isfile(conf_path) and os.path.isfile(example_path):
             with open(example_path, 'r') as f:
                 conf_content = f.read()
-            conf_content = re.sub(r'^SOURCE_IP=.*', f'SOURCE_IP={source_ip}', conf_content, flags=re.MULTILINE)
-            conf_content = re.sub(r'^INTERFACE=.*', f'INTERFACE={interface}', conf_content, flags=re.MULTILINE)
+            conf_content = update_simulator_conf_text(conf_content, source_ip, interface)
             try:
                 with open(conf_path, 'w') as f:
                     f.write(conf_content)
@@ -15882,13 +16330,12 @@ def api_ku_band_simulator_on_for_source():
             if os.path.isfile(conf_path):
                 with open(conf_path, 'r') as f:
                     conf_content = f.read()
-                conf_content = re.sub(r'^SOURCE_IP=.*', f'SOURCE_IP={source_ip}', conf_content, flags=re.MULTILINE)
-                conf_content = re.sub(r'^INTERFACE=.*', f'INTERFACE={interface}', conf_content, flags=re.MULTILINE)
+                conf_content = update_simulator_conf_text(conf_content, source_ip, interface)
                 with open(conf_path, 'w') as f:
                     f.write(conf_content)
             else:
                 with open(conf_path, 'w') as f:
-                    f.write(f'# Auto-generated for source\nSOURCE_IP={source_ip}\nINTERFACE={interface}\n')
+                    f.write(update_simulator_conf_text('# Auto-generated for source\nSOURCE_IP=\nINTERFACE=\n', source_ip, interface))
         return _run_simulator_script('on')
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -16030,6 +16477,29 @@ if(whep){{dbg("trying WebRTC first");startWebRTC(start);}}else{{dbg("WebRTC not 
 </script></body></html>'''
     return Response(html, content_type='text/html')
 
+SHARE_HLS_FILE_RE = re.compile(r'^[A-Za-z0-9_.~-]+$')
+
+
+def share_hls_path_allowed(stream, subpath):
+    """True only for a file directly inside the shared stream's own HLS folder.
+
+    The proxy adds the console's own viewer credential, so this check is the only
+    thing between a share link and every other stream. A plain startswith() let a
+    link for cam1 open cam10 and cam1-private; matching `stream + '/'` fixes that,
+    and the file part must be one plain segment so it cannot be `..` or reach a
+    nested stream (a link for `live` must not open `live/drone1`). MediaMTX serves
+    HLS flat (index.m3u8, stream.m3u8, init.mp4, segments), so nothing legitimate
+    needs a deeper path.
+    """
+    if not is_valid_stream_name(stream):
+        return False
+    prefix = stream + '/'
+    if not (subpath or '').startswith(prefix):
+        return False
+    name = subpath[len(prefix):]
+    return bool(SHARE_HLS_FILE_RE.fullmatch(name)) and name not in ('.', '..')
+
+
 @app.route('/shared-hls/<token>/<path:subpath>')
 def shared_hls_proxy(token, subpath):
     """Proxy HLS for shared link: validate token then stream from MediaMTX."""
@@ -16039,7 +16509,7 @@ def shared_hls_proxy(token, subpath):
         return 'Link expired or revoked', 403
     if info.get('expires') and info['expires'] < time.time():
         return 'Link expired', 403
-    if not subpath.startswith(info['stream']):
+    if not share_hls_path_allowed(info['stream'], subpath):
         return 'Forbidden', 403
     try:
         data, ct = hls_fetch_for_share(subpath, request.query_string)

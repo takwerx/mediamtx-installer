@@ -9,8 +9,13 @@ CONFIG="${SCRIPT_DIR}/ku_band_simulator.conf"
 if [ ! -f "$CONFIG" ]; then
   INTERFACE="${INTERFACE:-eth0}"
 else
-  source "$CONFIG"
+  # Read the config as data (this script runs as root): never `source` it.
+  INTERFACE="$(grep -m1 -E '^INTERFACE=' "$CONFIG" | cut -d= -f2- | tr -d '"\047\r' || true)"
   INTERFACE="${INTERFACE:-eth0}"
+fi
+if ! [[ "$INTERFACE" =~ ^[A-Za-z0-9_][A-Za-z0-9_.:@-]{0,14}$ ]]; then
+  echo "INTERFACE is not a valid interface name."
+  exit 1
 fi
 
 # Remove netem from ifb0 first, then ingress from the real interface

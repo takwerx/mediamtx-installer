@@ -97,13 +97,38 @@ if ! python3 -m venv --clear --system-site-packages "$VENV_DIR"; then
     echo "Install python3-venv (apt-get install python3-venv) and re-run this script."
     exit 1
 fi
-if ! "$VENV_DIR/bin/pip" install --quiet --disable-pip-version-check Flask ruamel.yaml requests psutil; then
+# Exact versions with a SHA-256 for every file (requirements*.txt), so pip refuses a swapped or
+# tampered package (ops #623). They sit beside this script (the same place the editor file is
+# looked for below).
+REQ_DIR=""
+for d in "$(dirname "$0")" "./config-editor" "."; do
+    if [ -f "$d/requirements.txt" ]; then REQ_DIR="$d"; break; fi
+done
+if [ -z "$REQ_DIR" ]; then
+    echo ""
+    echo "ERROR: requirements.txt (the pinned Python packages) was not found next to this script."
+    echo "Get the whole repository (git clone, or the release zip) and re-run this script."
+    exit 1
+fi
+PIP_INSTALL=("$VENV_DIR/bin/pip" install --quiet --disable-pip-version-check --require-hashes)
+if ! "${PIP_INSTALL[@]}" -r "$REQ_DIR/requirements.txt"; then
     echo ""
     echo "ERROR: Could not install the web editor's Python packages (see pip's output above)."
+    echo "If pip reports a hash mismatch, do not work around it: the download does not match what we pinned."
     echo "Fix that and re-run this script."
     exit 1
 fi
-echo "✓ Python packages installed (Flask, ruamel.yaml, requests, psutil)"
+# psutil: apt's python3-psutil is already visible in the venv on Ubuntu/Debian, so only pip-install
+# it when it is missing (Rocky). Keeps armv7 boards, which have no psutil wheel, working.
+if ! "$VENV_DIR/bin/python3" -c 'import psutil' > /dev/null 2>&1; then
+    if ! "${PIP_INSTALL[@]}" -r "$REQ_DIR/requirements-psutil.txt"; then
+        echo ""
+        echo "ERROR: Could not install psutil (see pip's output above)."
+        echo "Fix that and re-run this script."
+        exit 1
+    fi
+fi
+echo "✓ Python packages installed (Flask, ruamel.yaml, requests, psutil), versions and hashes pinned"
 
 echo ""
 echo "=========================================="
@@ -158,6 +183,28 @@ elif [ -f "./truck_60.ts" ]; then
     echo "✓ Test video (truck_60.ts) installed"
 else
     echo "ℹ  No test video found (optional - upload via web editor later)"
+fi
+
+# First login: a random admin password, made now and shown once at the end. A box that
+# already has a users.json keeps its logins (the editor itself retires a leftover
+# admin/admin when it starts).
+ADMIN_PW=""
+if [ ! -f "$WEB_EDITOR_DIR/users.json" ]; then
+    ADMIN_PW="$("$VENV_DIR/bin/python3" -c 'import secrets; print(secrets.token_urlsafe(12))')"
+    (umask 077; ADMIN_PW="$ADMIN_PW" WEB_EDITOR_DIR="$WEB_EDITOR_DIR" "$VENV_DIR/bin/python3" - <<'PYEOF'
+import json, os
+d = os.environ['WEB_EDITOR_DIR']
+pw = os.environ['ADMIN_PW']
+with open(os.path.join(d, 'users.json'), 'w') as f:
+    json.dump([{'username': 'admin', 'password': pw, 'role': 'admin'}], f, indent=2)
+with open(os.path.join(d, 'initial_admin_password.txt'), 'w') as f:
+    f.write('# MediaMTX web editor: first login. Sign in, then change this password (Account tab).\n')
+    f.write('# This file is deleted when the password is changed.\n')
+    f.write('admin: ' + pw + '\n')
+PYEOF
+    )
+    chmod 600 "$WEB_EDITOR_DIR/users.json" "$WEB_EDITOR_DIR/initial_admin_password.txt"
+    echo "✓ Admin login created"
 fi
 
 echo ""
@@ -222,10 +269,17 @@ if systemctl is-active --quiet mediamtx-webeditor; then
     echo ""
     echo "  Web Editor: http://<your-server-ip>:5000"
     echo ""
-    echo "  Default Login:"
-    echo "    Username: admin"
-    echo "    Password: admin"
-    echo "    (Change after first login!)"
+    if [ -n "$ADMIN_PW" ]; then
+        echo "  First Login (shown once, write it down):"
+        echo "    Username: admin"
+        echo "    Password: $ADMIN_PW"
+        echo "    Also saved, root only, in $WEB_EDITOR_DIR/initial_admin_password.txt"
+        echo "    (it is deleted when you change the password)"
+    else
+        echo "  Login: your existing web editor logins are unchanged."
+        echo "    If the old admin / admin login was still in use, the editor replaced it with a"
+        echo "    random password: see $WEB_EDITOR_DIR/initial_admin_password.txt (root only)."
+    fi
     echo ""
     echo "  Service Commands:"
     echo "    Status:  systemctl status mediamtx-webeditor"
@@ -233,7 +287,7 @@ if systemctl is-active --quiet mediamtx-webeditor; then
     echo "    Restart: systemctl restart mediamtx-webeditor"
     echo ""
     echo "  Next Steps:"
-    echo "    1. Login and change default password"
+    echo "    1. Login and change the password"
     echo "    2. Configure streaming users in Users & Auth tab"
     echo "    3. Install Caddy for HTTPS (optional)"
     echo ""
