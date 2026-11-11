@@ -14533,6 +14533,77 @@ def test_mediamtx_upgrade():
             test_proc.terminate()
         return jsonify({'success': False, 'error': str(e)})
 
+def mtx_remove_config_field(text, field_path):
+    """Remove one YAML field that an older MediaMTX reports as unknown (ops #647).
+
+    MediaMTX names a nested field with a dotted path ('pathDefaults.moqTransport');
+    a top-level one is just its name. Walks the indentation: finds each parent key
+    in turn, then deletes the last key together with everything nested under it.
+    A parent key may itself contain dots (a path name such as 'cam.1'), so every
+    split of the remaining path is tried. Returns (new_text, True) when something
+    was removed, else (text, False). Plain text surgery, so comments and the
+    order of the file stay as they were."""
+    import re
+    lines = text.splitlines(keepends=True)
+    key_re = re.compile(r'^(\s*)(?:"([^"]+)"|\'([^\']+)\'|([^\s#:][^:#]*?))\s*:(?:\s|$)')
+
+    def parse(i):
+        m = key_re.match(lines[i])
+        if not m:
+            return None
+        return len(m.group(1)), (m.group(2) or m.group(3) or m.group(4))
+
+    def block_end(i, indent):
+        j = i + 1
+        while j < len(lines):
+            st = lines[j].strip()
+            if st and not st.startswith('#'):
+                ind = len(lines[j]) - len(lines[j].lstrip())
+                if ind < indent or (ind == indent and not st.startswith('- ')):
+                    break
+            j += 1
+        while j > i + 1 and (not lines[j - 1].strip() or lines[j - 1].strip().startswith('#')):
+            j -= 1   # trailing blank lines and comments belong to what follows
+        return j
+
+    def find(lo, hi, parts):
+        child_indent = None
+        i = lo
+        while i < hi:
+            st = lines[i].strip()
+            if not st or st.startswith('#'):
+                i += 1
+                continue
+            parsed = parse(i)
+            if parsed is None:
+                i += 1
+                continue
+            indent, key = parsed
+            if child_indent is None:
+                child_indent = indent
+            if indent != child_indent:
+                i += 1
+                continue
+            end = block_end(i, indent)
+            for k in range(1, len(parts) + 1):
+                if key == '.'.join(parts[:k]):
+                    if k == len(parts):
+                        return i, end
+                    hit = find(i + 1, end, parts[k:])
+                    if hit:
+                        return hit
+            i = end
+        return None
+
+    parts = [p for p in field_path.split('.') if p]
+    if not parts:
+        return text, False
+    hit = find(0, len(lines), parts)
+    if not hit:
+        return text, False
+    return ''.join(lines[:hit[0]] + lines[hit[1]:]), True
+
+
 @app.route('/api/mediamtx/version/rollback', methods=['POST'])
 @admin_required
 def rollback_mediamtx():
@@ -14587,7 +14658,7 @@ def rollback_mediamtx():
         backup_config_file('rolling back MediaMTX')
 
         # Restore binary
-        mtx_install_binary(latest_backup)
+        newer_backup = mtx_install_binary(latest_backup)   # backup of the binary we are leaving
         print(f"ROLLBACK: Binary restored from {latest_backup}", flush=True)
         
         # Restore YAML if backup exists
@@ -14598,7 +14669,26 @@ def rollback_mediamtx():
         # Try to start — if it fails, auto-fix unknown fields
         fields_removed = []
         max_fix_attempts = 5
-        
+
+        def give_up(reason):
+            """The older binary cannot run this config: put back the newer binary and the
+            config from before the rollback, so MediaMTX is never left down (ops #647)."""
+            print(f"ROLLBACK: {reason}; putting the newer binary and config back", flush=True)
+            back = 'the newer version is back'
+            try:
+                mtx_systemctl('stop')
+                time.sleep(1)
+                if newer_backup and os.path.exists(newer_backup):
+                    mtx_install_binary(newer_backup)
+                else:
+                    back = 'the old binary could not be swapped back (no copy of the newer one)'
+                mtx_copy_priv(pre_rollback_yaml, CONFIG_FILE)
+                mtx_systemctl('start')
+            except Exception as e:
+                back = f'putting the newer version back failed: {e}'
+            return jsonify({'success': False, 'rolled_back': False, 'fields_removed': fields_removed,
+                            'error': f'MediaMTX {restored_version or "(older version)"} cannot start with this config: {reason}. Nothing was rolled back; {back}.'}), 500
+
         for attempt in range(max_fix_attempts + 1):
             mtx_systemctl('start')
             time.sleep(3)
@@ -14610,12 +14700,7 @@ def rollback_mediamtx():
                 break
             
             if attempt >= max_fix_attempts:
-                # Give up — restore the pre-rollback state
-                print(f"ROLLBACK: Failed after {max_fix_attempts} fix attempts, restoring pre-rollback state", flush=True)
-                mtx_copy_priv(pre_rollback_yaml, CONFIG_FILE)
-                # We need to restore the newer binary too since old one won't start
-                # Find the newest non-backup mediamtx or re-download
-                return jsonify({'success': False, 'error': f'MediaMTX failed to start after rollback. Removed fields {fields_removed} but still failing.'}), 500
+                return give_up(f'still failing after removing {fields_removed}')
             
             # Parse error from journal
             log_result = subprocess.run(
@@ -14623,30 +14708,28 @@ def rollback_mediamtx():
                 capture_output=True, text=True
             )
             
-            # Look for "json: unknown field "fieldName""
+            # Look for "json: unknown field "fieldName"" (nested ones come as "parent.field")
             import re
             match = re.search(r'unknown field "([^"]+)"', log_result.stdout)
-            if match:
-                bad_field = match.group(1)
-                print(f"ROLLBACK: Removing incompatible field '{bad_field}' from YAML (attempt {attempt+1})", flush=True)
-                
-                # Remove the field from YAML
-                with open(CONFIG_FILE, 'r') as f:
-                    lines = f.readlines()
-                with open(CONFIG_FILE, 'w') as f:
-                    for line in lines:
-                        # Match top-level field (no leading whitespace)
-                        if line.startswith(bad_field + ':'):
-                            fields_removed.append(bad_field)
-                            continue
-                        f.write(line)
-                
-                # Stop before retry
-                mtx_systemctl('stop')
-                time.sleep(1)
-            else:
+            if not match:
                 # Unknown error, not a field issue
-                return jsonify({'success': False, 'error': f'MediaMTX failed to start: {log_result.stdout[-200:]}'}), 500
+                return give_up(f'start failed: {log_result.stdout[-200:].strip()}')
+            bad_field = match.group(1)
+            print(f"ROLLBACK: Removing incompatible field '{bad_field}' from YAML (attempt {attempt+1})", flush=True)
+
+            # Remove the field (and anything nested under it) from the YAML
+            with open(CONFIG_FILE, 'r') as f:
+                config_text = f.read()
+            config_text, removed = mtx_remove_config_field(config_text, bad_field)
+            if not removed:
+                return give_up(f'could not find the unknown field {bad_field} in the config')
+            with open(CONFIG_FILE, 'w') as f:
+                f.write(config_text)
+            fields_removed.append(bad_field)
+
+            # Stop before retry
+            mtx_systemctl('stop')
+            time.sleep(1)
         
         # Clean up
         try:
