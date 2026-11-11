@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 import secrets
 import hmac
 import threading
+import ipaddress
 import json
 import re
 import socket
@@ -834,8 +835,29 @@ LOGIN_WINDOW_SECONDS = 300
 _login_failures = {}
 _login_failures_lock = threading.Lock()
 
+def _client_address():
+    """Address to count login failures against.
+
+    Behind a reverse proxy on the same box (Caddy on infra-TAK) every request arrives from
+    127.0.0.1, so one person's typos would lock the form for everyone. Only then, and only
+    then, read X-Forwarded-For: the proxy puts the real address last, and anything the caller
+    sent sits to its left. Any other peer address is used as it is, so a caller cannot pick
+    its own bucket by sending the header itself.
+    """
+    peer = str(request.remote_addr or '?')
+    try:
+        if not ipaddress.ip_address(peer).is_loopback:
+            return peer
+    except ValueError:
+        return peer
+    forwarded = request.headers.get('X-Forwarded-For', '').split(',')[-1].strip()
+    try:
+        return str(ipaddress.ip_address(forwarded))
+    except ValueError:
+        return peer
+
 def _login_keys(username):
-    return ('ip:' + str(request.remote_addr or '?'), 'user:' + str(username or '').strip().lower()[:64])
+    return ('ip:' + _client_address(), 'user:' + str(username or '').strip().lower()[:64])
 
 def login_wait_seconds(username, now=None):
     """Seconds this login must wait, or 0 if it may try."""
