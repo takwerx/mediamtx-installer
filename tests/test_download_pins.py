@@ -306,6 +306,42 @@ class PythonPackagePinTest(unittest.TestCase):
                     missing.add('%s (needed by %s==%s)' % (req.name, name, ver))
         self.assertEqual(sorted(missing), [], 'not pinned with == and hashes in requirements.txt')
 
+    def test_every_pinned_release_supports_python_39(self):
+        # Rocky 9 runs Python 3.9. A pin whose release needs 3.10 or newer makes the whole
+        # `pip install --require-hashes` fail there (urllib3 2.8.0 and requests 2.33.0 did, ops #683).
+        # Needs network; skipped without.
+        try:
+            from packaging.specifiers import SpecifierSet
+        except ImportError:
+            from pip._vendor.packaging.specifiers import SpecifierSet
+        import json
+        pinned = {}
+        for rel in ('config-editor/requirements.txt', 'config-editor/requirements-psutil.txt'):
+            for m in re.finditer(r'(?m)^([A-Za-z0-9_.\-]+)==([^\s\\]+)', self._text(rel)):
+                pinned[m.group(1)] = m.group(2)
+        self.assertTrue(pinned)
+        too_new = []
+        for name, ver in sorted(pinned.items()):
+            try:
+                with urllib.request.urlopen('https://pypi.org/pypi/%s/%s/json' % (name, ver), timeout=30) as r:
+                    spec = json.load(r)['info'].get('requires_python') or ''
+            except OSError as e:
+                self.skipTest('PyPI not reachable: %s' % e)
+            if spec and not SpecifierSet(spec).contains('3.9.25'):
+                too_new.append('%s==%s needs Python %s' % (name, ver, spec))
+        self.assertEqual(too_new, [], 'pinned releases that do not install on Python 3.9 (Rocky 9)')
+
+    def test_dependabot_pip_updates_go_to_dev_and_skip_python_310_releases(self):
+        from ruamel.yaml import YAML
+        cfg = YAML(typ='safe').load(self._text('.github/dependabot.yml'))
+        pip = [u for u in cfg['updates'] if u['package-ecosystem'] == 'pip']
+        self.assertEqual(len(pip), 1)
+        self.assertEqual(pip[0]['target-branch'], 'dev')
+        self.assertEqual(pip[0]['directory'], '/config-editor')
+        ignored = {i['dependency-name']: i.get('versions') for i in pip[0]['ignore']}
+        self.assertEqual(ignored.get('urllib3'), ['>=2.7.0'])
+        self.assertEqual(ignored.get('requests'), ['>=2.33.0'])
+
     def test_installer_installs_only_with_require_hashes(self):
         src = self._text('config-editor/Install_MediaMTX_Config_Editor.sh')
         self.assertIn('--require-hashes', src)

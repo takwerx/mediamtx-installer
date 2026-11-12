@@ -203,6 +203,57 @@ def test_lock_also_follows_the_username_across_addresses(ed):
     assert r.status_code == 429
 
 
+def test_behind_a_proxy_one_address_does_not_lock_another(ed):
+    """Behind Caddy every request comes from 127.0.0.1; the real address is in X-Forwarded-For (ops #652)."""
+    ed.load_users()
+    pw = first_password(ed)
+    for i in range(ed.LOGIN_MAX_FAILURES):
+        ed.app.test_client().post('/login', data={'username': 'nobody%d' % i, 'password': 'wrong'},
+                                  environ_overrides={'REMOTE_ADDR': '127.0.0.1'},
+                                  headers={'X-Forwarded-For': '203.0.113.5'})
+    # the first address is locked out ...
+    r = ed.app.test_client().post('/login', data={'username': 'someone', 'password': 'wrong'},
+                                  environ_overrides={'REMOTE_ADDR': '127.0.0.1'},
+                                  headers={'X-Forwarded-For': '203.0.113.5'})
+    assert r.status_code == 429
+    # ... a second address, same proxy, is not
+    r = ed.app.test_client().post('/login', data={'username': 'admin', 'password': pw},
+                                  environ_overrides={'REMOTE_ADDR': '127.0.0.1'},
+                                  headers={'X-Forwarded-For': '198.51.100.7'})
+    assert r.status_code == 302
+
+
+def test_proxy_address_is_the_last_forwarded_entry(ed):
+    """A caller can put anything on the left of X-Forwarded-For; only the proxy's entry counts."""
+    with ed.app.test_request_context('/login', environ_base={'REMOTE_ADDR': '127.0.0.1'},
+                                     headers={'X-Forwarded-For': '9.9.9.9, 203.0.113.5'}):
+        assert ed._client_address() == '203.0.113.5'
+    with ed.app.test_request_context('/login', environ_base={'REMOTE_ADDR': '::1'},
+                                     headers={'X-Forwarded-For': '2001:db8::1'}):
+        assert ed._client_address() == '2001:db8::1'
+
+
+def test_forwarded_header_is_ignored_from_a_non_local_peer(ed):
+    """No proxy in front: a caller must not pick its own failure bucket by sending the header."""
+    ed.load_users()
+    pw = first_password(ed)
+    for i in range(ed.LOGIN_MAX_FAILURES):
+        ed.app.test_client().post('/login', data={'username': 'nobody%d' % i, 'password': 'wrong'},
+                                  environ_overrides={'REMOTE_ADDR': '10.0.0.8'},
+                                  headers={'X-Forwarded-For': '192.0.2.%d' % i})
+    r = ed.app.test_client().post('/login', data={'username': 'admin', 'password': pw},
+                                  environ_overrides={'REMOTE_ADDR': '10.0.0.8'},
+                                  headers={'X-Forwarded-For': '192.0.2.200'})
+    assert r.status_code == 429
+
+
+@pytest.mark.parametrize('header', ['', 'not-an-address', '9.9.9.9, garbage'])
+def test_missing_or_bad_forwarded_header_falls_back_to_the_peer(ed, header):
+    with ed.app.test_request_context('/login', environ_base={'REMOTE_ADDR': '127.0.0.1'},
+                                     headers={'X-Forwarded-For': header} if header else {}):
+        assert ed._client_address() == '127.0.0.1'
+
+
 def test_lock_expires(ed):
     with ed.app.test_request_context('/login', environ_base={'REMOTE_ADDR': '10.1.1.1'}):
         for _ in range(ed.LOGIN_MAX_FAILURES):
