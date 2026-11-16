@@ -61,6 +61,17 @@ Where a doc and what we saw disagree, both are kept.
 - KLV over RTSP needs GStreamer (`rtspclientsink`, `rtpklvpay`). FFmpeg cannot packetize KLV into RTP. SRT carries KLV natively through FFmpeg.
 - 📝 from our notes (CLAUDE.md, `PLAN-v2.1.0-klv-to-cot.md`). Official GStreamer docs for `rtpklvpay` not yet linked here.
 
+### 1.6 MediaMTX v1.21.4 (released 2026-11-15; checked 2026-11-16, ops #818)
+- ✅ verified 2026-11-16 on a throwaway Ubuntu 22.04 box and a throwaway Rocky 9.9 box (SELinux Enforcing), both x86_64, installer from `dev`:
+  - A fresh install gets v1.21.4 (the installer reads `releases/latest`). The service, the web editor and the test stream pass.
+  - The editor's Upgrade (v1.21.3 to v1.21.4), Rollback (back to v1.21.3) and Upgrade again all succeed over HTTP with a real sign-in. The binary keeps the `bin_t` SELinux label on Rocky and no AVC denial is logged.
+  - RTSP, HLS and SRT work on both versions: RTSP read by a viewer with no password on the `teststream` path, HLS, and an SRT stream with a KLV data track (timestamps offset by 5000 s on purpose, since v1.21.4 stops rebasing MPEG-TS timestamps to zero) read back over SRT, RTSP and HLS with the KLV track intact.
+  - A taken SRT UDP port (8890): the service exits at start and systemd retries every 5 s (`Restart=always`, `RestartUSec=5s`); it starts by itself once the port is free. Same as v1.21.3. A fatal UDP read error while running (the new gortsplib behaviour) was not forced on a box.
+- ✅ verified 2026-11-16: v1.21.4 adds two config keys, `udpWriteBufferSize` and `srtMinLatency`. The Rocky installer copies upstream's default config, so a fresh Rocky install on v1.21.4 holds both, and v1.21.3 refuses them (`unknown field`). Rollback's unknown-field fixer removed both (`fields_removed` lists them) and v1.21.3 came back. The Ubuntu installer writes its own config with neither key.
+- ✅ verified 2026-11-16 on a fleet box with CloudTAK (non-root console, editor Upgrade through the broker, v1.20.0 to v1.21.4, then Rollback to v1.20.0): a stream with KLV published to MediaMTX played through CloudTAK's video wall and marker lease both before and after the Upgrade, and after the Rollback (`video-check`: `VIDEO PASS`).
+- 📖 source-checked 2026-11-16: `internal/api/api.go` at v1.21.4 still registers both the old (`/rtspsessions/list`) and the new (`/rtsp/sessions/list`) publisher paths, so the open risk in 1.2 is unchanged. ✅ verified on the Ubuntu box: both names answer 200, and a kick by the old name ends the publisher.
+- 📖 Upstream v1.21.4 notes: RTSP-over-WebSocket messages are capped at 1 MiB (an unauthenticated client could make the server buffer without limit), request bodies with passwords and tokens are no longer written to the debug log, and the API redacts more secrets. No GHSA at release time.
+
 ---
 
 ## 2. Distribution and updates (GitHub)
