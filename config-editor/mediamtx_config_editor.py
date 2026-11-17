@@ -321,6 +321,24 @@ def is_hls_localhost_bound():
         pass
     return False
 
+def hls_live_sync_count():
+    """How many segments behind the live edge the player starts: 5, but never as far
+    back as the playlist is long.
+
+    MediaMTX drops the oldest segment in the playlist about one segment after it
+    listed it. hls.js starts liveSyncDurationCount segments from the end, so a count
+    at or above hlsSegmentCount starts at that oldest segment: a viewer on a slow link
+    asks for it after it is gone, gets 404, and no video starts (ops #900: 3 of 16
+    starts failed on a 3-segment playlist, a count of 4 or 5). One segment of room
+    keeps the first request on a segment that is still there. The default 7-segment
+    playlist, and the Satellite 7x3s preset, still get 5."""
+    try:
+        n = int(str(read_yaml_field('hlsSegmentCount', 7)).split(' #', 1)[0].strip())
+    except (TypeError, ValueError):
+        n = 7
+    return max(1, min(5, n - 1))
+
+
 def hls_player_tuning_js():
     """hls.js constructor options as a JS object literal, matched to hlsVariant.
 
@@ -356,8 +374,8 @@ def hls_player_tuning_js():
                 'liveDurationInfinity:true}')
     return ('{enableWorker:true,lowLatencyMode:false,backBufferLength:30,'
             'maxBufferLength:30,maxMaxBufferLength:60,'
-            'liveSyncDurationCount:5,liveMaxLatencyDurationCount:7,'
-            'liveDurationInfinity:true}')
+            'liveSyncDurationCount:%d,liveMaxLatencyDurationCount:7,'
+            'liveDurationInfinity:true}' % hls_live_sync_count())
 
 
 # Share links (token-based, no-login stream access)
