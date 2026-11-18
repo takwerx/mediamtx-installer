@@ -61,6 +61,21 @@ echo "Installing FFmpeg for HLS support and transcoding..."
 # "epel-release + crb + dnf install ffmpeg" failed on every clean EL9 box, and
 # on EL8 died even earlier because there is no repo named crb there.
 EL_MAJOR=$(rpm -E '%rhel')
+# >>> dnf_retry
+# RPM Fusion's mirrors fall out of sync for a few minutes at a time (every mirror
+# answers 404 for the repodata files; seen Nov 10, 2026, ops #640 and #693). Clean the
+# cache and try again before giving up, so a fresh install does not fail on that.
+dnf_retry() {
+    local tries=${DNF_RETRIES:-5} delay=${DNF_RETRY_DELAY:-60} n=1
+    while ! dnf "$@"; do
+        [ "$n" -lt "$tries" ] || return 1
+        echo "dnf $* failed (try $n of $tries). Cleaning the cache, waiting ${delay}s, trying again..."
+        dnf clean all >/dev/null 2>&1 || true
+        sleep "$delay"
+        n=$((n + 1))
+    done
+}
+# <<< dnf_retry
 ffmpeg_failed() {
     echo ""
     echo "ERROR: Could not install FFmpeg: $1"
@@ -89,10 +104,10 @@ else
         || subscription-manager repos --enable "codeready-builder-for-rhel-${EL_MAJOR}-$(uname -m)-rpms" \
         || ffmpeg_failed "could not enable the CRB/PowerTools repo"
     if ! rpm -q rpmfusion-free-release >/dev/null 2>&1; then
-        dnf install -y "https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-${EL_MAJOR}.noarch.rpm" \
+        dnf_retry install -y "https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-${EL_MAJOR}.noarch.rpm" \
             || ffmpeg_failed "could not enable RPM Fusion free"
     fi
-    dnf install -y ffmpeg || ffmpeg_failed "dnf install ffmpeg failed"
+    dnf_retry install -y ffmpeg || ffmpeg_failed "dnf install ffmpeg failed"
     echo "FFmpeg installed successfully: $(ffmpeg -version 2>/dev/null | head -1)"
 fi
 
