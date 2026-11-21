@@ -19,10 +19,11 @@ updates:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
   # The console's pinned Python packages (ops #683). target-branch dev: without it Dependabot
-  # branches from main and the PR drags old files along. These pins must install on Python 3.9
-  # (Rocky 9), so releases that need Python 3.10 or newer are ignored until Rocky 9 is dropped:
-  # urllib3 2.7 and up, requests 2.33 and up (checked on PyPI, and a 3.9 install of them fails).
-  # tests/test_download_pins.py fails if a pinned release does not support Python 3.9.
+  # branches from main and the PR drags old files along. The Python 3.9 pins (Rocky 9) must install
+  # on 3.9, so releases that need Python 3.10 or newer are ignored here: urllib3 2.7 and up,
+  # requests 2.33 and up. requirements.txt pins those newer releases by hand for Python 3.10 and
+  # up (ops #1020). Bump them there when a new one is out.
+  # tests/test_download_pins.py fails if a pin for Python 3.9 does not support Python 3.9.
   - package-ecosystem: "pip"
     directory: "/config-editor"
     schedule:
