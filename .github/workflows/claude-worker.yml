@@ -17,6 +17,10 @@ concurrency:
   group: claude-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
   cancel-in-progress: false
 
+# Read-only by default (ops #1014); each job below asks for what it needs.
+permissions:
+  contents: read
+
 jobs:
   claude:
     if: github.event_name != 'workflow_dispatch' && contains(github.event.comment.body, '@claude') && !(github.event.comment.user.login == 'takwerx' && contains(github.event.comment.body, 'ship it'))
