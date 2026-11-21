@@ -4,6 +4,7 @@
 # Installs Flask-based web editor for managing MediaMTX
 # v2.0 - Adds psutil, requests dependencies
 # v2.1 - Python packages go in a venv, so the install works on Ubuntu 24.04+ / Debian 12
+# v2.2 - Rocky/RHEL 9: the venv is built from python3.12 (the pinned packages need Python 3.10+)
 
 set -e
 
@@ -65,18 +66,43 @@ echo "=========================================="
 echo "Step 1: Installing Python Dependencies"
 echo "=========================================="
 
-if command -v apt-get > /dev/null 2>&1; then
-    apt-get update -qq > /dev/null 2>&1
-    apt-get install -y python3 python3-pip python3-venv python3-psutil > /dev/null 2>&1 || apt-get install -y python3 python3-pip python3-venv python3-psutil
-elif command -v dnf > /dev/null 2>&1; then
-    # Rocky/RHEL: venv is part of python3 there; psutil comes from pip below.
-    dnf install -y -q python3 python3-pip > /dev/null 2>&1 || dnf install -y python3 python3-pip
-else
-    echo ""
-    echo "ERROR: Neither apt-get nor dnf found. Install python3 and python3-pip yourself and re-run this script."
-    exit 1
-fi
-echo "✓ Python3 and pip installed"
+# >>> install_python
+# Installs Python and sets VENV_PYTHON, the interpreter the web editor's venv is built from.
+# The pinned packages (urllib3 2.8.0, requests 2.34.2) need Python 3.10 or newer. Ubuntu 22.04 and
+# newer have that. Rocky/RHEL 9 ships Python 3.9, so it also gets python3.12 from its own AppStream
+# repo, and the venv uses that one (ops #1030). The system python3 stays as it is: dnf itself and
+# the KLV sidecar run on it.
+VENV_PYTHON=python3
+install_python() {
+    if command -v apt-get > /dev/null 2>&1; then
+        apt-get update -qq > /dev/null 2>&1
+        apt-get install -y python3 python3-pip python3-venv python3-psutil > /dev/null 2>&1 || apt-get install -y python3 python3-pip python3-venv python3-psutil
+    elif command -v dnf > /dev/null 2>&1; then
+        # Rocky/RHEL: venv is part of python3 there; psutil comes from pip below.
+        dnf install -y -q python3 python3-pip > /dev/null 2>&1 || dnf install -y python3 python3-pip
+        dnf install -y -q python3.12 python3.12-pip > /dev/null 2>&1 || dnf install -y python3.12 python3.12-pip
+        if ! command -v python3.12 > /dev/null 2>&1; then
+            echo ""
+            echo "ERROR: python3.12 is not available from this server's dnf repositories."
+            echo "The web editor needs Python 3.10 or newer, and this server has Python 3.9."
+            echo "Enable the AppStream repository (dnf repolist) or install python3.12 yourself, then re-run this script."
+            exit 1
+        fi
+        VENV_PYTHON=python3.12
+    else
+        echo ""
+        echo "ERROR: Neither apt-get nor dnf found. Install python3 (3.10 or newer) and python3-pip yourself and re-run this script."
+        exit 1
+    fi
+    if ! "$VENV_PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' > /dev/null 2>&1; then
+        echo ""
+        echo "ERROR: $VENV_PYTHON is older than Python 3.10 (or missing). The web editor's pinned packages need 3.10 or newer."
+        exit 1
+    fi
+}
+# <<< install_python
+install_python
+echo "✓ Python and pip installed ($("$VENV_PYTHON" --version 2>&1))"
 
 # Install required Python packages into a venv that the service runs from.
 # Ubuntu 23.04+ and Debian 12 mark the system Python as externally managed
@@ -91,7 +117,7 @@ WEB_EDITOR_DIR="/opt/mediamtx-webeditor"
 VENV_DIR="$WEB_EDITOR_DIR/venv"
 mkdir -p "$WEB_EDITOR_DIR"
 echo "Installing Flask and dependencies into $VENV_DIR..."
-if ! python3 -m venv --clear --system-site-packages "$VENV_DIR"; then
+if ! "$VENV_PYTHON" -m venv --clear --system-site-packages "$VENV_DIR"; then
     echo ""
     echo "ERROR: Could not create a Python virtual environment at $VENV_DIR"
     echo "Install python3-venv (apt-get install python3-venv) and re-run this script."

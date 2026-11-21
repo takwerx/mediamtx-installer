@@ -13456,6 +13456,180 @@ def apply_update():
 
 # === END UPDATE ENDPOINTS ===
 
+# === PYTHON VENV REFRESH (Rocky/RHEL 9, ops #1030) ===
+# The pinned urllib3 2.8.0 and requests 2.34.2 need Python 3.10 or newer. A Rocky 9 box installed
+# before that has its venv on Python 3.9, and the console's Update only replaces this file, never
+# the venv. So the new file does the rebuild itself when it starts: it builds a second venv from
+# python3.12 beside the old one, checks it, swaps it in and restarts the service once. If any step
+# fails the old venv stays, the editor keeps running, and the failure is written to
+# VENV_REFRESH_STATE (retried after a day, not on every start).
+# It only acts on the standalone install: running from /opt/mediamtx-webeditor/venv, as root, with
+# dnf. infra-TAK runs the editor on the system python3 with its own account, so this skips there.
+VENV_DIR = '/opt/mediamtx-webeditor/venv'
+VENV_PREV_DIR = '/opt/mediamtx-webeditor/venv.prev'
+VENV_NEW_DIR = '/opt/mediamtx-webeditor/venv.new'
+VENV_REFRESH_STATE = '/opt/mediamtx-webeditor/venv_refresh.json'
+VENV_REFRESH_MIN_PYTHON = (3, 10)
+VENV_REFRESH_RETRY_SECONDS = 24 * 3600
+
+
+def venv_refresh_needed(prefix=None, version_info=None, euid=None, have_dnf=None, state=None, now=None):
+    """True when this process runs from the standalone install's venv on a Python older than 3.10."""
+    import sys
+    prefix = sys.prefix if prefix is None else prefix
+    version_info = sys.version_info if version_info is None else version_info
+    euid = os.geteuid() if euid is None else euid
+    have_dnf = (shutil.which('dnf') is not None) if have_dnf is None else have_dnf
+    now = time.time() if now is None else now
+    if os.path.realpath(prefix) != os.path.realpath(VENV_DIR):
+        return False
+    if tuple(version_info[:2]) >= VENV_REFRESH_MIN_PYTHON:
+        return False
+    if euid != 0 or not have_dnf:
+        return False
+    if state is None:
+        try:
+            with open(VENV_REFRESH_STATE) as f:
+                state = json.load(f)
+        except Exception:
+            state = {}
+    if state.get('status') == 'failed' and now - float(state.get('time', 0)) < VENV_REFRESH_RETRY_SECONDS:
+        return False
+    return True
+
+
+def _venv_refresh_write_state(status, message):
+    try:
+        with open(VENV_REFRESH_STATE, 'w') as f:
+            json.dump({'status': status, 'message': message, 'time': time.time(),
+                       'version': CURRENT_VERSION}, f)
+    except Exception:
+        pass
+
+
+def _venv_retarget(venv_dir, old_name, new_name):
+    """A venv remembers its own folder name in the shebang line of its scripts (pip, flask) and in
+    pyvenv.cfg. After the folder is renamed, point those at the new name."""
+    bindir = os.path.join(venv_dir, 'bin')
+    paths = [os.path.join(venv_dir, 'pyvenv.cfg')]
+    if os.path.isdir(bindir):
+        for name in os.listdir(bindir):
+            p = os.path.join(bindir, name)
+            if os.path.isfile(p) and not os.path.islink(p):
+                paths.append(p)
+    for p in paths:
+        try:
+            with open(p, 'rb') as f:
+                data = f.read()
+            if old_name.encode() not in data or b'\0' in data[:512]:
+                continue
+            mode = os.stat(p).st_mode
+            with open(p, 'wb') as f:
+                f.write(data.replace(old_name.encode(), new_name.encode()))
+            os.chmod(p, mode)
+        except OSError:
+            pass
+
+
+def refresh_venv_to_newer_python(run=None, fetch=None, editor_file=None):
+    """Build the venv again from python3.12 and swap it in. Returns (ok, message). Never raises.
+    `run` and `fetch` can be replaced (the tests do)."""
+    run = run or subprocess.run
+    editor_file = editor_file or os.path.abspath(__file__)
+    if fetch is None:
+        import urllib.request
+        import ssl
+        ctx = ssl.create_default_context()
+
+        def fetch(url):
+            req = urllib.request.Request(url, headers={'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION})
+            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+                return resp.read().decode('utf-8')
+    work = VENV_NEW_DIR + '.req'
+    try:
+        py = shutil.which('python3.12')
+        if not py:
+            run(['dnf', 'install', '-y', 'python3.12', 'python3.12-pip'], capture_output=True, text=True, timeout=900)
+            py = shutil.which('python3.12')
+        if not py:
+            return False, 'python3.12 is not available from the dnf repositories'
+
+        branch = get_update_channel()
+        base = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{branch}/config-editor/"
+        shutil.rmtree(work, ignore_errors=True)
+        os.makedirs(work, exist_ok=True)
+        req_main, req_psutil = os.path.join(work, 'requirements.txt'), os.path.join(work, 'requirements-psutil.txt')
+        for name, dest in (('requirements.txt', req_main), ('requirements-psutil.txt', req_psutil)):
+            text = fetch(base + name)
+            if '--hash=sha256:' not in text or '==' not in text:
+                return False, f'{name} from {branch} does not look like a pinned requirements file'
+            with open(dest, 'w') as f:
+                f.write(text)
+
+        shutil.rmtree(VENV_NEW_DIR, ignore_errors=True)
+        r = run([py, '-m', 'venv', '--system-site-packages', VENV_NEW_DIR], capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            return False, 'could not create the new venv: ' + (r.stderr or r.stdout or '')[-300:]
+        newpy = os.path.join(VENV_NEW_DIR, 'bin', 'python3')
+        pip = [newpy, '-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', '--require-hashes', '-r']
+        r = run(pip + [req_main], capture_output=True, text=True, timeout=900)
+        if r.returncode != 0:
+            return False, 'pip install failed: ' + (r.stderr or r.stdout or '')[-300:]
+        have_psutil = run([newpy, '-c', 'import psutil'], capture_output=True, text=True, timeout=60).returncode == 0
+        if not have_psutil:
+            r = run(pip + [req_psutil], capture_output=True, text=True, timeout=900)
+            if r.returncode != 0:
+                return False, 'pip install of psutil failed: ' + (r.stderr or r.stdout or '')[-300:]
+
+        # The new venv must run THIS file's imports and parse it before it replaces the working one.
+        check = ('import sys, ast; assert sys.version_info >= (3, 10); '
+                 'import flask, ruamel.yaml, requests, urllib3, psutil; '
+                 'ast.parse(open(sys.argv[1]).read())')
+        r = run([newpy, '-c', check, editor_file], capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            return False, 'the new venv failed its check: ' + (r.stderr or r.stdout or '')[-300:]
+
+        _venv_retarget(VENV_NEW_DIR, 'venv.new', 'venv')
+        shutil.rmtree(VENV_PREV_DIR, ignore_errors=True)
+        os.rename(VENV_DIR, VENV_PREV_DIR)
+        try:
+            os.rename(VENV_NEW_DIR, VENV_DIR)
+        except OSError:
+            os.rename(VENV_PREV_DIR, VENV_DIR)
+            raise
+        return True, 'venv rebuilt on ' + os.path.basename(os.path.realpath(py)) + '; the old one is kept at ' + VENV_PREV_DIR
+    except Exception as e:
+        return False, f'venv refresh stopped: {e}'
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+        if os.path.isdir(VENV_NEW_DIR):
+            shutil.rmtree(VENV_NEW_DIR, ignore_errors=True)
+
+
+def start_venv_refresh():
+    """Called once at startup. Runs the rebuild in a background thread so the editor starts at once."""
+    try:
+        if not venv_refresh_needed():
+            return False
+    except Exception as e:
+        print(f'venv refresh: could not decide: {e}', flush=True)
+        return False
+
+    def _work():
+        print('venv refresh: this venv runs Python below 3.10, rebuilding it on python3.12 ...', flush=True)
+        ok, msg = refresh_venv_to_newer_python()
+        if ok:
+            _venv_refresh_write_state('done', msg)
+            print('✓ venv refresh: ' + msg + ' (restarting the editor onto it)', flush=True)
+            schedule_editor_self_restart()
+        else:
+            _venv_refresh_write_state('failed', msg)
+            print('WARNING: venv refresh failed, the old venv stays: ' + msg, flush=True)
+    threading.Thread(target=_work, name='venv-refresh', daemon=True).start()
+    return True
+
+# === END PYTHON VENV REFRESH ===
+
 # === WEB EDITOR BACKUP/ROLLBACK ENDPOINTS ===
 
 @app.route('/api/webeditor/backups')
@@ -17313,4 +17487,5 @@ if __name__ == '__main__':
     print("Press Ctrl+C to stop")
     print("="*50)
     
+    start_venv_refresh()  # Rocky 9: move the venv to python3.12 (ops #1030)
     app.run(host='0.0.0.0', port=5000, debug=False)
