@@ -50,19 +50,20 @@ class InstallPythonTest(unittest.TestCase):
         self.assertIsNotNone(fn, 'the installer has no install_python function between its markers')
         with tempfile.TemporaryDirectory() as d:
             log = os.path.join(d, 'calls')
-            # A python that stands in for "3.12" (the real interpreter running the tests) and one that
-            # stands in for Rocky's 3.9 (fails the version check).
-            real = sys.executable
+            # Stand-ins, so the result does not depend on the Python that runs the tests (CI runs 3.9):
+            # a "python3.12" that passes the installer's version check, and Rocky's own python3, which is 3.9 and fails it.
             new_py = os.path.join(d, 'python3.12')
+            template = os.path.join(d, 'python3.12.template')
+            write_exe(template, '#!/bin/bash\nexit 0\n')
             if manager == 'dnf':
                 write_exe(os.path.join(d, 'dnf'),
                           '#!/bin/bash\necho "dnf $*" >> "%s"\n'
-                          '%s\nexit 0\n' % (log, ('[[ "$*" == *python3.12* ]] && /bin/ln -sf "%s" "%s"' % (real, new_py)) if makes_python312 else ':'))
+                          '%s\nexit 0\n' % (log, ('[[ "$*" == *python3.12* ]] && /bin/cp "%s" "%s"' % (template, new_py)) if makes_python312 else ':'))
                 write_exe(os.path.join(d, 'python3'),
                           '#!/bin/bash\n[ "$1" = -c ] && exit 1\nexit 0\n' if system_python_old else '#!/bin/bash\nexit 0\n')
             else:
                 write_exe(os.path.join(d, 'apt-get'), '#!/bin/bash\necho "apt-get $*" >> "%s"\nexit 0\n' % log)
-                os.symlink(real, os.path.join(d, 'python3'))
+                write_exe(os.path.join(d, 'python3'), '#!/bin/bash\nexit 0\n')
             script = fn + '\ninstall_python\necho "VENV_PYTHON=$VENV_PYTHON"\n'
             r = subprocess.run(['/bin/bash', '-c', script], env={'PATH': d}, capture_output=True, text=True, timeout=60)
             calls = open(log).read().splitlines() if os.path.exists(log) else []
