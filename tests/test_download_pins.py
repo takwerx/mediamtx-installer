@@ -251,13 +251,45 @@ class PythonPackagePinTest(unittest.TestCase):
         with open(os.path.join(ROOT, rel), encoding='utf-8') as f:
             return f.read()
 
+    def _pins(self, python_version):
+        """{name: [versions]} of the pins that apply to one Python (a `; python_version` marker is honoured)."""
+        pins = {}
+        for rel in ('config-editor/requirements.txt', 'config-editor/requirements-psutil.txt'):
+            for m in re.finditer(r'(?m)^([A-Za-z0-9_.\-]+)==([^\s\\;]+)(?:; python_version ([<>]=?) "(3\.[0-9]+)")?', self._text(rel)):
+                name, ver, op, limit = m.groups()
+                if op:
+                    have = tuple(int(x) for x in python_version.split('.'))
+                    want = tuple(int(x) for x in limit.split('.'))
+                    if not {'<': have < want, '<=': have <= want, '>': have > want, '>=': have >= want}[op]:
+                        continue
+                pins.setdefault(re.sub(r'[-_.]+', '-', name).lower(), []).append(ver)
+        return pins
+
+    def test_each_package_has_exactly_one_pin_for_every_python(self):
+        # Two pins that both apply to one Python would make pip refuse the file (ops #1020).
+        for py in ('3.9', '3.10', '3.11', '3.12', '3.13'):
+            for name, vers in self._pins(py).items():
+                self.assertEqual(len(vers), 1, '%s pinned twice for Python %s: %s' % (name, py, vers))
+        self.assertEqual(sorted(self._pins('3.9')), sorted(self._pins('3.13')))
+
+    def test_python_310_and_newer_get_the_fixed_urllib3_and_requests(self):
+        # urllib3 2.8.0 and requests 2.33.0 are the first releases with the fixes (ops #1020). They need
+        # Python 3.10, so Python 3.9 (Rocky 9) keeps the older pin. Nothing below 3.10 may get a pin that
+        # is lower than the fixed release unless it is the 3.9 line.
+        floor = {'urllib3': (2, 8, 0), 'requests': (2, 33, 0)}
+        as_tuple = lambda v: tuple(int(x) for x in v.split('.'))
+        for py in ('3.10', '3.11', '3.12', '3.13'):
+            pins = self._pins(py)
+            for name, minimum in floor.items():
+                self.assertGreaterEqual(as_tuple(pins[name][0]), minimum, '%s for Python %s' % (name, py))
+
     def test_every_package_is_pinned_with_hashes(self):
         for rel in ('config-editor/requirements.txt', 'config-editor/requirements-psutil.txt'):
             body = re.sub(r'\s*\\\n\s*', ' ', self._text(rel))
             entries = [l for l in body.splitlines() if l.strip() and not l.lstrip().startswith('#')]
             self.assertTrue(entries, rel)
             for line in entries:
-                self.assertRegex(line, r'^[A-Za-z0-9_.\-]+==[0-9][^\s]* (--hash=sha256:[0-9a-f]{64} ?)+$', line)
+                self.assertRegex(line, r'^[A-Za-z0-9_.\-]+==[0-9][^\s;]*(; python_version [<>]=? "3\.[0-9]+")? (--hash=sha256:[0-9a-f]{64} ?)+$', line)
 
     def test_every_import_is_covered(self):
         names = ''.join(self._text('config-editor/' + r).lower() for r in ('requirements.txt', 'requirements-psutil.txt'))
@@ -286,10 +318,7 @@ class PythonPackagePinTest(unittest.TestCase):
                'platform_system': 'Linux', 'os_name': 'posix', 'implementation_name': 'cpython',
                'platform_python_implementation': 'CPython', 'extra': ''}
         norm = lambda n: re.sub(r'[-_.]+', '-', n).lower()
-        pinned = {}
-        for rel in ('config-editor/requirements.txt', 'config-editor/requirements-psutil.txt'):
-            for m in re.finditer(r'(?m)^([A-Za-z0-9_.\-]+)==([^\s\\]+)', self._text(rel)):
-                pinned[norm(m.group(1))] = m.group(2)
+        pinned = {n: v[0] for n, v in self._pins('3.9').items()}
         self.assertTrue(pinned)
         missing = set()
         for name, ver in sorted(pinned.items()):
@@ -309,16 +338,14 @@ class PythonPackagePinTest(unittest.TestCase):
     def test_every_pinned_release_supports_python_39(self):
         # Rocky 9 runs Python 3.9. A pin whose release needs 3.10 or newer makes the whole
         # `pip install --require-hashes` fail there (urllib3 2.8.0 and requests 2.33.0 did, ops #683).
+        # Those two releases are now pinned for Python 3.10 and newer only (`; python_version >= "3.10"`).
         # Needs network; skipped without.
         try:
             from packaging.specifiers import SpecifierSet
         except ImportError:
             from pip._vendor.packaging.specifiers import SpecifierSet
         import json
-        pinned = {}
-        for rel in ('config-editor/requirements.txt', 'config-editor/requirements-psutil.txt'):
-            for m in re.finditer(r'(?m)^([A-Za-z0-9_.\-]+)==([^\s\\]+)', self._text(rel)):
-                pinned[m.group(1)] = m.group(2)
+        pinned = {n: v[0] for n, v in self._pins('3.9').items()}
         self.assertTrue(pinned)
         too_new = []
         for name, ver in sorted(pinned.items()):
