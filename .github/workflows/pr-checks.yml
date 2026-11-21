@@ -79,10 +79,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
+  # Workflow files stay safe (ops #1014): every action pinned to a full commit SHA, read-only default token, the
+  # security scans (not required yet) keep their shape. Run locally: python3 -I .github/ci/test_workflow_pins.py
+  workflow-pins:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: python3 -I .github/ci/test_workflow_pins.py
+
   # One stable name to require in branch protection. A failed or cancelled job fails it.
   checks-ok:
     if: always()
-    needs: [static, unit, tests, release-hygiene]
+    needs: [static, unit, tests, release-hygiene, workflow-pins]
     runs-on: ubuntu-24.04
     steps:
       - env:
