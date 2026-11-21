@@ -5,7 +5,7 @@
 Run it: python3 -I .github/ci/test_workflow_pins.py        (standard library only, Python 3.9+)
 
 Pins, read from the workflow files as text (no YAML library needed):
-  * codeql.yml exists, covers exactly the languages this repo has (python,  javascript-typescript,  actions), runs on PRs into
+  * codeql.yml exists, covers exactly the languages this repo has (python,  actions), runs on PRs into
     dev, on pushes to dev and main, and weekly, and builds nothing (build-mode none);
   * scorecard.yml exists, runs weekly and on main, publishes results, and is never a pull_request
     check (Scorecard only publishes from the default branch);
@@ -29,7 +29,7 @@ SCORECARD = WORKFLOWS / 'scorecard.yml'
 PR_CHECKS = WORKFLOWS / 'pr-checks.yml'
 
 # The CodeQL languages this repo really has. Add one here and in codeql.yml together.
-EXPECTED_LANGUAGES = {'python', 'javascript-typescript', 'actions'}
+EXPECTED_LANGUAGES = {'python', 'actions'}
 
 USES = re.compile(r'^\s*-?\s*uses:\s*(\S+)(.*)$', re.M)
 FULL_SHA = re.compile(r'^[^@\s]+@[0-9a-f]{40}$')

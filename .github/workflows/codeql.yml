@@ -5,7 +5,7 @@ name: CodeQL
 # visible to people with write access only). Alerts are private: never quote one in a public
 # issue or PR.
 #
-# Three analyses: python (the config editor / console), javascript-typescript (the one .ts file), actions (the workflow files themselves: script injection, unpinned actions).
+# Two analyses: python (the config editor / console), actions (the workflow files themselves: script injection, unpinned actions). JavaScript is not covered: the page scripts live inside Python strings, and the one .ts file is a video clip (MPEG transport stream), not code.
 # None of them needs a build (build-mode none).
 #
 # NOT a required check yet. It must run clean once on dev before anything makes it required; do
@@ -44,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [python, javascript-typescript, actions]
+        language: [python, actions]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
