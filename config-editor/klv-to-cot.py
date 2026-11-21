@@ -102,14 +102,39 @@ def _ber_len(buf, i):
     return int.from_bytes(buf[i + 1:i + 1 + n], "big"), i + 1 + n
 
 
+def _ber_oid(buf, i):
+    """Decode a BER-OID tag at buf[i]. ST0601 tags 128..143 take two bytes (0x81 0x00 = 128).
+    Returns (tag, next_index) or (None, i) if truncated."""
+    tag = 0
+    for _ in range(4):
+        if i >= len(buf):
+            return None, i
+        b = buf[i]
+        i += 1
+        tag = (tag << 7) | (b & 0x7F)
+        if not b & 0x80:
+            return tag, i
+    return None, i
+
+
+def _checksum_ok(packet):
+    """ST0601 tag 1: the packet must end with 01 02 <sum>, a running 16-bit sum of every byte
+    before the sum (bytes at even offsets are the high byte)."""
+    if len(packet) < 4 or packet[-4:-2] != b"\x01\x02":
+        return False
+    total = sum(b << (8 if k % 2 == 0 else 0) for k, b in enumerate(packet[:-2])) & 0xFFFF
+    return total == int.from_bytes(packet[-2:], "big")
+
+
 def _parse_local_set(payload):
     """Parse the TLV body of one ST0601 local set into {tag: raw_bytes}."""
     out = {}
     i = 0
     n = len(payload)
     while i < n:
-        tag = payload[i]  # ST0601 tags 1..94 are single-byte
-        i += 1
+        tag, i = _ber_oid(payload, i)
+        if tag is None:
+            break
         length, i = _ber_len(payload, i)
         if length is None or i + length > n:
             break
@@ -148,6 +173,7 @@ class StreamScanner:
 
     def __init__(self):
         self.buf = bytearray()
+        self.bad_checksum = 0
 
     def feed(self, chunk):
         self.buf.extend(chunk)
@@ -165,8 +191,12 @@ class StreamScanner:
             end = after_len + length
             if end > len(self.buf):
                 return  # need more bytes for the full payload
+            packet = bytes(self.buf[idx:end])
             payload = bytes(self.buf[after_len:end])
             del self.buf[:end]
+            if not _checksum_ok(packet):
+                self.bad_checksum += 1
+                continue  # corrupt or truncated set: never ship its numbers
             yield _parse_local_set(payload)
 
 

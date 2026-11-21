@@ -60,6 +60,10 @@ Where a doc and what we saw disagree, both are kept.
 ### 1.5 KLV (drone video metadata)
 - KLV over RTSP needs GStreamer (`rtspclientsink`, `rtpklvpay`). FFmpeg cannot packetize KLV into RTP. SRT carries KLV natively through FFmpeg.
 - 📝 from our notes (CLAUDE.md, `PLAN-v2.1.0-klv-to-cot.md`). Official GStreamer docs for `rtpklvpay` not yet linked here.
+- MISB ST 0601 local set (what `klv-to-cot.py` reads): each item is a tag, a BER length and a value. Tags 128 and up are BER-OID, two bytes (`0x81 0x03` is tag 131), so a reader that takes every tag as one byte falls out of step on an ST 0601.19 stream. The set ends with tag 1: `01 02` plus a 16-bit checksum, a running sum over the whole packet (16-byte key and length included) up to the checksum, bytes at even offsets as the high byte. ⚠️ The MISB standard text is not linked here and was not read for this entry; the two rules below come from the PR author and were checked against data only.
+- ✅ verified 2026-11-20 (ops #1011) on two public files: the Kitware KWIVER `h264_klv.ts` sample has 30 sets, tags up to 142, every checksum valid by the rule above (checked with a second, independent parser), longitude 128.426759. A reader with one-byte tags gives 1.39e23 degrees on every set. `config-editor/truck_60.ts` has 288 sets, tags up to 72, every checksum valid.
+- ✅ verified 2026-11-20 on a throwaway Ubuntu 22.04 box with MediaMTX v1.21.4: an SRT source with KLV, added through the editor's External Source with KLV to CoT, starts the sidecar from `runOnReady`. The old reader sent 1.39e23 on every sample (130 of 130); the fixed reader sent 128.4235 to 128.4267 (129 of 129).
+- A test publisher that copies a file with `ffmpeg -c copy -f mpegts` leaves data streams out unless you add `-map 0`: MediaMTX then shows one track (H264) and the sidecar's `ffmpeg -map 0:d` finds nothing. ✅ verified 2026-11-20 on the same box.
 
 ### 1.6 MediaMTX v1.21.4 (released 2026-11-15; checked 2026-11-16, ops #818)
 - ✅ verified 2026-11-16 on a throwaway Ubuntu 22.04 box and a throwaway Rocky 9.9 box (SELinux Enforcing), both x86_64, installer from `dev`:
