@@ -121,6 +121,30 @@ def check_scorecard(text):
     return p
 
 
+def check_pip_hashes(name, text):
+    """Every pip install in a workflow reads a hash-locked file under .github/ci/ (ops #1014 step 4)."""
+    bad = []
+    for l in _code(text).splitlines():
+        if re.search(r'\bpip3?\s+install\b', l):
+            if '--require-hashes' not in l or not re.search(r'-r\s+\.github/ci/\S+\.lock\b', l):
+                bad.append('%s: pip install must use --require-hashes -r .github/ci/NAME.lock: %s' % (name, l.strip()))
+    return bad
+
+
+def check_locks():
+    """Every lock file under .github/ci/ has a sha256 for every pinned package."""
+    bad = []
+    for f in sorted((ROOT / '.github' / 'ci').glob('*.lock')):
+        blocks = re.split(r'\n(?=[A-Za-z0-9_.\-]+==)', f.read_text(encoding='utf-8'))
+        pins = [b for b in blocks if re.match(r'^[A-Za-z0-9_.\-]+==', b)]
+        if not pins:
+            bad.append('%s has no pinned package' % f.name)
+        for b in pins:
+            if '--hash=sha256:' not in b:
+                bad.append('%s: no hash for %s' % (f.name, b.splitlines()[0]))
+    return bad
+
+
 def check_hosted_and_quiet(name, text):
     t = _code(text)
     p = []
@@ -163,6 +187,8 @@ def run_all():
     for name, t in texts.items():
         problems += check_pins(name, t)
         problems += check_top_permissions(name, t)
+        problems += check_pip_hashes(name, t)
+    problems += check_locks()
     t = _read(PR_CHECKS, problems)
     if t is not None:
         problems += check_not_required(t)
@@ -183,6 +209,11 @@ def self_test():
     assert check_top_permissions('x.yml', 'jobs:\n  a:\n    permissions:\n      contents: read\n')
     assert check_top_permissions('x.yml', 'permissions:\n  contents: write\njobs: {}\n')
     assert check_top_permissions('x.yml', 'permissions: write-all\njobs: {}\n')
+    assert not check_pip_hashes('x.yml', '- run: pip install --require-hashes -r .github/ci/requirements-ci.lock\n')
+    assert check_pip_hashes('x.yml', '- run: pip install pyyaml\n')
+    assert check_pip_hashes('x.yml', '- run: pip install -r requirements.txt\n')
+    assert check_pip_hashes('x.yml', '- run: pip3 install --require-hashes -r requirements.txt\n')
+    assert not check_pip_hashes('x.yml', '# - run: pip install pyyaml\n')
     assert check_hosted_and_quiet('x.yml', 'runs-on: [self-hosted, macOS]\n')
     assert check_hosted_and_quiet('x.yml', 'runs-on: ubuntu-24.04\nenv:\n  T: ${{ secrets.X }}\n')
     assert check_not_required('checks-ok:\n  needs: [static, codeql]\n')
@@ -196,7 +227,7 @@ def main():
         print('::error::' + p)
     if problems:
         return 1
-    print('workflow pins ok: CodeQL (%s), Scorecard, every action pinned, top-level permissions read-only'
+    print('workflow pins ok: CodeQL (%s), Scorecard, every action pinned, top-level permissions read-only, pip installs by hash'
           % ', '.join(sorted(EXPECTED_LANGUAGES)))
     return 0
 
