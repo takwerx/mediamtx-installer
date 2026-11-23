@@ -219,6 +219,20 @@ class VenvRefreshTest(unittest.TestCase):
         self.assertIn('pinned requirements', msg)
         self.assertTrue(os.path.exists(os.path.join(self.m.VENV_DIR, 'old.txt')))
 
+    def test_the_new_venv_is_checked_against_the_pins_before_the_swap(self):
+        # ops #1129: a requirements.txt older than the editor must not swap in the same stale libraries.
+        calls = []
+        ok, msg, calls = self.refresh()
+        self.assertTrue(ok, msg)
+        check = [c for c in calls if '-c' in c and 'import sys, ast' in ' '.join(c)][0]
+        self.assertEqual(json.loads(check[-1]), self.m.VENV_PINS)
+        script = check[check.index('-c') + 1]
+        # run the check itself against this interpreter with a pin that cannot match: it must refuse
+        r = subprocess.run([sys.executable, '-c', script, __file__, json.dumps({'flask': '0.0.1'})],
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('packages differ from the pins: flask', r.stderr)
+
     def test_python312_is_installed_with_dnf_when_missing(self):
         calls = []
         seen = iter([None, '/usr/bin/python3.12'])

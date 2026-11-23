@@ -13641,10 +13641,15 @@ def refresh_venv_to_newer_python(run=None, fetch=None, editor_file=None, old_pyt
                 return False, 'pip install of psutil failed: ' + (r.stderr or r.stdout or '')[-300:]
 
         # The new venv must run THIS file's imports and parse it before it replaces the working one.
-        check = ('import sys, ast; assert sys.version_info >= (3, 10); '
+        # It must also hold exactly the pinned versions: a requirements.txt older than this file
+        # would otherwise swap in the same stale libraries and look like a fix.
+        check = ('import sys, ast, json; assert sys.version_info >= (3, 10); '
                  'import flask, ruamel.yaml, requests, urllib3, psutil; '
+                 'from importlib import metadata; '
+                 'bad = [n for n, v in json.loads(sys.argv[2]).items() if metadata.version(n) != v]; '
+                 'assert not bad, "packages differ from the pins: " + ", ".join(bad); '
                  'ast.parse(open(sys.argv[1]).read())')
-        r = run([newpy, '-c', check, editor_file], capture_output=True, text=True, timeout=120)
+        r = run([newpy, '-c', check, editor_file, json.dumps(VENV_PINS)], capture_output=True, text=True, timeout=120)
         if r.returncode != 0:
             return False, 'the new venv failed its check: ' + (r.stderr or r.stdout or '')[-300:]
 
