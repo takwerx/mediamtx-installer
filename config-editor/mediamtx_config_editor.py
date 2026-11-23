@@ -13456,25 +13456,63 @@ def apply_update():
 
 # === END UPDATE ENDPOINTS ===
 
-# === PYTHON VENV REFRESH (Rocky/RHEL 9, ops #1030) ===
-# The pinned urllib3 2.8.0 and requests 2.34.2 need Python 3.10 or newer. A Rocky 9 box installed
-# before that has its venv on Python 3.9, and the console's Update only replaces this file, never
-# the venv. So the new file does the rebuild itself when it starts: it builds a second venv from
-# python3.12 beside the old one, checks it, swaps it in and restarts the service once. If any step
-# fails the old venv stays, the editor keeps running, and the failure is written to
+# === PYTHON VENV REFRESH (ops #1030, ops #1129) ===
+# The console's Update only replaces this file (and the KLV sidecar), never the venv. So a box that
+# updates through the console keeps the Python packages it was installed with, and the library fixes
+# (urllib3, requests, certifi) never reach it. The new file fixes that itself when it starts: it
+# builds a second venv beside the old one, checks it, swaps it in and restarts the service once.
+# If any step fails the old venv stays, the editor keeps running, and the failure is written to
 # VENV_REFRESH_STATE (retried after a day, not on every start).
-# It only acts on the standalone install: running from /opt/mediamtx-webeditor/venv, as root, with
-# dnf. infra-TAK runs the editor on the system python3 with its own account, so this skips there.
+# It runs in two cases:
+#   * the venv is on Python below 3.10 (Rocky/RHEL 9 installed before ops #1030): the new venv is
+#     built from python3.12, which dnf installs. The pinned urllib3 2.8.0 needs 3.10 or newer.
+#   * the venv's packages are not the ones in VENV_PINS (any standalone box, Ubuntu too): the new
+#     venv is built from the system python3, which is 3.10 or newer there.
+# It only acts on the standalone install: running from /opt/mediamtx-webeditor/venv, as root.
+# infra-TAK runs the editor on the system python3 with its own account, so this skips there.
 VENV_DIR = '/opt/mediamtx-webeditor/venv'
 VENV_PREV_DIR = '/opt/mediamtx-webeditor/venv.prev'
 VENV_NEW_DIR = '/opt/mediamtx-webeditor/venv.new'
 VENV_REFRESH_STATE = '/opt/mediamtx-webeditor/venv_refresh.json'
 VENV_REFRESH_MIN_PYTHON = (3, 10)
 VENV_REFRESH_RETRY_SECONDS = 24 * 3600
+# The versions in config-editor/requirements.txt. They live here too because a console update
+# brings only this file. A test fails when the two lists differ, so bump both together.
+VENV_PINS = {
+    'flask': '3.1.3',
+    'jinja2': '3.1.6',
+    'markupsafe': '3.0.4',
+    'werkzeug': '3.1.9',
+    'blinker': '1.9.0',
+    'certifi': '2026.11.20',
+    'charset-normalizer': '3.5.2',
+    'click': '8.1.8',
+    'idna': '3.20',
+    'itsdangerous': '2.2.0',
+    'requests': '2.34.2',
+    'ruamel.yaml': '0.19.1',
+    'urllib3': '2.8.0',
+}
 
 
-def venv_refresh_needed(prefix=None, version_info=None, euid=None, have_dnf=None, state=None, now=None):
-    """True when this process runs from the standalone install's venv on a Python older than 3.10."""
+def venv_stale_packages(installed=None, pins=None):
+    """Names of the pinned packages this process has in another version (or not at all)."""
+    pins = VENV_PINS if pins is None else pins
+    if installed is None:
+        from importlib import metadata
+        installed = {}
+        for name in pins:
+            try:
+                installed[name] = metadata.version(name)
+            except Exception:
+                installed[name] = None
+    return sorted(n for n, v in pins.items() if installed.get(n) != v)
+
+
+def venv_refresh_needed(prefix=None, version_info=None, euid=None, have_dnf=None, state=None, now=None,
+                        installed=None):
+    """True when this process runs from the standalone install's venv and either its Python is older
+    than 3.10 (Rocky 9, dnf can supply python3.12) or its packages are not the pinned versions."""
     import sys
     prefix = sys.prefix if prefix is None else prefix
     version_info = sys.version_info if version_info is None else version_info
@@ -13483,9 +13521,13 @@ def venv_refresh_needed(prefix=None, version_info=None, euid=None, have_dnf=None
     now = time.time() if now is None else now
     if os.path.realpath(prefix) != os.path.realpath(VENV_DIR):
         return False
-    if tuple(version_info[:2]) >= VENV_REFRESH_MIN_PYTHON:
+    if euid != 0:
         return False
-    if euid != 0 or not have_dnf:
+    if tuple(version_info[:2]) < VENV_REFRESH_MIN_PYTHON:
+        # Only dnf can bring a newer Python. Without it the pins cannot be installed here at all.
+        if not have_dnf:
+            return False
+    elif not venv_stale_packages(installed):
         return False
     if state is None:
         try:
@@ -13494,6 +13536,10 @@ def venv_refresh_needed(prefix=None, version_info=None, euid=None, have_dnf=None
         except Exception:
             state = {}
     if state.get('status') == 'failed' and now - float(state.get('time', 0)) < VENV_REFRESH_RETRY_SECONDS:
+        return False
+    # A rebuild that finished for this version and still shows other packages must not loop on every start.
+    if state.get('status') == 'done' and state.get('version') == CURRENT_VERSION \
+            and tuple(version_info[:2]) >= VENV_REFRESH_MIN_PYTHON:
         return False
     return True
 
@@ -13531,8 +13577,8 @@ def _venv_retarget(venv_dir, old_name, new_name):
             pass
 
 
-def refresh_venv_to_newer_python(run=None, fetch=None, editor_file=None):
-    """Build the venv again from python3.12 and swap it in. Returns (ok, message). Never raises.
+def refresh_venv_to_newer_python(run=None, fetch=None, editor_file=None, old_python=None):
+    """Build the venv again (python3.12 on Rocky 9, the system python3 elsewhere) and swap it in. Returns (ok, message). Never raises.
     `run` and `fetch` can be replaced (the tests do)."""
     run = run or subprocess.run
     editor_file = editor_file or os.path.abspath(__file__)
@@ -13547,12 +13593,25 @@ def refresh_venv_to_newer_python(run=None, fetch=None, editor_file=None):
                 return resp.read().decode('utf-8')
     work = VENV_NEW_DIR + '.req'
     try:
-        py = shutil.which('python3.12')
-        if not py:
-            run(['dnf', 'install', '-y', 'python3.12', 'python3.12-pip'], capture_output=True, text=True, timeout=900)
+        if old_python is None:
+            import sys
+            old_python = tuple(sys.version_info[:2]) < VENV_REFRESH_MIN_PYTHON
+        if old_python:
+            # Rocky/RHEL 9: the system python3 is 3.9, so the venv comes from python3.12.
             py = shutil.which('python3.12')
-        if not py:
-            return False, 'python3.12 is not available from the dnf repositories'
+            if not py:
+                run(['dnf', 'install', '-y', 'python3.12', 'python3.12-pip'], capture_output=True, text=True, timeout=900)
+                py = shutil.which('python3.12')
+            if not py:
+                return False, 'python3.12 is not available from the dnf repositories'
+        else:
+            # Ubuntu/Debian: the system python3 is already 3.10 or newer.
+            py = shutil.which('python3')
+            if not py:
+                return False, 'python3 was not found'
+            r = run([py, '-c', 'import sys, venv; assert sys.version_info >= (3, 10)'], capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                return False, 'the system python3 is older than 3.10 or has no venv module: ' + (r.stderr or r.stdout or '')[-200:]
 
         branch = get_update_channel()
         base = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{branch}/config-editor/"
@@ -13582,10 +13641,15 @@ def refresh_venv_to_newer_python(run=None, fetch=None, editor_file=None):
                 return False, 'pip install of psutil failed: ' + (r.stderr or r.stdout or '')[-300:]
 
         # The new venv must run THIS file's imports and parse it before it replaces the working one.
-        check = ('import sys, ast; assert sys.version_info >= (3, 10); '
+        # It must also hold exactly the pinned versions: a requirements.txt older than this file
+        # would otherwise swap in the same stale libraries and look like a fix.
+        check = ('import sys, ast, json; assert sys.version_info >= (3, 10); '
                  'import flask, ruamel.yaml, requests, urllib3, psutil; '
+                 'from importlib import metadata; '
+                 'bad = [n for n, v in json.loads(sys.argv[2]).items() if metadata.version(n) != v]; '
+                 'assert not bad, "packages differ from the pins: " + ", ".join(bad); '
                  'ast.parse(open(sys.argv[1]).read())')
-        r = run([newpy, '-c', check, editor_file], capture_output=True, text=True, timeout=120)
+        r = run([newpy, '-c', check, editor_file, json.dumps(VENV_PINS)], capture_output=True, text=True, timeout=120)
         if r.returncode != 0:
             return False, 'the new venv failed its check: ' + (r.stderr or r.stdout or '')[-300:]
 
@@ -13616,7 +13680,10 @@ def start_venv_refresh():
         return False
 
     def _work():
-        print('venv refresh: this venv runs Python below 3.10, rebuilding it on python3.12 ...', flush=True)
+        import sys
+        stale = venv_stale_packages()
+        print('venv refresh: ' + ('this venv runs Python below 3.10' if tuple(sys.version_info[:2]) < VENV_REFRESH_MIN_PYTHON
+                                 else 'these packages are not the pinned versions: ' + ', '.join(stale)) + ', rebuilding the venv ...', flush=True)
         ok, msg = refresh_venv_to_newer_python()
         if ok:
             _venv_refresh_write_state('done', msg)
@@ -17487,5 +17554,5 @@ if __name__ == '__main__':
     print("Press Ctrl+C to stop")
     print("="*50)
     
-    start_venv_refresh()  # Rocky 9: move the venv to python3.12 (ops #1030)
+    start_venv_refresh()  # rebuild the venv when its Python or packages are behind the pins (ops #1030, #1129)
     app.run(host='0.0.0.0', port=5000, debug=False)
