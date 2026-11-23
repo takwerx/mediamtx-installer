@@ -58,5 +58,61 @@ class KlvToCotTest(unittest.TestCase):
         self.assertAlmostEqual(samples[0]['platform']['lat'], 60.176823, places=5)
 
 
+# ffmpeg 6.1.1 (Ubuntu 24.04) hands over every ST0601 set with the first 5 bytes of its 16-byte key
+# missing (06 0e 2b 34 02). ffmpeg 4.4, 5.1 and 7.1 give the whole key. ops #1128.
+CUT = 5
+
+
+class FfmpegCutKeyTest(unittest.TestCase):
+    def setUp(self):
+        self.full = packet(TIMESTAMP, LATITUDE, LONGITUDE, VERSION)
+        self.cut = self.full[CUT:]
+        self.want, _ = decode(self.full)
+
+    def test_set_with_the_first_5_key_bytes_missing_still_decodes(self):
+        samples, scanner = decode(self.cut)
+        self.assertEqual(samples, self.want)
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(scanner.bad_checksum, 0)
+
+    def test_many_cut_sets_in_a_row_all_decode(self):
+        samples, _ = decode(self.cut * 7)
+        self.assertEqual(samples, self.want * 7)
+
+    def test_cut_and_whole_sets_mixed_in_one_stream(self):
+        samples, _ = decode(self.cut + self.full + self.cut)
+        self.assertEqual(samples, self.want * 3)
+
+    def test_cut_set_with_a_bad_checksum_is_still_dropped(self):
+        bad = packet(TIMESTAMP, LATITUDE, LONGITUDE, VERSION, bad_checksum=True)[CUT:]
+        samples, scanner = decode(bad)
+        self.assertEqual(samples, [])
+        self.assertEqual(scanner.bad_checksum, 1)
+
+    def test_cut_stream_in_any_chunk_size_decodes_every_set(self):
+        data = self.cut * 4
+        for size in (1, 2, 3, 5, 7, 11, 16, 17, 40):
+            scanner = klv.StreamScanner()
+            got = []
+            for i in range(0, len(data), size):
+                got += [klv._to_sample(t) for t in scanner.feed(data[i:i + size])]
+            self.assertEqual(got, self.want * 4, 'chunk size %d' % size)
+
+    def test_whole_key_split_at_every_byte_still_decodes(self):
+        data = self.full * 3
+        for size in (1, 2, 3, 4, 5, 6, 10, 15, 16, 17):
+            scanner = klv.StreamScanner()
+            got = []
+            for i in range(0, len(data), size):
+                got += [klv._to_sample(t) for t in scanner.feed(data[i:i + size])]
+            self.assertEqual(got, self.want * 3, 'chunk size %d' % size)
+
+    def test_bytes_that_only_look_like_the_tail_of_the_key_are_not_a_set(self):
+        # The 11-byte tail of the key with a nonsense length and no valid checksum must ship nothing.
+        junk = KEY[CUT:] + bytes([4]) + b'\x00\x01\x02\x03'
+        samples, _ = decode(junk + b'\x55' * 20)
+        self.assertEqual(samples, [])
+
+
 if __name__ == '__main__':
     unittest.main()
