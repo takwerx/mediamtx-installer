@@ -1,8 +1,0 @@
-# Source for requirements-tests.lock (ops #1014): what the unit-test jobs install, by hash.
-# Versions of the console's own packages come from config-editor/requirements.txt and
-# requirements-psutil.txt (the constraints below), so the tests run on what customers get.
-flask
-ruamel.yaml
-requests
-psutil
-pytest
