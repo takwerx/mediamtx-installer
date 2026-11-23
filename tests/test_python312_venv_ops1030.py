@@ -14,6 +14,7 @@ Run: python3 -m unittest discover -s tests -v   (needs flask, ruamel.yaml, psuti
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -121,14 +122,15 @@ class VenvRefreshTest(unittest.TestCase):
 
     # ---- when does it run -------------------------------------------------------------------
     def needed(self, **kw):
-        args = dict(prefix=self.m.VENV_DIR, version_info=SANDBOX_PY39, euid=0, have_dnf=True, state={}, now=1000.0)
+        args = dict(prefix=self.m.VENV_DIR, version_info=SANDBOX_PY39, euid=0, have_dnf=True, state={}, now=1000.0,
+                    installed=dict(self.m.VENV_PINS))
         args.update(kw)
         return self.m.venv_refresh_needed(**args)
 
     def test_runs_for_the_standalone_venv_on_python_39_as_root_with_dnf(self):
         self.assertTrue(self.needed())
 
-    def test_does_not_run_when_python_is_already_310_or_newer(self):
+    def test_does_not_run_when_python_is_already_310_or_newer_and_the_packages_match(self):
         self.assertFalse(self.needed(version_info=(3, 10, 12)))
         self.assertFalse(self.needed(version_info=(3, 12, 16)))
 
@@ -173,7 +175,7 @@ class VenvRefreshTest(unittest.TestCase):
         calls = []
         with mock.patch.object(self.m.shutil, 'which', return_value='/usr/bin/python3.12'):
             ok, msg = self.m.refresh_venv_to_newer_python(
-                run=self.fake_run(calls=calls, **kw), fetch=self.fetch, editor_file=__file__)
+                run=self.fake_run(calls=calls, **kw), fetch=self.fetch, editor_file=__file__, old_python=True)
         return ok, msg, calls
 
     def test_success_swaps_the_venv_and_keeps_the_old_one(self):
@@ -212,7 +214,7 @@ class VenvRefreshTest(unittest.TestCase):
     def test_a_requirements_file_that_is_not_pinned_is_refused(self):
         with mock.patch.object(self.m.shutil, 'which', return_value='/usr/bin/python3.12'):
             ok, msg = self.m.refresh_venv_to_newer_python(
-                run=self.fake_run(calls=[]), fetch=lambda url: '404: Not Found', editor_file=__file__)
+                run=self.fake_run(calls=[]), fetch=lambda url: '404: Not Found', editor_file=__file__, old_python=True)
         self.assertFalse(ok)
         self.assertIn('pinned requirements', msg)
         self.assertTrue(os.path.exists(os.path.join(self.m.VENV_DIR, 'old.txt')))
@@ -222,7 +224,7 @@ class VenvRefreshTest(unittest.TestCase):
         seen = iter([None, '/usr/bin/python3.12'])
         with mock.patch.object(self.m.shutil, 'which', side_effect=lambda n: next(seen)):
             ok, msg = self.m.refresh_venv_to_newer_python(
-                run=self.fake_run(calls=calls), fetch=self.fetch, editor_file=__file__)
+                run=self.fake_run(calls=calls), fetch=self.fetch, editor_file=__file__, old_python=True)
         self.assertTrue(ok, msg)
         self.assertEqual(calls[0][:3], ['dnf', 'install', '-y'])
         self.assertIn('python3.12', calls[0])
@@ -269,6 +271,109 @@ class VenvRefreshTest(unittest.TestCase):
         with open(os.path.join(ROOT, 'config-editor', 'mediamtx_config_editor.py'), encoding='utf-8') as f:
             src = f.read()
         self.assertRegex(src, r"(?m)^    start_venv_refresh\(\).*\n    app\.run\(")
+
+
+class VenvPinsTest(unittest.TestCase):
+    """ops #1129: a console update on Ubuntu left urllib3, requests and certifi on the old versions,
+    because the venv rebuild only ran for Python below 3.10 (Rocky 9)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(prefix='mtx_pins_')
+        cls.m = load_editor(cls._tmp.name)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def needed(self, **kw):
+        args = dict(prefix=self.m.VENV_DIR, version_info=(3, 10, 12), euid=0, have_dnf=False, state={}, now=1000.0,
+                    installed=dict(self.m.VENV_PINS))
+        args.update(kw)
+        return self.m.venv_refresh_needed(**args)
+
+    def test_the_pins_in_the_editor_match_requirements_txt(self):
+        with open(os.path.join(ROOT, 'config-editor', 'requirements.txt'), encoding='utf-8') as f:
+            text = f.read()
+        in_file = {m.group(1).lower(): m.group(2) for m in re.finditer(r'(?m)^([A-Za-z0-9_.-]+)==(\S+) \\$', text)}
+        self.assertEqual(self.m.VENV_PINS, in_file,
+                         'VENV_PINS in the editor must list exactly the versions in requirements.txt')
+
+    def test_ubuntu_venv_with_old_libraries_is_rebuilt(self):
+        # The #1129 case: Python 3.10 or 3.12, no dnf, urllib3 2.6.3 / requests 2.32.5 / certifi 2026.10.23.
+        old = dict(self.m.VENV_PINS, urllib3='2.6.3', requests='2.32.5', certifi='2026.10.23')
+        self.assertTrue(self.needed(installed=old))
+        self.assertTrue(self.needed(installed=old, version_info=(3, 12, 3)))
+
+    def test_a_package_that_is_missing_counts_as_stale(self):
+        self.assertTrue(self.needed(installed=dict(self.m.VENV_PINS, requests=None)))
+
+    def test_matching_packages_are_left_alone(self):
+        self.assertFalse(self.needed())
+
+    def test_python_below_310_without_dnf_cannot_be_rebuilt(self):
+        old = dict(self.m.VENV_PINS, urllib3='2.6.3')
+        self.assertFalse(self.needed(installed=old, version_info=(3, 8, 10)))
+
+    def test_not_for_infra_tak_or_a_non_root_run(self):
+        old = dict(self.m.VENV_PINS, urllib3='2.6.3')
+        self.assertFalse(self.needed(installed=old, prefix='/usr'))
+        self.assertFalse(self.needed(installed=old, euid=1001))
+
+    def test_a_failed_rebuild_waits_a_day(self):
+        old = dict(self.m.VENV_PINS, urllib3='2.6.3')
+        state = {'status': 'failed', 'time': 1000.0}
+        self.assertFalse(self.needed(installed=old, state=state, now=1000.0 + 3600))
+        self.assertTrue(self.needed(installed=old, state=state, now=1000.0 + 25 * 3600))
+
+    def test_a_finished_rebuild_does_not_repeat_on_every_start(self):
+        old = dict(self.m.VENV_PINS, urllib3='2.6.3')
+        done = {'status': 'done', 'time': 1000.0, 'version': self.m.CURRENT_VERSION}
+        self.assertFalse(self.needed(installed=old, state=done))
+        self.assertTrue(self.needed(installed=old, state=dict(done, version='v0.0.0')))
+
+    def test_stale_packages_are_named(self):
+        installed = dict(self.m.VENV_PINS, urllib3='2.6.3', certifi='2026.10.23')
+        self.assertEqual(self.m.venv_stale_packages(installed), ['certifi', 'urllib3'])
+        self.assertEqual(self.m.venv_stale_packages(dict(self.m.VENV_PINS)), [])
+
+    def test_ubuntu_rebuild_uses_the_system_python3_and_no_dnf(self):
+        m = self.m
+        calls = []
+
+        def run(cmd, **kw):
+            calls.append(cmd)
+            if '-m venv' in ' '.join(cmd):
+                os.makedirs(os.path.join(m.VENV_NEW_DIR, 'bin'))
+            rc = 1 if ('import psutil' in ' '.join(cmd) and 'flask' not in ' '.join(cmd)) else 0
+            return subprocess.CompletedProcess(cmd, rc, '', '')
+        for p in (m.VENV_DIR, m.VENV_PREV_DIR, m.VENV_NEW_DIR):
+            shutil.rmtree(p, ignore_errors=True)
+        os.makedirs(os.path.join(m.VENV_DIR, 'bin'))
+        fetch = lambda url: 'flask==3.1.3 \\\n    --hash=sha256:' + 'a' * 64 + '\n'
+        with mock.patch.object(m.shutil, 'which', side_effect=lambda n: {'python3': '/usr/bin/python3'}.get(n)):
+            ok, msg = m.refresh_venv_to_newer_python(run=run, fetch=fetch, editor_file=__file__, old_python=False)
+        self.assertTrue(ok, msg)
+        self.assertFalse(any(c[0] == 'dnf' for c in calls), calls)
+        venv_call = [c for c in calls if '-m venv' in ' '.join(c)][0]
+        self.assertEqual(venv_call[0], '/usr/bin/python3')
+        self.assertTrue(os.path.isdir(m.VENV_PREV_DIR))
+
+    def test_ubuntu_rebuild_stops_when_the_system_python_is_too_old(self):
+        m = self.m
+        for p in (m.VENV_DIR, m.VENV_PREV_DIR, m.VENV_NEW_DIR):
+            shutil.rmtree(p, ignore_errors=True)
+        os.makedirs(os.path.join(m.VENV_DIR, 'bin'))
+        marker = os.path.join(m.VENV_DIR, 'keep.txt')
+        open(marker, 'w').close()
+
+        def run(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 1, '', 'AssertionError')
+        with mock.patch.object(m.shutil, 'which', return_value='/usr/bin/python3'):
+            ok, msg = m.refresh_venv_to_newer_python(run=run, fetch=lambda u: '', editor_file=__file__, old_python=False)
+        self.assertFalse(ok)
+        self.assertIn('older than 3.10', msg)
+        self.assertTrue(os.path.exists(marker))
 
 
 if __name__ == '__main__':
