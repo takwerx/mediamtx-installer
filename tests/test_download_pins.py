@@ -279,6 +279,20 @@ class PythonPackagePinTest(unittest.TestCase):
         self.assertNotIn('2.6.3', pins['urllib3'])
         self.assertNotIn('2.32.5', pins['requests'])
 
+    def test_certifi_is_the_november_2026_ca_bundle(self):
+        # certifi 2026.11.20 is the CA bundle refresh the Security lead's upgrade watch asked for (ops #1090).
+        # The console pin, the CI constraints and the CI hash lock must all move together; the hashes are the
+        # two files PyPI publishes for that release. Proof test: on the 2026.10.23 base this fails.
+        as_tuple = lambda v: tuple(int(x) for x in v.split('.'))
+        self.assertGreaterEqual(as_tuple(self._pins()['certifi'][0]), (2026, 11, 20))
+        for rel in ('.github/ci/requirements-tests.constraints', '.github/ci/requirements-tests.lock'):
+            self.assertRegex(self._text(rel), r'(?m)^certifi==2026\.11\.20\b', rel)
+        block = re.search(r'(?m)^certifi==2026\.11\.20 \\\n((?:    --hash=[^\n]*\n?)+)', self._text('config-editor/requirements.txt'))
+        self.assertIsNotNone(block, 'certifi block with hashes not found')
+        self.assertEqual(sorted(re.findall(r'sha256:([0-9a-f]{64})', block.group(1))), [
+            '7422df25243767b9877031a2248cb14d09ddac9beee846f4cef3d5c9191d488f',
+            'af1cb240a8133f105aa52684a3a3258339d7f2fd0bd4e2812698ff5cf5588c4e'])
+
     def test_every_package_is_pinned_with_hashes(self):
         for rel in ('config-editor/requirements.txt', 'config-editor/requirements-psutil.txt'):
             body = re.sub(r'\s*\\\n\s*', ' ', self._text(rel))
