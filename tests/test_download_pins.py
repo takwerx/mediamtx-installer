@@ -251,6 +251,48 @@ class PythonPackagePinTest(unittest.TestCase):
         with open(os.path.join(ROOT, rel), encoding='utf-8') as f:
             return f.read()
 
+    def _pins(self):
+        """{name: [versions]} of every pin in requirements.txt and requirements-psutil.txt."""
+        pins = {}
+        for rel in ('config-editor/requirements.txt', 'config-editor/requirements-psutil.txt'):
+            for m in re.finditer(r'(?m)^([A-Za-z0-9_.\-]+)==([^\s\\;]+)', self._text(rel)):
+                pins.setdefault(re.sub(r'[-_.]+', '-', m.group(1)).lower(), []).append(m.group(2))
+        return pins
+
+    def test_each_package_has_exactly_one_pin_and_no_python_marker(self):
+        # No `; python_version` lines: Python 3.9 is not supported any more (ops #1030), so there is one
+        # pin per package. Two pins that both apply would make pip refuse the file (ops #1020).
+        for name, vers in self._pins().items():
+            self.assertEqual(len(vers), 1, '%s pinned more than once: %s' % (name, vers))
+        for rel in ('config-editor/requirements.txt', 'config-editor/requirements-psutil.txt'):
+            self.assertNotIn('python_version', self._text(rel), rel)
+
+    def test_urllib3_and_requests_are_the_fixed_releases(self):
+        # urllib3 2.8.0 and requests 2.33.0 are the first releases with the fixes (ops #1020). They need
+        # Python 3.10, which is why Rocky 9 builds the editor's venv from python3.12 (ops #1030). Proof
+        # test: on the Python 3.9 base this file had a second, older pin for 3.9 and this fails.
+        floor = {'urllib3': (2, 8, 0), 'requests': (2, 33, 0)}
+        as_tuple = lambda v: tuple(int(x) for x in v.split('.'))
+        pins = self._pins()
+        for name, minimum in floor.items():
+            self.assertGreaterEqual(as_tuple(pins[name][0]), minimum, name)
+        self.assertNotIn('2.6.3', pins['urllib3'])
+        self.assertNotIn('2.32.5', pins['requests'])
+
+    def test_certifi_is_the_november_2026_ca_bundle(self):
+        # certifi 2026.11.20 is the CA bundle refresh the Security lead's upgrade watch asked for (ops #1090).
+        # The console pin, the CI constraints and the CI hash lock must all move together; the hashes are the
+        # two files PyPI publishes for that release. Proof test: on the 2026.10.23 base this fails.
+        as_tuple = lambda v: tuple(int(x) for x in v.split('.'))
+        self.assertGreaterEqual(as_tuple(self._pins()['certifi'][0]), (2026, 11, 20))
+        for rel in ('.github/ci/requirements-tests.constraints', '.github/ci/requirements-tests.lock'):
+            self.assertRegex(self._text(rel), r'(?m)^certifi==2026\.11\.20\b', rel)
+        block = re.search(r'(?m)^certifi==2026\.11\.20 \\\n((?:    --hash=[^\n]*\n?)+)', self._text('config-editor/requirements.txt'))
+        self.assertIsNotNone(block, 'certifi block with hashes not found')
+        self.assertEqual(sorted(re.findall(r'sha256:([0-9a-f]{64})', block.group(1))), [
+            '7422df25243767b9877031a2248cb14d09ddac9beee846f4cef3d5c9191d488f',
+            'af1cb240a8133f105aa52684a3a3258339d7f2fd0bd4e2812698ff5cf5588c4e'])
+
     def test_every_package_is_pinned_with_hashes(self):
         for rel in ('config-editor/requirements.txt', 'config-editor/requirements-psutil.txt'):
             body = re.sub(r'\s*\\\n\s*', ' ', self._text(rel))
@@ -264,74 +306,67 @@ class PythonPackagePinTest(unittest.TestCase):
         for pkg in ('flask', 'ruamel.yaml', 'requests', 'psutil'):
             self.assertIn(pkg + '==', names)
 
-    def test_python_39_extras_are_pinned(self):
-        # Python below 3.10 (Rocky 9) pulls importlib-metadata and zipp in for flask and click.
-        names = self._text('config-editor/requirements.txt').lower()
-        for pkg in ('importlib-metadata', 'zipp'):
-            self.assertRegex(names, r'(?m)^' + pkg + r'==', pkg)
-
-    def test_python_39_dependency_tree_is_pinned(self):
-        # What pip pulls in on Python 3.9 (Rocky 9) must all be pinned with == and hashes, or the
-        # installer stops with "all requirements must have their versions pinned with ==" (ops #646).
-        # pip's own resolver reads markers for the Python that runs it, so read each pinned release's
-        # published requirements from PyPI and apply the 3.9 markers here. Needs network; skipped without.
+    def test_dependency_tree_is_pinned_for_every_supported_python(self):
+        # What pip pulls in on Python 3.10 (Ubuntu 22.04) through 3.13 (python3.12 is Rocky 9's) must all be
+        # pinned with == and hashes, or the installer stops with "all requirements must have their versions
+        # pinned with ==" (ops #646). pip's own resolver reads markers for the Python that runs it, so read each
+        # pinned release's published requirements from PyPI and apply those Pythons' markers here. Needs
+        # network; skipped without.
         try:
-            from packaging.markers import Marker
             from packaging.requirements import Requirement
         except ImportError:
-            from pip._vendor.packaging.markers import Marker
             from pip._vendor.packaging.requirements import Requirement
         import json
-        env = {'python_version': '3.9', 'python_full_version': '3.9.25', 'sys_platform': 'linux',
-               'platform_system': 'Linux', 'os_name': 'posix', 'implementation_name': 'cpython',
-               'platform_python_implementation': 'CPython', 'extra': ''}
         norm = lambda n: re.sub(r'[-_.]+', '-', n).lower()
-        pinned = {}
-        for rel in ('config-editor/requirements.txt', 'config-editor/requirements-psutil.txt'):
-            for m in re.finditer(r'(?m)^([A-Za-z0-9_.\-]+)==([^\s\\]+)', self._text(rel)):
-                pinned[norm(m.group(1))] = m.group(2)
+        pinned = {n: v[0] for n, v in self._pins().items()}
         self.assertTrue(pinned)
-        missing = set()
+        infos = {}
         for name, ver in sorted(pinned.items()):
             try:
                 with urllib.request.urlopen('https://pypi.org/pypi/%s/%s/json' % (name, ver), timeout=30) as r:
-                    info = json.load(r)['info']
+                    infos[name] = json.load(r)['info']
             except OSError as e:
                 self.skipTest('PyPI not reachable: %s' % e)
-            for line in info.get('requires_dist') or []:
-                req = Requirement(line)
-                if req.marker is not None and not req.marker.evaluate(env):
-                    continue
-                if norm(req.name) not in pinned:
-                    missing.add('%s (needed by %s==%s)' % (req.name, name, ver))
+        missing = set()
+        for py in ('3.10', '3.12', '3.13'):
+            env = {'python_version': py, 'python_full_version': py + '.0', 'sys_platform': 'linux',
+                   'platform_system': 'Linux', 'os_name': 'posix', 'implementation_name': 'cpython',
+                   'platform_python_implementation': 'CPython', 'extra': ''}
+            for name, info in infos.items():
+                for line in info.get('requires_dist') or []:
+                    req = Requirement(line)
+                    if req.marker is not None and not req.marker.evaluate(env):
+                        continue
+                    if norm(req.name) not in pinned:
+                        missing.add('%s (needed by %s==%s on Python %s)' % (req.name, name, pinned[name], py))
         self.assertEqual(sorted(missing), [], 'not pinned with == and hashes in requirements.txt')
 
-    def test_every_pinned_release_supports_python_39(self):
-        # Rocky 9 runs Python 3.9. A pin whose release needs 3.10 or newer makes the whole
-        # `pip install --require-hashes` fail there (urllib3 2.8.0 and requests 2.33.0 did, ops #683).
-        # Needs network; skipped without.
+    def test_every_pinned_release_supports_python_310_through_313(self):
+        # Ubuntu 22.04 runs Python 3.10 and Rocky 9's editor venv runs python3.12 (ops #1030). A pin whose
+        # release needs a newer Python, or does not support 3.13 yet, makes the whole
+        # `pip install --require-hashes` fail on that box (ops #683). Needs network; skipped without.
         try:
             from packaging.specifiers import SpecifierSet
         except ImportError:
             from pip._vendor.packaging.specifiers import SpecifierSet
         import json
-        pinned = {}
-        for rel in ('config-editor/requirements.txt', 'config-editor/requirements-psutil.txt'):
-            for m in re.finditer(r'(?m)^([A-Za-z0-9_.\-]+)==([^\s\\]+)', self._text(rel)):
-                pinned[m.group(1)] = m.group(2)
+        pinned = {n: v[0] for n, v in self._pins().items()}
         self.assertTrue(pinned)
-        too_new = []
+        bad = []
         for name, ver in sorted(pinned.items()):
             try:
                 with urllib.request.urlopen('https://pypi.org/pypi/%s/%s/json' % (name, ver), timeout=30) as r:
                     spec = json.load(r)['info'].get('requires_python') or ''
             except OSError as e:
                 self.skipTest('PyPI not reachable: %s' % e)
-            if spec and not SpecifierSet(spec).contains('3.9.25'):
-                too_new.append('%s==%s needs Python %s' % (name, ver, spec))
-        self.assertEqual(too_new, [], 'pinned releases that do not install on Python 3.9 (Rocky 9)')
+            for py in ('3.10.0', '3.12.0', '3.13.0'):
+                if spec and not SpecifierSet(spec).contains(py):
+                    bad.append('%s==%s needs Python %s, not %s' % (name, ver, spec, py))
+        self.assertEqual(bad, [], 'pinned releases that do not install on a supported Python')
 
-    def test_dependabot_pip_updates_go_to_dev_and_skip_python_310_releases(self):
+    def test_dependabot_pip_updates_go_to_dev_and_may_move_urllib3_and_requests(self):
+        # urllib3 and requests used to be held back for Python 3.9 (ops #683); that hold is gone (ops #1030),
+        # so Dependabot may bump them again. Only major versions stay out of the automatic PRs.
         from ruamel.yaml import YAML
         cfg = YAML(typ='safe').load(self._text('.github/dependabot.yml'))
         pip = [u for u in cfg['updates'] if u['package-ecosystem'] == 'pip']
@@ -339,8 +374,8 @@ class PythonPackagePinTest(unittest.TestCase):
         self.assertEqual(pip[0]['target-branch'], 'dev')
         self.assertEqual(pip[0]['directory'], '/config-editor')
         ignored = {i['dependency-name']: i.get('versions') for i in pip[0]['ignore']}
-        self.assertEqual(ignored.get('urllib3'), ['>=2.7.0'])
-        self.assertEqual(ignored.get('requests'), ['>=2.33.0'])
+        self.assertNotIn('urllib3', ignored)
+        self.assertNotIn('requests', ignored)
 
     def test_installer_installs_only_with_require_hashes(self):
         src = self._text('config-editor/Install_MediaMTX_Config_Editor.sh')
