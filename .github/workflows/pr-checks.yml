@@ -1,6 +1,8 @@
 name: PR checks
 
 # Automatic checks on every PR (ops #329, same shape as infra-TAK's PR checks). No Claude involved.
+# Also run on every push to dev and main (ops #1160): two PRs that each pass alone can fail together once both
+# are merged (v2.1.19: PR 66 and PR 67), and PR checks never see that. Same jobs, same checks-ok.
 # A red check blocks the merge once `checks-ok` is made a required check. Run the same things locally:
 #   bash .github/ci/static_checks.sh      (needs shellcheck and PyYAML)
 #   python3 -m pytest tests -q            (needs flask ruamel.yaml requests psutil pytest; CI installs the console's own requirements*.txt plus .github/ci/requirements-testtools.lock by hash)
@@ -8,10 +10,14 @@ on:
   pull_request:
     branches: [dev, main]
     types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [dev, main]
 
 concurrency:
-  group: pr-checks-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  # PRs by number, pushes by branch (github.ref), so a push to dev never cancels a PR run and the
+  # two never share a group. Only PR runs cancel an older run; a push run always finishes.
+  group: pr-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
