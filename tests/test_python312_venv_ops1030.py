@@ -366,7 +366,8 @@ class VenvPinsTest(unittest.TestCase):
         os.makedirs(os.path.join(m.VENV_DIR, 'bin'))
         fetch = lambda url: 'flask==3.1.3 \\\n    --hash=sha256:' + 'a' * 64 + '\n'
         with mock.patch.object(m.shutil, 'which', side_effect=lambda n: {'python3': '/usr/bin/python3'}.get(n)):
-            ok, msg = m.refresh_venv_to_newer_python(run=run, fetch=fetch, editor_file=__file__, old_python=False)
+            ok, msg = m.refresh_venv_to_newer_python(run=run, fetch=fetch, editor_file=__file__, old_python=False,
+                                                     running_python='/nonexistent/python3')  # unusable: falls back to python3
         self.assertTrue(ok, msg)
         self.assertFalse(any(c[0] == 'dnf' for c in calls), calls)
         venv_call = [c for c in calls if '-m venv' in ' '.join(c)][0]
@@ -384,10 +385,95 @@ class VenvPinsTest(unittest.TestCase):
         def run(cmd, **kw):
             return subprocess.CompletedProcess(cmd, 1, '', 'AssertionError')
         with mock.patch.object(m.shutil, 'which', return_value='/usr/bin/python3'):
-            ok, msg = m.refresh_venv_to_newer_python(run=run, fetch=lambda u: '', editor_file=__file__, old_python=False)
+            ok, msg = m.refresh_venv_to_newer_python(run=run, fetch=lambda u: '', editor_file=__file__, old_python=False,
+                                                     running_python='/nonexistent/python3')
         self.assertFalse(ok)
         self.assertIn('older than 3.10', msg)
         self.assertTrue(os.path.exists(marker))
+
+
+class VenvRebuildInterpreterTest(unittest.TestCase):
+    """ops #1156: a Rocky 9 venv that already runs python3.12 must be rebuilt from python3.12, not from the
+    system python3 (3.9), or the rebuild fails with 'the system python3 is older than 3.10' every day."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory(prefix='mtx_interp_')
+        cls.m = load_editor(cls._tmp.name)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def setUp(self):
+        m = self.m
+        for p in (m.VENV_DIR, m.VENV_PREV_DIR, m.VENV_NEW_DIR):
+            shutil.rmtree(p, ignore_errors=True)
+        os.makedirs(os.path.join(m.VENV_DIR, 'bin'))
+        self.d = tempfile.mkdtemp(prefix='mtx_py_')
+        self.addCleanup(shutil.rmtree, self.d, True)
+        # stand-ins: Rocky's system python3 is 3.9 (its version check fails), the venv's python3.12 passes
+        self.sys_py = os.path.join(self.d, 'python3')
+        self.run_py = os.path.join(self.d, 'python3.12')
+
+    def run_refresh(self, running_python, calls, sys_old=True):
+        m = self.m
+        sys_py = self.sys_py
+
+        def run(cmd, **kw):
+            calls.append(cmd)
+            joined = ' '.join(cmd)
+            if sys_old and cmd[0] == sys_py and 'import sys, venv' in joined:
+                return subprocess.CompletedProcess(cmd, 1, '', 'AssertionError')  # python 3.9
+            if '-m venv' in joined:
+                os.makedirs(os.path.join(m.VENV_NEW_DIR, 'bin'))
+            rc = 1 if ('import psutil' in joined and 'flask' not in joined) else 0
+            return subprocess.CompletedProcess(cmd, rc, '', '')
+        fetch = lambda url: 'flask==3.1.3 \\\n    --hash=sha256:' + 'a' * 64 + '\n'
+        with mock.patch.object(m.shutil, 'which', side_effect=lambda n: {'python3': sys_py}.get(n)):
+            return m.refresh_venv_to_newer_python(run=run, fetch=fetch, editor_file=__file__, old_python=False,
+                                                  running_python=running_python)
+
+    def test_a_python312_venv_is_rebuilt_from_its_own_python_not_the_system_python3(self):
+        write_exe(self.sys_py, '#!/bin/bash\nexit 1\n')
+        write_exe(self.run_py, '#!/bin/bash\nexit 0\n')
+        calls = []
+        ok, msg = self.run_refresh(self.run_py, calls)
+        self.assertTrue(ok, msg)
+        venv_call = [c for c in calls if '-m venv' in ' '.join(c)][0]
+        self.assertEqual(venv_call[0], self.run_py)
+        self.assertFalse(any(c[0] == 'dnf' for c in calls), calls)
+        self.assertTrue(os.path.isdir(self.m.VENV_PREV_DIR))
+
+    def test_the_default_is_the_python_this_process_runs_on(self):
+        # no argument: the interpreter of the running venv (resolved to the real file), not shutil.which('python3')
+        calls = []
+        m = self.m
+        run = lambda cmd, **kw: (calls.append(cmd), subprocess.CompletedProcess(cmd, 1, '', 'stop here'))[1]
+        with mock.patch.object(m.shutil, 'which', side_effect=lambda n: '/usr/bin/python3-from-which'):
+            ok, msg = m.refresh_venv_to_newer_python(run=run, fetch=lambda u: '', editor_file=__file__, old_python=False)
+        self.assertFalse(ok)
+        self.assertEqual(calls[0][0], os.path.realpath(sys.executable))
+
+    def test_it_falls_back_to_the_system_python3_when_the_running_python_is_gone(self):
+        write_exe(self.sys_py, '#!/bin/bash\nexit 0\n')
+        calls = []
+        ok, msg = self.run_refresh(os.path.join(self.d, 'missing'), calls, sys_old=False)
+        venv_call = [c for c in calls if '-m venv' in ' '.join(c)][0]
+        self.assertEqual(venv_call[0], self.sys_py)
+        self.assertTrue(ok, msg)
+
+    def test_rocky_python312_with_only_click_behind_is_rebuilt_not_failed(self):
+        # The exact ops #1156 case: python 3.12 venv, click 8.1.8, everything else current, dnf present.
+        m = self.m
+        installed = dict(m.VENV_PINS, click='8.1.8')
+        self.assertTrue(m.venv_refresh_needed(prefix=m.VENV_DIR, version_info=(3, 12, 16), euid=0, have_dnf=True,
+                                              state={}, now=1000.0, installed=installed))
+        write_exe(self.sys_py, '#!/bin/bash\nexit 1\n')
+        write_exe(self.run_py, '#!/bin/bash\nexit 0\n')
+        ok, msg = self.run_refresh(self.run_py, [])
+        self.assertTrue(ok, msg)
+        self.assertNotIn('older than 3.10', msg)
 
 
 if __name__ == '__main__':

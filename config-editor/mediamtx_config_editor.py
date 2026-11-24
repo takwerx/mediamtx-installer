@@ -13467,7 +13467,8 @@ def apply_update():
 #   * the venv is on Python below 3.10 (Rocky/RHEL 9 installed before ops #1030): the new venv is
 #     built from python3.12, which dnf installs. The pinned urllib3 2.8.0 needs 3.10 or newer.
 #   * the venv's packages are not the ones in VENV_PINS (any standalone box, Ubuntu too): the new
-#     venv is built from the system python3, which is 3.10 or newer there.
+#     venv is built from the Python this venv already runs on (it is 3.10 or newer, and on Rocky 9 it
+#     is python3.12, not the system python3 3.9). It falls back to the system python3 if that file is gone.
 # It only acts on the standalone install: running from /opt/mediamtx-webeditor/venv, as root.
 # infra-TAK runs the editor on the system python3 with its own account, so this skips there.
 VENV_DIR = '/opt/mediamtx-webeditor/venv'
@@ -13486,7 +13487,7 @@ VENV_PINS = {
     'blinker': '1.9.0',
     'certifi': '2026.11.20',
     'charset-normalizer': '3.5.2',
-    'click': '8.1.8',
+    'click': '8.5.1',
     'idna': '3.20',
     'itsdangerous': '2.2.0',
     'requests': '2.34.2',
@@ -13577,9 +13578,10 @@ def _venv_retarget(venv_dir, old_name, new_name):
             pass
 
 
-def refresh_venv_to_newer_python(run=None, fetch=None, editor_file=None, old_python=None):
-    """Build the venv again (python3.12 on Rocky 9, the system python3 elsewhere) and swap it in. Returns (ok, message). Never raises.
-    `run` and `fetch` can be replaced (the tests do)."""
+def refresh_venv_to_newer_python(run=None, fetch=None, editor_file=None, old_python=None, running_python=None):
+    """Build the venv again (python3.12 on Rocky 9 when the venv is on Python below 3.10, otherwise the Python the
+    venv runs on) and swap it in. Returns (ok, message). Never raises.
+    `run`, `fetch` and `running_python` can be replaced (the tests do)."""
     run = run or subprocess.run
     editor_file = editor_file or os.path.abspath(__file__)
     if fetch is None:
@@ -13605,13 +13607,21 @@ def refresh_venv_to_newer_python(run=None, fetch=None, editor_file=None, old_pyt
             if not py:
                 return False, 'python3.12 is not available from the dnf repositories'
         else:
-            # Ubuntu/Debian: the system python3 is already 3.10 or newer.
-            py = shutil.which('python3')
+            # The venv already runs on Python 3.10 or newer (Ubuntu/Debian: the system python3; Rocky 9
+            # after the first rebuild: python3.12). Build the new venv from that same interpreter. On Rocky 9
+            # the system python3 is 3.9, so choosing it would fail the check below (ops #1156).
+            import sys
+            if running_python is None:
+                running_python = os.path.realpath(sys.executable)
+            if running_python and os.path.isfile(running_python) and os.access(running_python, os.X_OK):
+                py = running_python
+            else:
+                py = shutil.which('python3')
             if not py:
                 return False, 'python3 was not found'
             r = run([py, '-c', 'import sys, venv; assert sys.version_info >= (3, 10)'], capture_output=True, text=True, timeout=60)
             if r.returncode != 0:
-                return False, 'the system python3 is older than 3.10 or has no venv module: ' + (r.stderr or r.stdout or '')[-200:]
+                return False, 'the Python for the new venv (' + py + ') is older than 3.10 or has no venv module: ' + (r.stderr or r.stdout or '')[-200:]
 
         branch = get_update_channel()
         base = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{branch}/config-editor/"
