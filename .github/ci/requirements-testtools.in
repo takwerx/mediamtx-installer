@@ -1,0 +1,6 @@
+# Source for requirements-testtools.lock (ops #1112): the test runner only, by hash.
+# The console's own packages (flask, requests, ruamel.yaml, psutil and what they need) are NOT here.
+# The CI test jobs install them straight from config-editor/requirements.txt and requirements-psutil.txt,
+# so a Dependabot bump of a console pin is the whole change and the tests run on exactly what customers get.
+# A test (tests/test_ci_locks_ops1014.py) fails if a package is pinned both here and in the console files.
+pytest==9.2.0
