@@ -147,11 +147,21 @@ def api_get(repo, path):
     return None
 
 
+def branch_for_rules(env):
+    """The branch rule 1 judges against: the PR's base branch, or, on a push to dev or main (ops #1160),
+    the branch that was pushed. GITHUB_BASE_REF is empty on a push, and an empty base made rule 1 treat a
+    push to main (a release in progress, version ahead of the tag with no -dev) as a push to dev."""
+    base = env.get("GITHUB_BASE_REF", "")
+    if not base and env.get("GITHUB_EVENT_NAME") == "push" and env.get("GITHUB_REF_TYPE", "branch") == "branch":
+        base = env.get("GITHUB_REF_NAME", "")
+    return base
+
+
 def main():
     root = subprocess.run(["git", "rev-parse", "--show-toplevel"], check=True, capture_output=True, text=True).stdout.strip()
     os.chdir(root)
     repo = os.environ.get("GITHUB_REPOSITORY", "takwerx/mediamtx-installer")
-    base_branch = os.environ.get("GITHUB_BASE_REF", "")
+    base_branch = branch_for_rules(os.environ)
     try:
         with open(VERSION_FILE, encoding="utf-8") as fh:
             version_text = fh.read()
@@ -206,6 +216,16 @@ def self_test():
         ok = len(got) == want
         bad += not ok
         print("%s  %s%s" % ("ok  " if ok else "FAIL", name, "" if ok else "  (wanted %d problem(s), got %s)" % (want, got)))
+    for name, env, want in (
+        ("PR base wins", {"GITHUB_BASE_REF": "main", "GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF_NAME": "12/merge"}, "main"),
+        ("push to main", {"GITHUB_EVENT_NAME": "push", "GITHUB_REF_NAME": "main", "GITHUB_REF_TYPE": "branch"}, "main"),
+        ("push to dev", {"GITHUB_EVENT_NAME": "push", "GITHUB_REF_NAME": "dev", "GITHUB_REF_TYPE": "branch"}, "dev"),
+        ("local run", {}, ""),
+    ):
+        got = branch_for_rules(env)
+        ok = got == want
+        bad += not ok
+        print("%s  base branch: %s%s" % ("ok  " if ok else "FAIL", name, "" if ok else "  (wanted %r, got %r)" % (want, got)))
     try:
         run_checks("no version here\n", tags, good, "v2.1.13", "dev")
         print("FAIL  missing version line should raise")

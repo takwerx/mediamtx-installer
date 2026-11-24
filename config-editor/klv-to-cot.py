@@ -41,6 +41,10 @@ import time
 
 # 16-byte Universal Key that prefixes every ST0601 local set.
 UAS_LS_KEY = bytes.fromhex("060E2B34020B01010E01030101000000")
+# The key split in two: ffmpeg 6.1.1 drops the first 5 bytes (see StreamScanner.feed).
+_UAS_LS_KEY_CUT = 5
+_UAS_LS_KEY_HEAD = UAS_LS_KEY[:_UAS_LS_KEY_CUT]
+_UAS_LS_KEY_TAIL = UAS_LS_KEY[_UAS_LS_KEY_CUT:]
 
 # Per-tag decoders. Each entry: (output_path, fn(raw_bytes) -> float|int).
 # Linear maps per MISB ST0601; ranges/precision per the standard.
@@ -178,20 +182,27 @@ class StreamScanner:
     def feed(self, chunk):
         self.buf.extend(chunk)
         while True:
-            idx = self.buf.find(UAS_LS_KEY)
-            if idx < 0:
-                # Keep a tail in case the key spans the next chunk boundary.
+            # Find the key by its last 11 bytes. ffmpeg 6.1.1 (Ubuntu 24.04) hands over each set
+            # with the first 5 bytes of the key missing (ops #1128); every other ffmpeg we have
+            # seen (4.4, 5.1, 7.1) gives the whole key. Either way the tail is there.
+            tail = self.buf.find(_UAS_LS_KEY_TAIL)
+            if tail < 0:
+                # Keep the last 16 bytes: a key split across chunks is then still whole next time.
                 if len(self.buf) > len(UAS_LS_KEY):
                     del self.buf[:-len(UAS_LS_KEY)]
                 return
-            start = idx + len(UAS_LS_KEY)
+            if tail >= _UAS_LS_KEY_CUT and self.buf[tail - _UAS_LS_KEY_CUT:tail] == _UAS_LS_KEY_HEAD:
+                idx, head = tail - _UAS_LS_KEY_CUT, b""  # whole key
+            else:
+                idx, head = tail, _UAS_LS_KEY_HEAD       # cut key: put the 5 bytes back so the checksum adds up
+            start = tail + len(_UAS_LS_KEY_TAIL)
             length, after_len = _ber_len(self.buf, start)
             if length is None:
                 return  # need more bytes for the length field
             end = after_len + length
             if end > len(self.buf):
                 return  # need more bytes for the full payload
-            packet = bytes(self.buf[idx:end])
+            packet = head + bytes(self.buf[idx:end])
             payload = bytes(self.buf[after_len:end])
             del self.buf[:end]
             if not _checksum_ok(packet):
