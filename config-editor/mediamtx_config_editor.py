@@ -258,7 +258,10 @@ def github_latest_release(repo, ctx, asset_names=None, fresh_seconds=RELEASE_FRE
     if limited:
         mins = max(1, int((reset_at - time.time()) / 60) + 1) if reset_at else 15
         raise GitHubLookupError(why + f' Try again in about {mins} minute{"s" if mins != 1 else ""}.')
-    raise GitHubLookupError(f'Could not reach GitHub ({api_error or redirect_error}). Try again in a few minutes.')
+    # The technical reason (refused connection, timeout, ...) goes to the editor log, not to the page.
+    print(f"WARNING: version check could not reach GitHub for {repo}: "
+          f"api: {api_error or 'no error text'}; github.com: {redirect_error}", flush=True)
+    raise GitHubLookupError('Could not reach GitHub. Try again in a few minutes.')
 
 
 LDAP_OVERLAY_ACTIVE = os.path.exists('/opt/mediamtx-webeditor/mediamtx_ldap_overlay.py')
@@ -3304,7 +3307,7 @@ HTML_TEMPLATE = '''
                             Update Available: <span id="mtx-remote-version"></span>
                         </div>
                         <div style="font-size: 13px; color: #999; margin-bottom: 8px;">
-                            Current: <span id="mtx-current-version"></span> · Published <span id="mtx-published"></span>
+                            Current: <span id="mtx-current-version"></span><span id="mtx-published-wrap"> · Published <span id="mtx-published"></span></span>
                         </div>
                         <div id="mtx-release-notes" style="font-size: 13px; color: #ccc; white-space: pre-wrap; max-height: 150px; overflow-y: auto; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 6px; margin-bottom: 12px;"></div>
                         <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
@@ -8135,6 +8138,17 @@ HTML_TEMPLATE = '''
             return '<div style="color:#9ca3af;font-size:12px;margin-top:4px;">' + data.notice + when + '</div>';
         }
 
+        function releaseNotesText(data) {
+            var notes = data && data.release_notes ? String(data.release_notes).trim() : '';
+            return notes || 'Release notes: see View on GitHub.';
+        }
+
+        function publishedText(data) {
+            if (!data || !data.published_at) { return ''; }
+            var d = new Date(data.published_at);
+            return isNaN(d.getTime()) ? '' : d.toLocaleDateString();
+        }
+
         function loadVersionsWebEditor() {
             fetch('/api/update/check')
             .then(res => res.json())
@@ -8144,7 +8158,7 @@ HTML_TEMPLATE = '''
                     info.innerHTML = '⚠️ Current: <strong style="color:#e5e5e5;">' + data.current_version + '</strong> — update available';
                     document.getElementById('ve-update-section').style.display = 'block';
                     document.getElementById('ve-remote-version').textContent = data.remote_version;
-                    document.getElementById('ve-release-notes').textContent = data.release_notes || 'No release notes.';
+                    document.getElementById('ve-release-notes').textContent = releaseNotesText(data);
                     document.getElementById('ve-github-link').href = data.html_url || '#';
                 } else if (data.success) {
                     info.innerHTML = '✅ Current: <strong style="color:#4ade80;">' + data.current_version + '</strong> — up to date';
@@ -8174,12 +8188,11 @@ HTML_TEMPLATE = '''
                     document.getElementById('mtx-update-section').style.display = 'block';
                     document.getElementById('mtx-remote-version').textContent = data.remote_version;
                     document.getElementById('mtx-current-version').textContent = data.current_version;
-                    document.getElementById('mtx-release-notes').textContent = data.release_notes || 'No release notes.';
+                    document.getElementById('mtx-release-notes').textContent = releaseNotesText(data);
                     document.getElementById('mtx-github-link').href = data.html_url || '#';
-                    if (data.published_at) {
-                        var d = new Date(data.published_at);
-                        document.getElementById('mtx-published').textContent = d.toLocaleDateString();
-                    }
+                    var pub = publishedText(data);
+                    document.getElementById('mtx-published').textContent = pub;
+                    document.getElementById('mtx-published-wrap').style.display = pub ? '' : 'none';
                     // Reset button state
                     document.getElementById('mtx-update-btn').disabled = false;
                     document.getElementById('mtx-update-btn').textContent = '⬆️ Upgrade MediaMTX';
