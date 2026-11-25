@@ -106,6 +106,161 @@ def set_dev_baseline(h):
     except OSError:
         pass
 
+# --- GitHub "latest release" lookups (ops #1214) -----------------------------
+# GitHub lets an unauthenticated address make 60 API calls an hour. A shared
+# address (an office, a test lab, a customer's NAT) runs out, and the Version
+# Management tab then showed "HTTP Error 403: rate limit exceeded" and the update
+# buttons stopped working. So: (1) an answer is reused for 10 minutes, (2) the
+# last good answer is kept on disk, (3) when the API refuses, the newest tag is
+# read from the github.com "latest" redirect, which has no API limit, and (4) a
+# plain sentence replaces the raw error.
+RELEASE_CACHE_FILE = '/opt/mediamtx-webeditor/github_release_cache.json'
+RELEASE_FRESH_SECONDS = 600
+_GH_BLOCKED_UNTIL = 0.0   # epoch seconds; the API is skipped until then
+_gh_lock = threading.Lock()
+_gh_mem_cache = {}
+
+
+class GitHubLookupError(Exception):
+    """No release answer from GitHub (API, github.com or cache). str() is user-safe."""
+
+
+def _gh_cache_get(repo):
+    with _gh_lock:
+        if repo in _gh_mem_cache:
+            return _gh_mem_cache[repo]
+    try:
+        with open(RELEASE_CACHE_FILE, 'r') as f:
+            entry = (json.load(f) or {}).get(repo)
+        if isinstance(entry, dict) and isinstance(entry.get('release'), dict):
+            with _gh_lock:
+                _gh_mem_cache[repo] = entry
+            return entry
+    except Exception:
+        pass
+    return None
+
+
+def _gh_cache_put(repo, release):
+    entry = {'fetched_at': time.time(), 'release': release}
+    with _gh_lock:
+        _gh_mem_cache[repo] = entry
+    try:
+        try:
+            with open(RELEASE_CACHE_FILE, 'r') as f:
+                allc = json.load(f) or {}
+        except Exception:
+            allc = {}
+        allc[repo] = entry
+        os.makedirs(os.path.dirname(RELEASE_CACHE_FILE), exist_ok=True)
+        tmp = RELEASE_CACHE_FILE + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(allc, f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, RELEASE_CACHE_FILE)
+    except Exception:
+        pass   # the in-memory copy still works; a read-only folder must not break the check
+
+
+def _iso_utc(epoch):
+    from datetime import timezone
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _gh_latest_tag_from_redirect(repo, ctx):
+    """Newest release tag from github.com/<repo>/releases/latest (a redirect, no API limit)."""
+    import urllib.request
+    from urllib.parse import unquote
+    req = urllib.request.Request(f'https://github.com/{repo}/releases/latest', method='HEAD',
+                                 headers={'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION})
+    with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+        final = resp.geturl()
+    m = re.search(r'/releases/tag/([^/?#]+)$', final or '')
+    if not m:
+        raise ValueError('github.com did not name a newest release')
+    return unquote(m.group(1))
+
+
+def github_latest_release(repo, ctx, asset_names=None, fresh_seconds=RELEASE_FRESH_SECONDS):
+    """Return (release, info) for the newest release of `repo`.
+
+    release is shaped like the GitHub API answer (tag_name, body, published_at,
+    html_url, assets). info = {'checked_at': ISO UTC, 'stale': bool, 'notice': str}.
+    `asset_names(tag)` lists the files to name when only the tag is known.
+    Raises GitHubLookupError (a user-safe sentence) when nothing answers.
+    """
+    import urllib.request
+    import urllib.error
+    global _GH_BLOCKED_UNTIL
+    now = time.time()
+    cached = _gh_cache_get(repo)
+    if cached and 0 <= now - cached['fetched_at'] < fresh_seconds:
+        return cached['release'], {'checked_at': _iso_utc(cached['fetched_at']), 'stale': False, 'notice': ''}
+
+    limited = now < _GH_BLOCKED_UNTIL
+    reset_at = _GH_BLOCKED_UNTIL if limited else 0.0
+    api_error = ''
+    if not limited:
+        req = urllib.request.Request(f'https://api.github.com/repos/{repo}/releases/latest', headers={
+            'Accept': 'application/vnd.github.v3+json',
+            'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=10, context=ctx) as response:
+                data = json.loads(response.read().decode())
+            _gh_cache_put(repo, data)
+            return data, {'checked_at': _iso_utc(time.time()), 'stale': False, 'notice': ''}
+        except urllib.error.HTTPError as e:
+            hdrs = e.headers or {}
+            remaining = hdrs.get('X-RateLimit-Remaining')
+            retry_after = hdrs.get('Retry-After')
+            if e.code in (403, 429) and (e.code == 429 or remaining == '0' or retry_after):
+                limited = True
+                try:
+                    reset_at = float(hdrs.get('X-RateLimit-Reset') or 0)
+                except ValueError:
+                    reset_at = 0.0
+                if not reset_at and retry_after:
+                    try:
+                        reset_at = now + float(retry_after)
+                    except ValueError:
+                        reset_at = 0.0
+                if not reset_at:
+                    reset_at = now + 900
+                reset_at = min(max(reset_at, now + 60), now + 3600)
+                _GH_BLOCKED_UNTIL = reset_at
+            api_error = f'HTTP {e.code}'
+        except Exception as e:
+            api_error = str(e) or e.__class__.__name__
+
+    why = ("GitHub is limiting version checks from this server's internet address."
+           if limited else "GitHub's API did not answer.")
+    try:
+        tag = _gh_latest_tag_from_redirect(repo, ctx)
+        old = (cached or {}).get('release') or {}
+        same = old.get('tag_name') == tag
+        release = {
+            'tag_name': tag,
+            'body': old.get('body', '') if same else '',
+            'published_at': old.get('published_at', '') if same else '',
+            'html_url': f'https://github.com/{repo}/releases/tag/{tag}',
+            'assets': [{'name': n, 'browser_download_url': f'https://github.com/{repo}/releases/download/{tag}/{n}'}
+                       for n in (asset_names(tag) if asset_names else [])],
+        }
+        return release, {'checked_at': _iso_utc(time.time()), 'stale': False,
+                         'notice': why + ' The newest version was read from github.com instead.'}
+    except Exception as e:
+        redirect_error = str(e) or e.__class__.__name__
+
+    if cached:
+        return cached['release'], {'checked_at': _iso_utc(cached['fetched_at']), 'stale': True,
+                                   'notice': why + ' Showing the last answer GitHub gave.'}
+    if limited:
+        mins = max(1, int((reset_at - time.time()) / 60) + 1) if reset_at else 15
+        raise GitHubLookupError(why + f' Try again in about {mins} minute{"s" if mins != 1 else ""}.')
+    raise GitHubLookupError(f'Could not reach GitHub ({api_error or redirect_error}). Try again in a few minutes.')
+
+
 LDAP_OVERLAY_ACTIVE = os.path.exists('/opt/mediamtx-webeditor/mediamtx_ldap_overlay.py')
 if LDAP_OVERLAY_ACTIVE:
     print("INFO: LDAP overlay detected — skipping conflicting route registration", flush=True)
@@ -7973,6 +8128,13 @@ HTML_TEMPLATE = '''
             .catch(() => alert('Request failed'));
         }
 
+        function versionNoticeHtml(data) {
+            if (!data || !data.success || !data.notice) { return ''; }
+            var when = '';
+            if (data.stale && data.checked_at) { when = ' (answer from ' + new Date(data.checked_at).toLocaleString() + ')'; }
+            return '<div style="color:#9ca3af;font-size:12px;margin-top:4px;">' + data.notice + when + '</div>';
+        }
+
         function loadVersionsWebEditor() {
             fetch('/api/update/check')
             .then(res => res.json())
@@ -7990,6 +8152,7 @@ HTML_TEMPLATE = '''
                 } else {
                     info.innerHTML = '⚠️ Could not check for updates: ' + (data.error || 'unknown error');
                 }
+                if (data.success) { info.innerHTML += versionNoticeHtml(data); }
             })
             .catch(() => {
                 document.getElementById('ve-version-info').innerHTML = '⚠️ Could not connect to GitHub';
@@ -8027,6 +8190,7 @@ HTML_TEMPLATE = '''
                 } else {
                     info.innerHTML = '⚠️ Could not check: ' + (data.error || 'unknown error');
                 }
+                if (data.success) { info.innerHTML += versionNoticeHtml(data); }
             })
             .catch(() => {
                 document.getElementById('mtx-version-info').innerHTML = '⚠️ Could not connect to GitHub';
@@ -13210,13 +13374,7 @@ def check_for_update():
         if get_update_channel() == 'dev':
             return _check_dev_update(ctx)
 
-        req = urllib.request.Request(GITHUB_API_URL, headers={
-            'Accept': 'application/vnd.github.v3+json',
-            'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION
-        })
-        
-        with urllib.request.urlopen(req, timeout=10, context=ctx) as response:
-            data = json.loads(response.read().decode())
+        data, gh_info = github_latest_release(GITHUB_REPO, ctx)
         
         remote_version = data.get('tag_name', '')
         release_notes = data.get('body', 'No release notes provided.')
@@ -13245,7 +13403,10 @@ def check_for_update():
             'update_available': update_available,
             'release_notes': release_notes,
             'published_at': published_at,
-            'html_url': html_url
+            'html_url': html_url,
+            'checked_at': gh_info['checked_at'],
+            'stale': gh_info['stale'],
+            'notice': gh_info['notice']
         })
     except Exception as e:
         return jsonify({
@@ -14014,7 +14175,8 @@ def remove_firewall_rule():
 
 # === MEDIAMTX VERSION ENDPOINTS ===
 
-MEDIAMTX_GITHUB_API = 'https://api.github.com/repos/bluenviron/mediamtx/releases/latest'
+MEDIAMTX_REPO = 'bluenviron/mediamtx'
+MEDIAMTX_GITHUB_API = f'https://api.github.com/repos/{MEDIAMTX_REPO}/releases/latest'
 MEDIAMTX_BINARY = '/usr/local/bin/mediamtx'
 
 # Everything this console downloads and then runs as root is checked against a SHA-256 first
@@ -14051,6 +14213,12 @@ MEDIAMTX_ARCH_MAP = {
     'armv6l': 'armv6',
 }
 MEDIAMTX_ARCH = MEDIAMTX_ARCH_MAP.get(platform.machine(), 'amd64')
+
+
+def mediamtx_release_asset_names(tag):
+    """Release file names for `tag`, used when only the tag is known (GitHub API refused).
+    MediaMTX names them mediamtx_<tag>_linux_<arch>.tar.gz and publishes checksums.sha256."""
+    return [f'mediamtx_{tag}_linux_{arch}.tar.gz' for arch in sorted(set(MEDIAMTX_ARCH_MAP.values()))] + ['checksums.sha256']
 
 # ELF e_machine values, for checking a downloaded binary against this host
 # BEFORE it is installed. Read from the file header — the candidate is never
@@ -14094,15 +14262,9 @@ def check_mediamtx_version():
         except Exception as e:
             print(f"Error getting MediaMTX version: {e}", flush=True)
         
-        # Get latest from GitHub
+        # Get latest from GitHub (cached, with a github.com fallback when the API is rate limited)
         ctx = ssl.create_default_context()
-        req = urllib.request.Request(MEDIAMTX_GITHUB_API, headers={
-            'Accept': 'application/vnd.github.v3+json',
-            'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION
-        })
-        
-        with urllib.request.urlopen(req, timeout=10, context=ctx) as response:
-            data = json.loads(response.read().decode())
+        data, gh_info = github_latest_release(MEDIAMTX_REPO, ctx, asset_names=mediamtx_release_asset_names)
         
         remote_version = data.get('tag_name', '')
         release_notes = data.get('body', 'No release notes provided.')
@@ -14126,7 +14288,10 @@ def check_mediamtx_version():
             'update_available': update_available,
             'release_notes': release_notes,
             'published_at': published_at,
-            'html_url': html_url
+            'html_url': html_url,
+            'checked_at': gh_info['checked_at'],
+            'stale': gh_info['stale'],
+            'notice': gh_info['notice']
         })
     except Exception as e:
         return jsonify({
@@ -14477,13 +14642,7 @@ def upgrade_mediamtx():
         ctx = ssl.create_default_context()
         
         # Step 1: Get latest release info to find download URL
-        req = urllib.request.Request(MEDIAMTX_GITHUB_API, headers={
-            'Accept': 'application/vnd.github.v3+json',
-            'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION
-        })
-        
-        with urllib.request.urlopen(req, timeout=10, context=ctx) as response:
-            data = json.loads(response.read().decode())
+        data, _gh_info = github_latest_release(MEDIAMTX_REPO, ctx, asset_names=mediamtx_release_asset_names)
         
         remote_version = data.get('tag_name', '')
         

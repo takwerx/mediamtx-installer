@@ -87,6 +87,12 @@ Where a doc and what we saw disagree, both are kept.
 - Unauthenticated GitHub API calls are limited per IP (60 an hour, https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api).
   ✅ verified 2026-10-31 from the worker Mac: two unauthenticated calls in a row returned `403 rate limit exceeded`. The editor sends a
   `User-Agent` and does not use a token, so many boxes behind one IP can fail the update check.
+- When the API says 403, the newest tag is still readable without the API: `https://github.com/<repo>/releases/latest` answers
+  `302` to `.../releases/tag/<tag>`, and `.../releases/download/<tag>/<file>` (including `checksums.sha256`) downloads with no API limit.
+  ✅ verified 2026-11-24 on test12 while its address was at 60 of 60 API calls: the deployed v2.1.19 editor showed
+  `HTTP Error 403: rate limit exceeded` on both Version Management checks, and the same checks with the fix answered from the redirect (ops #1214).
+  The fix also reuses an answer for 10 minutes and keeps the last good one on disk (`/opt/mediamtx-webeditor/github_release_cache.json`).
+  The release body and `published_at` are only in the API answer, so a redirect-only answer has none (it reuses the cached ones when the tag matches).
 - The release notes users see in the editor are the GitHub release body (`body` field), so they must be user-facing.
   PR checks now verify the version file against the newest tag and the notes (`.github/ci/release_hygiene.py`).
 - `CURRENT_VERSION` in the editor file is `vX.Y.Z` on main and `vX.Y.Z-dev` on dev (release skill, steps 3 and 7).
