@@ -126,6 +126,39 @@ class RollbackLoginTest(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.get_json()['restored_version'], 'unknown')
 
+    def test_rollback_refuses_names_that_leave_the_backup_folder_ops1302(self):
+        # The name check moved to basename + realpath (CodeQL py/path-injection); these must still be 400
+        # and must not touch the live file.
+        outside = os.path.join(self._tmp.name, 'outside_secret.py')
+        with open(outside, 'w') as f:
+            f.write(OLD_BUILD)
+        for name in ('../x', 'a/b', '..', '/etc/passwd', 'a\\b', '..\\x', outside, '', None, 5, ['x']):
+            r = self.rollback(name)
+            self.assertEqual(r.status_code, 400, repr(name))
+            self.assertEqual(r.get_json()['error'], 'Invalid filename', repr(name))
+        with open(self.live) as f:
+            self.assertEqual(f.read(), NEW_BUILD)
+
+    def test_rollback_refuses_a_backup_that_is_a_link_to_a_file_outside_the_folder_ops1302(self):
+        outside = os.path.join(self._tmp.name, 'outside_target.py')
+        with open(outside, 'w') as f:
+            f.write(OLD_BUILD)
+        link = os.path.join(self.dir, 'mediamtx_config_editor.py.backup_20260102_000000')
+        if os.path.lexists(link):
+            os.remove(link)
+        os.symlink(outside, link)
+        try:
+            r = self.rollback(os.path.basename(link))
+            self.assertEqual(r.status_code, 400)
+            with open(self.live) as f:
+                self.assertEqual(f.read(), NEW_BUILD)
+        finally:
+            os.remove(link)
+
+    def test_rollback_missing_backup_still_gets_404_ops1302(self):
+        r = self.rollback('mediamtx_config_editor.py.backup_29990101_000000')
+        self.assertEqual(r.status_code, 404)
+
     def test_rollback_stops_and_changes_nothing_when_the_password_file_cannot_be_written(self):
         before = self.raw_users()
         with mock.patch.object(self.m, '_write_initial_password_file', return_value=False):

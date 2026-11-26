@@ -13977,13 +13977,17 @@ def rollback_webeditor():
         data = request.get_json()
         filename = data.get('filename', '')
         
-        if not filename or '..' in filename or '/' in filename:
-            return jsonify({'success': False, 'error': 'Invalid filename'}), 400
-        
         webeditor_dir = '/opt/mediamtx-webeditor'
         webeditor_file = os.path.join(webeditor_dir, 'mediamtx_config_editor.py')
-        backup_path = os.path.join(webeditor_dir, filename)
-        
+
+        # The name must be a bare file name that stays inside the backup folder (ops #1302).
+        if (not isinstance(filename, str) or not filename or '..' in filename or '/' in filename
+                or '\\' in filename or os.path.basename(filename) != filename):
+            return jsonify({'success': False, 'error': 'Invalid filename'}), 400
+        backup_path = os.path.realpath(os.path.join(webeditor_dir, os.path.basename(filename)))
+        if not backup_path.startswith(os.path.realpath(webeditor_dir) + os.sep):
+            return jsonify({'success': False, 'error': 'Invalid filename'}), 400
+
         if not os.path.exists(backup_path):
             return jsonify({'success': False, 'error': 'Backup file not found'}), 404
         
