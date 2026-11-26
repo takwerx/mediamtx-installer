@@ -83,5 +83,65 @@ class SharePermissions(unittest.TestCase):
         self.assertEqual(self.stored(), {})
 
 
+class OldNeverEndingLinks(unittest.TestCase):
+    """Links made before the update that never end end 24 hours after the update, once (ops #1272)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.mod = load_editor(self._tmp.name)
+        self.mod.app.config['TESTING'] = True
+
+    def old_links(self):
+        self.mod.save_share_links({
+            'oldA': {'stream': 'cam1', 'created_by': 'x', 'expires': None, 'ttl_label': 'Until revoked'},
+            'oldB': {'stream': 'cam2', 'created_by': 'x', 'ttl_label': 'Until revoked'},
+            'timed': {'stream': 'cam3', 'expires': 2000000000, 'ttl_label': '4 hours'},
+        })
+
+    def test_never_ending_links_end_24_hours_after_the_update(self):
+        self.old_links()
+        now = 1700000000
+        self.assertEqual(self.mod.cap_never_ending_share_links(now=now), 2)
+        links = self.mod.load_share_links()
+        self.assertEqual(links['oldA']['expires'], now + 86400)
+        self.assertEqual(links['oldB']['expires'], now + 86400)
+        self.assertEqual(links['timed']['expires'], 2000000000)  # a link with an end time is left alone
+        self.assertEqual(links['oldA']['stream'], 'cam1')
+
+    def test_it_runs_once_so_a_later_admin_link_that_never_ends_is_kept(self):
+        self.old_links()
+        self.mod.cap_never_ending_share_links()
+        admin = self.mod.app.test_client()
+        with admin.session_transaction() as s:
+            s['logged_in'] = True
+            s['role'] = 'admin'
+            s['username'] = 'admin'
+        tok = admin.post('/api/share-links/generate', json={'stream': 'cam1', 'ttl': 0}).get_json()['token']
+        self.assertEqual(self.mod.cap_never_ending_share_links(), 0)  # second start: nothing to do
+        self.assertIsNone(self.mod.load_share_links()[tok]['expires'])
+
+    def test_a_box_with_no_links_still_gets_the_marker(self):
+        self.assertEqual(self.mod.cap_never_ending_share_links(), 0)
+        self.assertTrue(os.path.exists(self.mod.SHARE_LINKS_CAP_MARKER_FILE))
+        self.mod.save_share_links({'a': {'stream': 'cam1', 'expires': None}})
+        self.assertEqual(self.mod.cap_never_ending_share_links(), 0)  # made after the update: kept
+        self.assertIsNone(self.mod.load_share_links()['a']['expires'])
+
+    def test_an_unreadable_links_file_is_never_written_over(self):
+        with open(self.mod.SHARE_LINKS_FILE, 'w') as f:
+            f.write('{not json')
+        self.assertIsNone(self.mod.cap_never_ending_share_links())
+        with open(self.mod.SHARE_LINKS_FILE) as f:
+            self.assertEqual(f.read(), '{not json')
+        self.assertFalse(os.path.exists(self.mod.SHARE_LINKS_CAP_MARKER_FILE))
+
+    def test_a_capped_link_stops_working_when_its_time_is_up(self):
+        self.old_links()
+        self.mod.cap_never_ending_share_links(now=time.time() - 2 * 86400)
+        c = self.mod.app.test_client()
+        self.assertEqual(c.get('/shared/oldA').status_code, 404)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -285,6 +285,8 @@ LOGO_FILE = '/opt/mediamtx-webeditor/agency_logo'
 SHARE_LINKS_FILE = '/opt/mediamtx-webeditor/share_links.json'
 SHARE_LINK_VIEWER_DEFAULT_SECONDS = 14400
 SHARE_LINK_VIEWER_MAX_SECONDS = 86400
+SHARE_LINK_LEGACY_CAP_SECONDS = 86400  # links that never ended before the update end 24 hours after it
+SHARE_LINKS_CAP_MARKER_FILE = '/opt/mediamtx-webeditor/share_links_capped.json'
 SHARE_MODE_FILE = '/opt/mediamtx-webeditor/share_mode.json'
 PLAYBACK_MODE_FILE = '/opt/mediamtx-webeditor/playback_mode.json'
 # Ku-band simulator scripts (run on receiver to impair incoming stream traffic)
@@ -554,6 +556,38 @@ def save_share_links(data):
     os.makedirs(os.path.dirname(SHARE_LINKS_FILE), exist_ok=True)
     with open(SHARE_LINKS_FILE, 'w') as f:
         json.dump(data, f, indent=2)
+
+def cap_never_ending_share_links(now=None):
+    """Once per box, after the update that adds the viewer limits (ops #1272): give every
+    share link that never ends an end time 24 hours from now. A link made later by an
+    admin that never ends is kept, because the marker file says this ran already.
+    Returns how many links were capped, or None when it could not run (nothing is changed)."""
+    if os.path.exists(SHARE_LINKS_CAP_MARKER_FILE):
+        return 0
+    now = time.time() if now is None else now
+    links = {}
+    if os.path.exists(SHARE_LINKS_FILE):
+        try:
+            with open(SHARE_LINKS_FILE, 'r') as f:
+                links = json.load(f)
+        except (ValueError, IOError):
+            return None  # unreadable: never write over it, try again at the next start
+        if not isinstance(links, dict):
+            return None
+    capped = 0
+    for info in links.values():
+        if isinstance(info, dict) and not info.get('expires'):
+            info['expires'] = now + SHARE_LINK_LEGACY_CAP_SECONDS
+            info['ttl_label'] = '24 hours (set by the update)'
+            capped += 1
+    try:
+        if capped:
+            save_share_links(links)
+        with open(SHARE_LINKS_CAP_MARKER_FILE, 'w') as f:
+            json.dump({'capped': capped, 'at': int(now)}, f)
+    except (IOError, OSError):
+        return None
+    return capped
 
 def load_share_mode():
     """Load per-stream share mode: public = static link, private = token link. Default private."""
@@ -17749,5 +17783,12 @@ if __name__ == '__main__':
     print("Press Ctrl+C to stop")
     print("="*50)
     
+    try:
+        _capped = cap_never_ending_share_links()  # ops #1272: old links that never end now end in 24 hours
+        if _capped:
+            print(f"✓ Share links that never ended now end in 24 hours: {_capped}")
+    except Exception as e:
+        print(f"Warning: Could not cap old share links: {e}")
+
     start_venv_refresh()  # rebuild the venv when its Python or packages are behind the pins (ops #1030, #1129)
     app.run(host='0.0.0.0', port=5000, debug=False)
