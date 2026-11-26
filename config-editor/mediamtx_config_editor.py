@@ -283,6 +283,8 @@ SRT_PASSPHRASE_BACKUP_FILE = '/opt/mediamtx-webeditor/srt_passphrase_backup.json
 THEME_CONFIG_FILE = '/opt/mediamtx-webeditor/theme_config.json'
 LOGO_FILE = '/opt/mediamtx-webeditor/agency_logo'
 SHARE_LINKS_FILE = '/opt/mediamtx-webeditor/share_links.json'
+SHARE_LINK_VIEWER_DEFAULT_SECONDS = 14400
+SHARE_LINK_VIEWER_MAX_SECONDS = 86400
 SHARE_MODE_FILE = '/opt/mediamtx-webeditor/share_mode.json'
 PLAYBACK_MODE_FILE = '/opt/mediamtx-webeditor/playback_mode.json'
 # Ku-band simulator scripts (run on receiver to impair incoming stream traffic)
@@ -17207,8 +17209,8 @@ def api_playback_mode_set():
 @app.route('/api/share-links')
 @login_required
 def api_share_links_list():
-    """List share links (admin and viewer)."""
-    if session.get('role') not in ('admin', 'viewer'):
+    """List share links (admin only: the list carries every link's token)."""
+    if session.get('role') != 'admin':
         return jsonify({'error': 'Unauthorized'}), 403
     links = prune_expired_share_links(load_share_links())
     save_share_links(links)
@@ -17233,9 +17235,20 @@ def api_share_links_generate():
     try:
         data = request.get_json() or {}
         stream = (data.get('stream') or '').strip()
-        ttl = data.get('ttl', 0)
         if not stream:
             return jsonify({'error': 'Stream name required'}), 400
+        if not is_valid_stream_name(stream):
+            return jsonify({'error': 'Invalid stream name'}), 400
+        try:
+            ttl = int(data.get('ttl') or 0)
+        except (TypeError, ValueError, OverflowError):
+            return jsonify({'error': 'Invalid lifetime'}), 400
+        if ttl < 0:
+            return jsonify({'error': 'Invalid lifetime'}), 400
+        if session.get('role') != 'admin':
+            # Only an admin makes a link that never ends. A viewer's link lasts at most
+            # SHARE_LINK_VIEWER_MAX_SECONDS and 4 hours when no lifetime is given.
+            ttl = SHARE_LINK_VIEWER_DEFAULT_SECONDS if ttl == 0 else min(ttl, SHARE_LINK_VIEWER_MAX_SECONDS)
         token = secrets.token_urlsafe(24)
         now = time.time()
         expires = now + int(ttl) if ttl else None
