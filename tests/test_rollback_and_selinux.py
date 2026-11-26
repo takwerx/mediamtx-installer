@@ -104,6 +104,28 @@ class RollbackLoginTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.m.INITIAL_PASSWORD_FILE))
         self.assertEqual(self.m.authenticate_user('alice', 'alice-secret'), 'admin')
 
+    def test_rollback_answer_names_the_restored_version_ops1302(self):
+        # Was "unknown": f.tell() inside "for line in f" raised OSError and an except hid it.
+        # The real file has imports and comments above the version line; with the version on line 1
+        # the old loop never reached f.tell() and passed by accident.
+        build = ('#!/usr/bin/env python3\nimport os\n\nCURRENT_VERSION = "v2.1.20"\n'
+                 'def is_password_hashed(stored):\n    return True\n')
+        r = self.rollback(self.backup(build))
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()['restored_version'], 'v2.1.20')
+
+    def test_rollback_version_is_found_after_a_long_header_and_with_single_quotes_ops1302(self):
+        header = '#!/usr/bin/env python3\n' + ''.join('# header line %d\n' % i for i in range(120))
+        build = header + "CURRENT_VERSION = 'v2.1.19'\ndef is_password_hashed(stored):\n    return True\n"
+        self.assertLess(build.index('CURRENT_VERSION'), 5000)
+        r = self.rollback(self.backup(build))
+        self.assertEqual(r.get_json()['restored_version'], 'v2.1.19')
+
+    def test_rollback_version_stays_unknown_when_the_backup_has_none_ops1302(self):
+        r = self.rollback(self.backup('def is_password_hashed(stored):\n    return True\n'))
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()['restored_version'], 'unknown')
+
     def test_rollback_stops_and_changes_nothing_when_the_password_file_cannot_be_written(self):
         before = self.raw_users()
         with mock.patch.object(self.m, '_write_initial_password_file', return_value=False):
