@@ -727,6 +727,9 @@ class EditorUpdateTest(unittest.TestCase):
         r = self.apply(code=broken)
         self.assertEqual(r.status_code, 400, r.get_json())
         self.assertIn('does not compile', r.get_json()['error'])
+        # The parser's own words (file name, line, the source line) never reach the page (CodeQL alert 154)
+        for leaked in ('def broken', 'line 2', 'SyntaxError', 'mediamtx_config_editor.py'):
+            self.assertNotIn(leaked, r.get_json()['error'])
         self.assertIn('v2.1.21-dev', self.live_text())
         self.assertFalse(os.path.exists(self.live + '.new'))
 

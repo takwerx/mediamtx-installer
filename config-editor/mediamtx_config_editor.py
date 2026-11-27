@@ -13771,8 +13771,10 @@ def apply_update():
         try:
             compile(new_code_str, 'mediamtx_config_editor.py', 'exec')
         except (SyntaxError, ValueError) as ce:
+            # The reason goes to the log, not to the page (CodeQL py/stack-trace-exposure, ops #1316)
+            print(f"WARNING: editor update refused, the downloaded file does not compile: {ce}", flush=True)
             return jsonify({'success': False, 'error':
-                            f'Downloaded file does not compile ({ce}). Nothing was changed.'}), 400
+                            'Downloaded file does not compile. Nothing was changed. The reason is in the editor log.'}), 400
 
         # Extract new version for response
         new_version = 'unknown'
