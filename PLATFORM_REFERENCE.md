@@ -48,6 +48,22 @@ Where a doc and what we saw disagree, both are kept.
 - 📝 from our notes (`RELEASE-v2.0.5` to `v2.0.8`, `INFRA-TAK-CADDY-HLS-v1.18.md`). 📖 upstream API shape for `hls/muxers` and
   `hls/sessions` exists at v1.21.3. The cookie behaviour itself is not in upstream docs we could find; it was learned
   on boxes.
+- **A cold Low-Latency muxer starts its playlist with `gap.mp4` placeholders, and MediaMTX answers 401 for them.** When a request
+  creates the muxer (no reader for `hlsMuxerCloseAfter`, default 60 s, with `hlsAlwaysRemux: no`), the first playlist holds
+  `#EXT-X-GAP` + `gap.mp4` lines for the slots that have no video yet (6 of 7 in the runs below). `gap.mp4` has no `?session=` in
+  its URL, so MediaMTX answers `401 {"status":"error","error":"session not found"}`. Through the editor's share-link proxy that
+  is `502 HTTP Error 401: Unauthorized`. A player skips a GAP line. The real parts and the real segment (their URLs carry
+  `?session=`) answer 200 on the first request. A check that takes the first non-`#` line of a cold playlist as "the first
+  segment" sees 401 again and again until the gap lines are gone from the playlist (the T&E saw the third try, about 6 s in): that
+  is a test artifact, not a share-link fault. Take a line that has `?session=`, or the first `#EXT-X-PART`, instead.
+  ✅ verified 2026-11-27 (ops #1432) on a throwaway Rocky 9.9 box (SELinux Enforcing), MediaMTX v1.21.4, editor v2.1.22-dev,
+  upstream's default config (`hlsVariant: lowLatency`, `hlsAlwaysRemux: false`): after 75 s with no reader (journal: muxer
+  destroyed, then created), real Chrome (hls.js, WebRTC off) played the share link 3 of 3 times, first frame at 3.8 s to 4.3 s,
+  13 to 17 answers each with no error status, and it never asked for `gap.mp4`. A script on the same box got 401 for `gap.mp4`
+  and 200 for the first part and the first real segment of one playlist.
+- ⚠️ Why Ubuntu did not show it: 📖 the Ubuntu installer writes `hlsVariant: mpegts` and `hlsAlwaysRemux: yes` (the muxer never goes
+  idle), and Rocky copies upstream's default config. Not run: Ubuntu with `hlsAlwaysRemux: no`, or the editor's LAN preset. We
+  assume they behave like Rocky. Not run: the iOS native player or any player other than hls.js.
 
 ### 1.4 Config keys the editor reads and writes (`/usr/local/etc/mediamtx.yml`)
 - 📖 source-checked 2026-10-31: `apiAddress`, `authMethod`, `authInternalUsers`, `authHTTPAddress`, `hlsVariant`,
