@@ -162,6 +162,14 @@ class OddEntries(Base):
         self.assertIn('good', saved)
         self.assertEqual(len(saved), 4)
 
+    def test_revoke_removes_the_link_and_keeps_the_odd_entries(self):
+        r = self.client('admin').post('/api/share-links/revoke', json={'token': 'good'})
+        self.assertEqual(r.status_code, 200)
+        saved = json.loads(self.read())
+        self.assertNotIn('good', saved)
+        self.assertEqual(saved['_meta'], 2)
+        self.assertIn('listnull', saved)
+
     def test_a_meta_that_is_an_object_is_fine(self):
         self.write(json.dumps({'_meta': {'v': 3}, 'good': {'stream': 'cam1', 'expires': None}}))
         r = self.client('admin').get('/api/share-links')
