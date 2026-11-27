@@ -12,6 +12,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 import os
+import glob
 import subprocess
 import time
 from datetime import datetime, timedelta
@@ -541,15 +542,83 @@ def hls_player_tuning_js():
 
 
 # Share links (token-based, no-login stream access)
+SHARE_LINKS_LIMITS_VERSION = 1  # stamped on every link this version makes; the 24 hour cap never touches a stamped link (ops #1323)
+_share_links_bad_logged = set()  # contents of an unreadable links file already reported in this run
+
+
+def _read_share_links_file():
+    """Read the links file. Returns (links, problem, raw).
+
+    problem is None when the file is fine or missing, else a short plain reason. links is {} then.
+    raw is the bytes read (None when the file could not be read at all). Writes nothing."""
+    try:
+        with open(SHARE_LINKS_FILE, 'rb') as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return {}, None, None
+    except (IOError, OSError) as e:
+        return {}, 'cannot be read (%s)' % (e.strerror or e), None
+    if not raw.strip():
+        return {}, 'is empty', raw
+    try:
+        links = json.loads(raw.decode('utf-8'))
+    except ValueError:
+        return {}, 'is cut off or not valid JSON', raw
+    if not isinstance(links, dict):
+        return {}, 'is not a list of links (the top level is not an object)', raw
+    return links, None, raw
+
+
+def _keep_bad_share_links_copy(raw):
+    """Keep what an unreadable links file held as share_links.json.bad-<time>, once per distinct content.
+    Returns the copy's file name, or None when no copy could be made."""
+    if raw is None:
+        return None
+    try:
+        for old in glob.glob(SHARE_LINKS_FILE + '.bad-*'):
+            try:
+                with open(old, 'rb') as f:
+                    if f.read() == raw:
+                        return os.path.basename(old)  # this very content is already kept
+            except (IOError, OSError):
+                continue
+        name = SHARE_LINKS_FILE + '.bad-' + time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+        n = 1
+        while os.path.exists(name):  # two different bad files in one second
+            n += 1
+            name = '%s.bad-%s-%d' % (SHARE_LINKS_FILE, time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()), n)
+        with open(name, 'wb') as f:
+            f.write(raw)
+        return os.path.basename(name)
+    except (IOError, OSError):
+        return None
+
+
+def _check_share_links_file(quiet=False):
+    """Read the links file and, when it is odd, keep a copy. Returns (links, problem, copy_name).
+    Prints one line per distinct bad content (never again for the same text) unless quiet."""
+    links, problem, raw = _read_share_links_file()
+    if problem is None:
+        return links, None, None
+    copy_name = _keep_bad_share_links_copy(raw)
+    key = (problem, raw)
+    if not quiet and key not in _share_links_bad_logged:
+        print("Warning: %s %s. Nothing is changed: %s. Treating it as no links until an admin makes one."
+              % (os.path.basename(SHARE_LINKS_FILE), problem,
+                 'a copy is kept as ' + copy_name if copy_name else 'no copy could be made'), flush=True)
+    _share_links_bad_logged.add(key)
+    return {}, problem, copy_name
+
+
 def load_share_links():
-    """Load share links from JSON file."""
-    if os.path.exists(SHARE_LINKS_FILE):
-        try:
-            with open(SHARE_LINKS_FILE, 'r') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            pass
-    return {}
+    """Load share links from the JSON file.
+
+    An empty, cut-off or unreadable file gives {} here, but the file itself is never
+    replaced by a read: a copy is kept and one line is printed (ops #1323). The returned
+    dict may hold entries that are not objects (a newer version may add some); callers
+    skip those and save them back untouched."""
+    return _check_share_links_file()[0]
+
 
 def save_share_links(data):
     """Save share links to JSON file."""
@@ -557,26 +626,47 @@ def save_share_links(data):
     with open(SHARE_LINKS_FILE, 'w') as f:
         json.dump(data, f, indent=2)
 
+
+def get_share_link(links, token):
+    """The link record for a token, or None when there is none or the entry is not a usable link."""
+    info = links.get(token)
+    if isinstance(info, dict) and isinstance(info.get('stream'), str) and info['stream']:
+        return info
+    return None
+
+
+def share_link_expired(info, now=None):
+    """True when the link has an end time that has passed. An end time that is not a number
+    is not treated as a time (the entry is odd, not expired)."""
+    exp = info.get('expires')
+    if not exp or isinstance(exp, bool) or not isinstance(exp, (int, float)):
+        return False
+    return exp < (time.time() if now is None else now)
+
+
 def cap_never_ending_share_links(now=None):
     """Once per box, after the update that adds the viewer limits (ops #1272): give every
-    share link that never ends an end time 24 hours from now. A link made later by an
-    admin that never ends is kept, because the marker file says this ran already.
-    Returns how many links were capped, or None when it could not run (nothing is changed)."""
+    share link that never ends an end time 24 hours from now.
+
+    Old links are told from new ones by a stamp: every link made by this version (and later)
+    has limits_version, and the cap never touches a stamped link. So a never-ending link made on
+    purpose stays so, whatever happened to the marker file (deleted by hand, or never made
+    because the cap could not run). A link with no stamp was made before this version and is capped.
+    The marker file still says the cap ran, so a rerun does nothing.
+    Returns how many links were capped, or None when it could not run: it then prints one
+    line saying why, changes nothing it cannot finish, and tries again at the next start."""
     if os.path.exists(SHARE_LINKS_CAP_MARKER_FILE):
         return 0
     now = time.time() if now is None else now
-    links = {}
-    if os.path.exists(SHARE_LINKS_FILE):
-        try:
-            with open(SHARE_LINKS_FILE, 'r') as f:
-                links = json.load(f)
-        except (ValueError, IOError):
-            return None  # unreadable: never write over it, try again at the next start
-        if not isinstance(links, dict):
-            return None
+    links, problem, copy_name = _check_share_links_file(quiet=True)
+    if problem:
+        print("Warning: old share links not capped: %s %s%s. The cap tries again at the next start."
+              % (os.path.basename(SHARE_LINKS_FILE), problem,
+                 ' (copy kept as %s)' % copy_name if copy_name else ''), flush=True)
+        return None
     capped = 0
     for info in links.values():
-        if isinstance(info, dict) and not info.get('expires'):
+        if isinstance(info, dict) and not info.get('expires') and 'limits_version' not in info:
             info['expires'] = now + SHARE_LINK_LEGACY_CAP_SECONDS
             info['ttl_label'] = '24 hours (set by the update)'
             capped += 1
@@ -585,7 +675,9 @@ def cap_never_ending_share_links(now=None):
             save_share_links(links)
         with open(SHARE_LINKS_CAP_MARKER_FILE, 'w') as f:
             json.dump({'capped': capped, 'at': int(now)}, f)
-    except (IOError, OSError):
+    except (IOError, OSError) as e:
+        print("Warning: old share links not capped: could not write (%s). The cap tries again at the next start."
+              % (e.strerror or e), flush=True)
         return None
     return capped
 
@@ -653,11 +745,21 @@ def webrtc_available():
 
 
 def prune_expired_share_links(links):
-    """Remove expired links in-place, return pruned dict."""
+    """Remove expired links in-place, return pruned dict. Entries that are not objects are skipped and kept."""
     now = time.time()
-    expired = [tok for tok, info in links.items() if info.get('expires') and info['expires'] < now]
+    expired = [tok for tok, info in links.items() if isinstance(info, dict) and share_link_expired(info, now)]
     for tok in expired:
         del links[tok]
+    return links
+
+def load_pruned_share_links():
+    """Load the links, drop the expired ones, and write the file back only when one was dropped.
+    A visit that changes nothing writes nothing (ops #1323: a visit used to save {} over a bad file)."""
+    links = load_share_links()
+    before = len(links)
+    prune_expired_share_links(links)
+    if len(links) != before:
+        save_share_links(links)
     return links
 
 def hls_fetch_for_share(subpath, query_string=None):
@@ -16966,9 +17068,8 @@ SHARED_EXPIRED_HTML = '''<!DOCTYPE html>
 @app.route('/shared/<token>')
 def shared_stream_page(token):
     """Share link: exact player from infra-TAK overlay (worked there)."""
-    links = prune_expired_share_links(load_share_links())
-    save_share_links(links)
-    info = links.get(token)
+    links = load_pruned_share_links()
+    info = get_share_link(links, token)
     if not info:
         return Response(SHARED_EXPIRED_HTML, content_type='text/html', status=404)
     stream = info['stream']
@@ -17086,10 +17187,10 @@ def share_hls_path_allowed(stream, subpath):
 def shared_hls_proxy(token, subpath):
     """Proxy HLS for shared link: validate token then stream from MediaMTX."""
     links = load_share_links()
-    info = links.get(token)
+    info = get_share_link(links, token)
     if not info:
         return 'Link expired or revoked', 403
-    if info.get('expires') and info['expires'] < time.time():
+    if share_link_expired(info):
         return 'Link expired', 403
     if not share_hls_path_allowed(info['stream'], subpath):
         return 'Forbidden', 403
@@ -17201,10 +17302,10 @@ def whep_shared(token):
     died as an opaque network error. Both are kept so a console updated ahead
     of its proxy config keeps working."""
     links = prune_expired_share_links(load_share_links())
-    info = links.get(token)
+    info = get_share_link(links, token)
     if not info:
         return Response('Link expired or revoked', status=403, content_type='text/plain')
-    if info.get('expires') and info['expires'] < time.time():
+    if share_link_expired(info):
         return Response('Link expired', status=403, content_type='text/plain')
     answer, err = whep_negotiate(info['stream'], request.get_data(as_text=True))
     if err:
@@ -17246,10 +17347,11 @@ def api_share_links_list():
     """List share links (admin only: the list carries every link's token)."""
     if session.get('role') != 'admin':
         return jsonify({'error': 'Unauthorized'}), 403
-    links = prune_expired_share_links(load_share_links())
-    save_share_links(links)
+    links = load_pruned_share_links()
     result = []
     for tok, info in links.items():
+        if not isinstance(info, dict):
+            continue  # not a link (a newer version may keep other data in this file): skip it, leave it in the file
         result.append({
             'token': tok,
             'stream': info.get('stream', ''),
@@ -17295,6 +17397,7 @@ def api_share_links_generate():
             'created_by': session.get('username', 'admin'),
             'expires': expires,
             'ttl_label': ttl_label,
+            'limits_version': SHARE_LINKS_LIMITS_VERSION,  # made by a version with the limits: the 24 hour cap never touches it (ops #1323)
         }
         save_share_links(links)
         # Caddy terminates TLS and proxies to us over plain HTTP on loopback, so
@@ -17784,7 +17887,7 @@ if __name__ == '__main__':
     print("="*50)
     
     try:
-        _capped = cap_never_ending_share_links()  # ops #1272: old links that never end now end in 24 hours
+        _capped = cap_never_ending_share_links()  # ops #1272: old links that never end now end in 24 hours (prints its own line when it cannot run)
         if _capped:
             print(f"✓ Share links that never ended now end in 24 hours: {_capped}")
     except Exception as e:
