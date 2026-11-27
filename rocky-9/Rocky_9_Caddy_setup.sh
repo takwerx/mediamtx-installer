@@ -186,12 +186,19 @@ echo "=========================================="
 echo "Step 2: Installing Caddy"
 echo "=========================================="
 
-# Install Caddy using DNF (official Caddy repo)
-dnf install -y 'dnf-command(copr)'
-dnf copr enable -y @caddy/caddy
-dnf install -y caddy
-
-echo "Caddy installed successfully"
+# Install Caddy using DNF (official Caddy repo), but only when there is none (ops #1354, same as the Ubuntu script).
+# A Caddy that is already here may serve TAK Server or other sites, and has saved certificates. "dnf install caddy" on it
+# would upgrade it and restart the service, and could replace a build that came from another source.
+# >>> caddy_install_guard
+if command -v caddy > /dev/null 2>&1 || rpm -q caddy > /dev/null 2>&1; then
+    echo "Caddy is already installed ($(caddy version 2>/dev/null | head -1)), so it is left as it is."
+else
+    dnf install -y 'dnf-command(copr)'
+    dnf copr enable -y @caddy/caddy
+    dnf install -y caddy
+    echo "Caddy installed successfully"
+fi
+# <<< caddy_install_guard
 
 echo ""
 echo "=========================================="

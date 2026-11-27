@@ -127,6 +127,33 @@ fi
 echo "Latest MediaMTX version: $LATEST_VERSION"
 echo ""
 
+# >>> keep_newer_binary
+# ops #1354: re-running this script is how people update MediaMTX, and it installs the newest release. A box that already runs
+# a NEWER build (a pre-release put there by hand, a release MediaMTX pulled) must not be moved back: an older binary can refuse
+# a config that the newer one wrote. Prints x.y.z of the installed binary $1, or nothing when there is none or it prints no version.
+mtx_installed_version() {
+    local bin="${1:-/usr/local/bin/mediamtx}" out
+    [ -x "$bin" ] || return 0
+    out=$("$bin" --version 2>&1 | head -1) || true
+    printf '%s\n' "$out" | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1 | sed 's/^v//'
+}
+# True when version $1 is strictly newer than version $2. Anything that is not x.y.z counts as "not newer" (the old behavior).
+mtx_is_newer() {
+    [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$2" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]
+}
+# <<< keep_newer_binary
+
+INSTALLED_VERSION=$(mtx_installed_version /usr/local/bin/mediamtx)
+KEEP_BINARY=0
+FINAL_VERSION="$LATEST_VERSION"
+if mtx_is_newer "$INSTALLED_VERSION" "$LATEST_VERSION"; then
+    KEEP_BINARY=1
+    FINAL_VERSION="$INSTALLED_VERSION"
+    echo "MediaMTX $INSTALLED_VERSION is installed here and is newer than the newest release ($LATEST_VERSION)."
+    echo "The installed binary is kept (an older one could refuse the config the newer one wrote)."
+fi
+
 # Construct download URL
 DOWNLOAD_URL="https://github.com/bluenviron/mediamtx/releases/download/v${LATEST_VERSION}/mediamtx_v${LATEST_VERSION}_linux_${MEDIAMTX_ARCH}.tar.gz"
 
@@ -199,7 +226,11 @@ mtx_install_binary() {
     if command -v restorecon > /dev/null 2>&1; then restorecon "$dest" > /dev/null 2>&1 || true; fi
 }
 # <<< mtx_install_binary
-mtx_install_binary mediamtx "$MTX_BIN"
+if [ "$KEEP_BINARY" = "1" ]; then
+    echo "Keeping the installed MediaMTX $INSTALLED_VERSION in /usr/local/bin/ (see keep_newer_binary above)"
+else
+    mtx_install_binary mediamtx "$MTX_BIN"
+fi
 
 # Create config directory
 mkdir -p /usr/local/etc
@@ -571,7 +602,7 @@ echo "Installation Complete!"
 echo "=========================================="
 echo ""
 echo "MediaMTX Information:"
-echo "  - Version: $LATEST_VERSION"
+echo "  - Version: $FINAL_VERSION"
 echo "  - Config: /usr/local/etc/mediamtx.yml"
 if [ "$KEEP_CONFIG" = "1" ]; then
     echo "  - Existing configuration kept (backup: $CONFIG_BACKUP)"
