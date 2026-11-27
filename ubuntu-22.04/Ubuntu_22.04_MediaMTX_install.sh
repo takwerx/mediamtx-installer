@@ -233,6 +233,10 @@ mtx_ensure_moq_off() {
     fi
     mv -f "$cfg.new" "$cfg"
 }
+# True when the configuration turns MoQ on (yes or true). The installer leaves that as it is and says so.
+mtx_moq_is_on() {
+    grep -qE '^moq[[:space:]]*:[[:space:]]*(yes|true)[[:space:]]*(#.*)?$' "$1"
+}
 # <<< mtx_moq
 # >>> mtx_hls_placeholder
 # The installer's template carries the HLS viewer password "changeme" until the next step puts a
@@ -261,6 +265,9 @@ if [ "$KEEP_CONFIG" = "1" ]; then
     echo "  Backup: $CONFIG_BACKUP"
     if mtx_ensure_moq_off "$CONFIG_FILE"; then
         echo "  Added 'moq: no' (this configuration had no MoQ setting; MediaMTX would turn MoQ on and open port 8892)"
+    elif mtx_moq_is_on "$CONFIG_FILE"; then
+        echo "  NOTE: MoQ is on in this configuration (moq: yes, port 8892). It was left as it is."
+        echo "        To turn it off, set 'moq: no' in $CONFIG_FILE and run: systemctl restart mediamtx"
     fi
     HLS_PASS_NEW=$(openssl rand -base64 16 | tr -d '/+=\n' | head -c 16)
     if mtx_replace_hls_placeholder "$CONFIG_FILE" "$HLS_PASS_NEW"; then

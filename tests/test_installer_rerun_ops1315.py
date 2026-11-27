@@ -130,6 +130,8 @@ class RerunMixin:
         cfg = self.sb.read(self.sb.config)
         self.assertIn('moq: yes', cfg)
         self.assertNotIn('moq: no', cfg)
+        self.assertIn('MoQ is on in this configuration', self.out(r), 'the script says it left MoQ on')
+        self.assertNotIn('Added', self.out(r))
 
     def test_a_fresh_install_has_moq_off_and_leaves_no_temporary_files(self):
         self.release(fake_mediamtx('9.9.9'))

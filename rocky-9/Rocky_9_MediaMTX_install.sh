@@ -247,6 +247,10 @@ mtx_ensure_moq_off() {
     fi
     mv -f "$cfg.new" "$cfg"
 }
+# True when the configuration turns MoQ on (yes or true). The installer leaves that as it is and says so.
+mtx_moq_is_on() {
+    grep -qE '^moq[[:space:]]*:[[:space:]]*(yes|true)[[:space:]]*(#.*)?$' "$1"
+}
 # <<< mtx_moq
 
 # Disable MoQ. Unlike the Ubuntu script this one keeps upstream's shipped config, so a fresh install
@@ -257,6 +261,9 @@ if [ "$KEEP_CONFIG" = "1" ]; then
     # The operator's file: add the key only when it is missing, never change a value they set.
     if mtx_ensure_moq_off "$CFG"; then
         echo "Added 'moq: no' (this configuration had no MoQ setting; MediaMTX would turn MoQ on and open port 8892)"
+    elif mtx_moq_is_on "$CFG"; then
+        echo "NOTE: MoQ is on in this configuration (moq: yes, port 8892). It was left as it is."
+        echo "      To turn it off, set 'moq: no' in $CONFIG_FILE and run: systemctl restart mediamtx"
     fi
 elif grep -qE '^[[:space:]]*moq:' "$CFG"; then
     # Upstream's own file: rewrite the key it ships.
