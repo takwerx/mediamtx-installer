@@ -936,11 +936,15 @@ def load_users():
     """
     users = None
     if os.path.exists(USERS_FILE):
+        # The file is there, so this is NOT a first run. If it cannot be read, stop: treating it as
+        # a first run would replace every account with a new admin (ops #1316).
         try:
             with open(USERS_FILE, 'r') as f:
                 users = json.load(f)
-        except Exception:
-            users = None
+            if not isinstance(users, list) or not all(isinstance(u, dict) for u in users):
+                raise ValueError('users.json is not a list of accounts')
+        except Exception as e:
+            raise UsersFileUnreadable(_keep_unreadable_users_file(e))
     if users is None:
         password = secrets.token_urlsafe(12)
         users = [{'username': 'admin', 'password': hash_password(password), 'role': 'admin'}]
@@ -964,12 +968,62 @@ def load_users():
     return users
 
 def save_users(users):
-    """Save users to JSON file"""
+    """Save users to JSON file. Written to a temp file and renamed into place, so a crash or a
+    full disk in the middle leaves the old file whole (ops #1316)."""
     users_file = USERS_FILE
     os.makedirs(os.path.dirname(users_file), exist_ok=True)
-    with open(users_file, 'w') as f:
-        json.dump(users, f, indent=2)
-    os.chmod(USERS_FILE, 0o600)
+    tmp = users_file + '.tmp'
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as f:
+            json.dump(users, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, users_file)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+class UsersFileUnreadable(Exception):
+    """users.json exists but cannot be read. str() is a plain sentence for the page."""
+
+
+@app.errorhandler(UsersFileUnreadable)
+def _users_file_unreadable_page(err):
+    from markupsafe import escape
+    if request.path.startswith('/api/'):
+        return jsonify({'success': False, 'error': str(err)}), 503
+    return ('<!doctype html><meta charset="utf-8"><title>Accounts file could not be read</title>'
+            '<body style="font-family:sans-serif;max-width:40em;margin:3em auto;padding:0 1em">'
+            '<h2>Accounts file could not be read</h2><p>' + str(escape(str(err))) + '</p></body>'), 503
+
+
+def _keep_unreadable_users_file(reason):
+    """Save a copy of the users file that could not be read (once per distinct content) and
+    return the sentence that tells the operator what happened. Never changes users.json."""
+    kept = ''
+    try:
+        import hashlib
+        with open(USERS_FILE, 'rb') as f:
+            raw = f.read()
+        kept = f'{USERS_FILE}.unreadable_{hashlib.sha256(raw).hexdigest()[:12]}'
+        if not os.path.exists(kept):
+            fd = os.open(kept, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, 'wb') as f:
+                f.write(raw)
+    except OSError:
+        kept = ''
+    print(f"ERROR: {USERS_FILE} could not be read ({reason}); accounts were NOT touched"
+          + (f", a copy is at {kept}" if kept else ''), flush=True)
+    return ('The list of console accounts (users.json) could not be read, so nothing was changed '
+            'and sign-in is stopped to keep your accounts safe. '
+            + (f'A copy of the file is saved as {kept}. ' if kept else 'A copy could not be saved. ')
+            + 'Restore or repair /opt/mediamtx-webeditor/users.json, then reload this page.')
 
 PENDING_REG_FILE = '/opt/mediamtx-webeditor/pending_registrations.json'
 
@@ -8053,7 +8107,7 @@ HTML_TEMPLATE = '''
         
         
         function rollbackMediaMTX() {
-            if (!confirm('This will:\\n\\n1. Stop MediaMTX\\n2. Restore the previous binary from backup\\n3. Restart MediaMTX\\n\\nActive streams will be interrupted. Continue?')) {
+            if (!confirm('This will:\\n\\n1. Stop MediaMTX\\n2. Restore the previous binary from backup\\n3. Restart MediaMTX\\n\\nYour settings, stream keys and passwords stay as they are now.\\nActive streams will be interrupted. Continue?')) {
                 return;
             }
             
@@ -8063,7 +8117,7 @@ HTML_TEMPLATE = '''
                 if (data.success) {
                     var msg = '✅ Rolled back to MediaMTX ' + (data.restored_version || 'previous version') + '.';
                     if (data.fields_removed && data.fields_removed.length > 0) {
-                        msg += ' | Auto-removed incompatible YAML fields: ' + data.fields_removed.join(', ');
+                        msg += ' | Your settings were kept, except these fields the older version does not know, which were taken out (the config from before is saved under Restore): ' + data.fields_removed.join(', ');
                     }
                     alert(msg);
                     // Refresh versions tab
@@ -8384,7 +8438,7 @@ HTML_TEMPLATE = '''
                     html += `</div>`;
                     list.innerHTML = html;
                 } else {
-                    list.innerHTML = '<span style="color: #666;">No previous versions available</span>';
+                    list.innerHTML = '<span style="color: #666;">' + (data.reason || 'No previous versions available') + '</span>';
                 }
             })
             .catch(() => {
@@ -11396,7 +11450,11 @@ def save_hls():
         demux_value = 'true' if demux_enabled else 'false'
 
         demux_line = f'  rtspDemuxMpegts: {demux_value}'
-        if not set_config_line('  rtspDemuxMpegts:', demux_line, insert_after='pathDefaults:'):
+        installed_mtx = mtx_binary_version()
+        if installed_mtx is not None and installed_mtx < RTSP_DEMUX_MIN_VERSION:
+            # MediaMTX before v1.17.0 refuses the key ("unknown field") and would not start (ops #1316)
+            print(f"INFO: MediaMTX {'.'.join(map(str, installed_mtx))} has no rtspDemuxMpegts; not writing it", flush=True)
+        elif not set_config_line('  rtspDemuxMpegts:', demux_line, insert_after='pathDefaults:'):
             # No pathDefaults block yet: add one in front of `paths:`
             set_config_line(None, ['pathDefaults:', demux_line, ''], insert_before='paths:')
 
@@ -13475,6 +13533,20 @@ def api_update_channel():
     return jsonify({'success': True, 'channel': get_update_channel()})
 
 
+def parse_editor_version(v):
+    """Sortable tuple for a web editor version such as 'v2.1.21' or 'v2.1.21-dev'; None if unreadable.
+    The last number is 0 for a "-dev" build and 1 for the release, so 2.1.21-dev < 2.1.21 < 2.1.22-dev."""
+    m = re.fullmatch(r'v?(\d+)\.(\d+)\.(\d+)(-dev)?', (v or '').strip())
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), 0 if m.group(4) else 1)
+
+
+def raw_url_for_ref(ref, path='config-editor/mediamtx_config_editor.py'):
+    """Raw GitHub URL of a file at a branch or a release tag."""
+    return f"https://raw.githubusercontent.com/{GITHUB_REPO}/{ref}/{path}"
+
+
 def _check_dev_update(ctx):
     """Dev channel: is the dev branch tip newer than the dev build we last pulled?
 
@@ -13533,20 +13605,13 @@ def check_for_update():
         published_at = data.get('published_at', '')
         html_url = data.get('html_url', '')
         
-        # Compare versions (strip 'v' prefix for comparison)
-        local_ver = CURRENT_VERSION.lstrip('v')
-        remote_ver = remote_version.lstrip('v')
-        
-        # Simple version comparison using tuple of ints
-        def parse_version(v):
-            try:
-                parts = v.split('.')
-                return tuple(int(p) for p in parts)
-            except:
-                return (0, 0, 0)
-        
-        update_available = parse_version(remote_ver) > parse_version(local_ver)
-        
+        # Compare versions. A "-dev" build sorts just before its own release, and a tag we cannot
+        # read is never offered (ops #1316: "v2.1.21-dev" used to read as 0.0.0, so every release
+        # looked like an update).
+        remote_parsed = parse_editor_version(remote_version)
+        update_available = (remote_parsed is not None
+                            and remote_parsed > (parse_editor_version(CURRENT_VERSION) or (0, 0, 0, 0)))
+
         return jsonify({
             'success': True,
             'channel': 'main',
@@ -13662,24 +13727,55 @@ def apply_update():
         
         webeditor_file = '/opt/mediamtx-webeditor/mediamtx_config_editor.py'
         backup_file = webeditor_file + f'.backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
-        temp_file = '/tmp/mediamtx_config_editor_update.py'
-        
-        # Step 1: Download new version to temp file (from the active channel's branch)
-        req = urllib.request.Request(raw_url_for_channel(get_update_channel()), headers={
+        # Written beside the live file, so the final rename is on one filesystem and atomic
+        temp_file = webeditor_file + '.new'
+
+        # Step 0: which copy to pull. The dev channel follows the dev branch tip. The main channel
+        # is the newest RELEASE, fetched by its tag: the tip of main can hold work after the release
+        # (ops #1316).
+        channel = get_update_channel()
+        if channel == 'main':
+            release, _gh_info = github_latest_release(GITHUB_REPO, ctx)
+            ref = release.get('tag_name', '')
+            ref_version = parse_editor_version(ref)
+            if ref_version is None or ref_version[3] != 1:
+                return jsonify({'success': False, 'error':
+                                f'GitHub named "{ref}" as the newest release, which is not a version number '
+                                'this editor can install. Nothing was changed.'}), 400
+            if ref_version <= (parse_editor_version(CURRENT_VERSION) or (0, 0, 0, 0)):
+                return jsonify({'success': False, 'error':
+                                f'The newest release is {ref}, which is not newer than this editor '
+                                f'({CURRENT_VERSION}). Nothing was changed.'}), 400
+        else:
+            ref = channel
+        source_url = raw_url_for_ref(ref)
+
+        # Step 1: Download the new version
+        req = urllib.request.Request(source_url, headers={
             'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION
         })
-        
+
         with urllib.request.urlopen(req, timeout=30, context=ctx) as response:
             new_code = response.read()
-        
+
         if len(new_code) < 1000:
             return jsonify({'success': False, 'error': 'Downloaded file too small, aborting (possible download error)'}), 400
-        
-        # Step 2: Verify it contains a version string (sanity check)
-        new_code_str = new_code.decode('utf-8')
+
+        # Step 2: Verify it contains a version string and is Python that compiles (sanity check)
+        try:
+            new_code_str = new_code.decode('utf-8')
+        except UnicodeDecodeError:
+            return jsonify({'success': False, 'error': 'Downloaded file is not text, aborting. Nothing was changed.'}), 400
         if 'CURRENT_VERSION' not in new_code_str:
             return jsonify({'success': False, 'error': 'Downloaded file does not appear to be a valid web editor'}), 400
-        
+        try:
+            compile(new_code_str, 'mediamtx_config_editor.py', 'exec')
+        except (SyntaxError, ValueError) as ce:
+            # The reason goes to the log, not to the page (CodeQL py/stack-trace-exposure, ops #1316)
+            print(f"WARNING: editor update refused, the downloaded file does not compile: {ce}", flush=True)
+            return jsonify({'success': False, 'error':
+                            'Downloaded file does not compile. Nothing was changed. The reason is in the editor log.'}), 400
+
         # Extract new version for response
         new_version = 'unknown'
         for line in new_code_str.split('\n'):
@@ -13690,22 +13786,29 @@ def apply_update():
                     pass
                 break
         
-        # Step 3: Write to temp file first
-        with open(temp_file, 'wb') as f:
-            f.write(new_code)
-        
-        # Step 4: Backup current version, and the MediaMTX config with it: the
-        # new version's startup auto-patches may edit mediamtx.yml.
-        if os.path.exists(webeditor_file):
-            shutil.copy2(webeditor_file, backup_file)
-        config_backup = backup_config_file(f'updating the web editor to {new_version}')
+        # Step 3: Write to temp file first (beside the live file, flushed to disk)
+        try:
+            with open(temp_file, 'wb') as f:
+                f.write(new_code)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(temp_file, 0o644)
 
-        # Step 5: Replace with new version
-        shutil.copy2(temp_file, webeditor_file)
-        os.chmod(webeditor_file, 0o644)
-        
-        # Step 6: Clean up temp file
-        os.remove(temp_file)
+            # Step 4: Backup current version, and the MediaMTX config with it: the
+            # new version's startup auto-patches may edit mediamtx.yml.
+            if os.path.exists(webeditor_file):
+                shutil.copy2(webeditor_file, backup_file)
+            config_backup = backup_config_file(f'updating the web editor to {new_version}')
+
+            # Step 5: Replace with new version in one rename: the live file is the old one or the
+            # new one, never half of either
+            os.replace(temp_file, webeditor_file)
+        finally:
+            # Step 6: Clean up temp file (already gone after a good rename)
+            try:
+                os.remove(temp_file)
+            except OSError:
+                pass
 
         # Step 6b: On dev channel, record the pulled file's hash as the baseline so
         # the dashboard reads "up to date" until the dev branch actually moves again
@@ -13718,8 +13821,7 @@ def apply_update():
         # only fetches the editor file, but the KLV feature needs klv-to-cot.py present;
         # without this, boxes that self-update (vs re-run the installer) would lack it.
         try:
-            sidecar_url = (f"https://raw.githubusercontent.com/{GITHUB_REPO}/"
-                           f"{get_update_channel()}/config-editor/klv-to-cot.py")
+            sidecar_url = raw_url_for_ref(ref, 'config-editor/klv-to-cot.py')
             sreq = urllib.request.Request(sidecar_url, headers={
                 'User-Agent': 'MediaMTX-WebEditor/' + CURRENT_VERSION})
             with urllib.request.urlopen(sreq, timeout=20, context=ctx) as sresp:
@@ -14680,8 +14782,18 @@ def mtx_install_binary(src_path):
         if os.path.exists(MEDIAMTX_BINARY):
             backup = MEDIAMTX_BINARY + '.backup_' + datetime.now().strftime('%Y%m%d_%H%M%S')
             shutil.copy2(MEDIAMTX_BINARY, backup)
-        shutil.copy2(src_path, MEDIAMTX_BINARY)
-        os.chmod(MEDIAMTX_BINARY, 0o755)
+        # Copy beside the live binary, then rename over it: a kill in the middle leaves the old
+        # binary whole, never half a file the kernel cannot run (ops #1316).
+        staged = MEDIAMTX_BINARY + '.new'
+        try:
+            shutil.copy2(src_path, staged)
+            os.chmod(staged, 0o755)
+            os.replace(staged, MEDIAMTX_BINARY)
+        finally:
+            try:
+                os.remove(staged)
+            except OSError:
+                pass
         mtx_selinux_relabel(MEDIAMTX_BINARY)
         return backup
 
@@ -14719,6 +14831,128 @@ def mtx_install_binary(src_path):
         if line.startswith('BACKUP='):
             backup = line.split('=', 1)[1].strip()
     return backup
+
+
+# --- Upgrade / rollback bookkeeping (ops #1316) --------------------------------------------
+# ROLLBACK_STATE_FILE says what the last upgrade from this editor did (which saved binary holds
+# the version before it, and which version it installed), so Rollback can tell that MediaMTX was
+# changed by something else since. UPGRADE_MARKER_FILE exists only while an upgrade is between
+# "stopped MediaMTX" and "MediaMTX is running again": if the editor is killed in that window the
+# file is left behind and the next start puts MediaMTX back.
+ROLLBACK_STATE_FILE = '/opt/mediamtx-webeditor/rollback_state.json'
+UPGRADE_MARKER_FILE = '/opt/mediamtx-webeditor/upgrade_in_progress.json'
+
+
+def _json_file_read(path):
+    try:
+        with open(path, 'r') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return {}
+
+
+def _json_file_write(path, data):
+    """Write json to path through a temp file and a rename. Best effort: returns False on failure."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + '.tmp'
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        return True
+    except Exception as e:
+        print(f"WARNING: could not write {path}: {e}", flush=True)
+        return False
+
+
+def _json_file_remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def mtx_binary_backups():
+    """Saved MediaMTX binaries, newest first. Looks in both places: the old in-place name (root
+    and helper mode) and the broker-mode folder."""
+    import glob
+    return sorted(glob.glob(f'{MEDIAMTX_BINARY}.backup_*')
+                  + glob.glob(os.path.join(MTX_BIN_BACKUP_DIR, 'mediamtx.backup_*')),
+                  key=lambda p: os.path.basename(p), reverse=True)
+
+
+def _fmt_version(t):
+    return 'v' + '.'.join(str(x) for x in t) if t else 'unknown'
+
+
+def find_rollback_target():
+    """The saved binary Rollback would restore, as (path, ''), or (None, plain reason).
+
+    Only a saved version OLDER than the one installed counts: Rollback never moves forward (the
+    copy of the newer binary that a Rollback leaves behind must not be offered again), and when the
+    saved copy came from the last upgrade of this editor, MediaMTX must still be the version that
+    upgrade installed. If an installer script or a hand copy changed it since, the saved copy is
+    from further back than the operator expects, so Rollback refuses instead of jumping over
+    versions."""
+    backups = mtx_binary_backups()
+    if not backups:
+        return None, 'No backup found to rollback to'
+    installed = mtx_binary_version()
+    state = _json_file_read(ROLLBACK_STATE_FILE) or {}
+    for path in backups:
+        saved = mtx_binary_version(path)
+        if installed is not None and saved is not None and saved >= installed:
+            continue   # not older than what is installed: nothing to go back to
+        if installed is not None and state.get('backup') == path:
+            last = parse_mtx_version(state.get('to_version', ''))
+            if last is not None and last != installed:
+                return None, (f'MediaMTX was changed outside this editor after the saved copy '
+                              f'({_fmt_version(saved)}) was made: the last upgrade here installed '
+                              f'{_fmt_version(last)}, and {_fmt_version(installed)} is installed now. '
+                              f'Going back to {_fmt_version(saved)} would skip versions, so nothing '
+                              f'was changed.')
+        return path, ''
+    return None, ('No older version is saved. The saved copies are the same as, or newer than, '
+                  f'the installed {_fmt_version(installed)}, so there is nothing to go back to.')
+
+
+def recover_interrupted_upgrade():
+    """Run once when the editor starts. If an upgrade was killed while MediaMTX was stopped, start
+    MediaMTX again, and put the saved binary back when the new one will not run. Returns a short
+    sentence about what it did, or None when no upgrade was interrupted."""
+    marker = _json_file_read(UPGRADE_MARKER_FILE)
+    if marker is None:
+        return None
+    if mtx_unit_state() == 'active':
+        _json_file_remove(UPGRADE_MARKER_FILE)
+        return 'an upgrade was interrupted but MediaMTX is running'
+    print("RECOVER: an upgrade was interrupted and MediaMTX is not running; starting it", flush=True)
+    mtx_systemctl('start')
+    ok, _state = mtx_wait_active(timeout=20, settle=3)
+    what = 'started MediaMTX again after an interrupted upgrade'
+    saved = marker.get('binary_backup') or ''
+    if not ok and saved and os.path.exists(saved):
+        print(f"RECOVER: it still does not run; putting back the saved binary {saved}", flush=True)
+        try:
+            mtx_systemctl('stop')
+            mtx_install_binary(saved)
+            mtx_systemctl('restart')
+            ok, _state = mtx_wait_active(timeout=20, settle=3)
+            what = 'put the saved MediaMTX binary back after an interrupted upgrade'
+        except Exception as e:
+            print(f"RECOVER: could not put the saved binary back: {e}", flush=True)
+    if ok:
+        _json_file_remove(UPGRADE_MARKER_FILE)
+        return what
+    print("RECOVER: MediaMTX is still down; it needs attention (the marker stays, so the next editor "
+          "start tries again)", flush=True)
+    return 'MediaMTX is down after an interrupted upgrade and could not be started'
 
 
 def schedule_editor_self_restart(delay=1.5):
@@ -14798,9 +15032,16 @@ def upgrade_mediamtx():
         ctx = ssl.create_default_context()
         
         # Step 1: Get latest release info to find download URL
-        data, _gh_info = github_latest_release(MEDIAMTX_REPO, ctx, asset_names=mediamtx_release_asset_names)
+        data, gh_info = github_latest_release(MEDIAMTX_REPO, ctx, asset_names=mediamtx_release_asset_names)
         
         remote_version = data.get('tag_name', '')
+
+        # An upgrade is a deliberate act: do not act on an old saved answer when GitHub could not
+        # be asked (ops #1316).
+        if gh_info.get('stale'):
+            return jsonify({'success': False, 'error':
+                            'GitHub could not be asked for the newest MediaMTX release just now (this is '
+                            'an older saved answer). Try again in a few minutes. Nothing was changed.'}), 400
         
         # Find the tar.gz asset for THIS host's architecture
         asset_tag = 'linux_' + MEDIAMTX_ARCH
@@ -14829,6 +15070,15 @@ def upgrade_mediamtx():
             previous_version = ver_result.stdout.strip() if ver_result.returncode == 0 else ''
         except:
             pass
+
+        # Only ever go forward: a release that is the same as, or older than, what is installed
+        # (a stale answer, or MediaMTX installed by hand ahead of the editor) is refused.
+        installed_t, remote_t = parse_mtx_version(previous_version), parse_mtx_version(remote_version)
+        if installed_t is not None and remote_t is not None and remote_t <= installed_t:
+            return jsonify({'success': False, 'error':
+                            f'MediaMTX {_fmt_version(installed_t)} is installed and the newest release is '
+                            f'{_fmt_version(remote_t)}, so there is nothing to upgrade to. '
+                            'Nothing was changed.'}), 400
 
         # Step 2: Download new version (service keeps running until the swap)
         print(f"UPGRADE: Downloading {download_url}...", flush=True)
@@ -14903,10 +15153,16 @@ def upgrade_mediamtx():
                             + _ELF_MACHINE_NAMES.get(want_machine, hex(want_machine))
                             + '). Refusing to install it. Nothing was changed.'}), 400
 
-        # Step 6: Stop MediaMTX — abort with nothing changed if we can't
+        # Step 6: Stop MediaMTX — abort with nothing changed if we can't.
+        # The marker is there from now until MediaMTX runs again. If this process is killed in
+        # between, the next editor start sees it and starts MediaMTX (recover_interrupted_upgrade).
         print(f"UPGRADE: Stopping MediaMTX for upgrade to {remote_version}...", flush=True)
+        upgrade_marker = {'started': time.time(), 'previous_version': previous_version,
+                          'target_version': remote_version, 'binary_backup': ''}
+        _json_file_write(UPGRADE_MARKER_FILE, upgrade_marker)
         stop_res = mtx_systemctl('stop')
         if stop_res.returncode != 0:
+            _json_file_remove(UPGRADE_MARKER_FILE)
             err = (stop_res.stderr or b'').decode(errors='replace').strip()
             return jsonify({'success': False, 'error': 'Could not stop MediaMTX: ' + (err or 'systemctl stop failed')}), 500
         time.sleep(2)
@@ -14920,6 +15176,8 @@ def upgrade_mediamtx():
         # Step 8: Replace binary (NOT the yaml)
         backup_path = mtx_install_binary(new_binary)
         print(f"UPGRADE: Binary replaced with {remote_version} (backup: {backup_path})", flush=True)
+        upgrade_marker['binary_backup'] = backup_path
+        _json_file_write(UPGRADE_MARKER_FILE, upgrade_marker)
 
         # Step 9: Clean up
         os.remove(tmp_tar)
@@ -14952,6 +15210,7 @@ def upgrade_mediamtx():
                 rollback_error = str(rb_exc)
 
             if rolled_back:
+                _json_file_remove(UPGRADE_MARKER_FILE)
                 print(f"UPGRADE: rolled back to {previous_version or 'previous version'}", flush=True)
                 return jsonify({'success': False, 'rollback': True, 'error':
                                 f'MediaMTX {remote_version} did not stay running '
@@ -14968,6 +15227,15 @@ def upgrade_mediamtx():
                             f'config backup: {yaml_backup_path}.'}), 500
 
         print(f"UPGRADE: MediaMTX successfully upgraded to {remote_version}", flush=True)
+        _json_file_remove(UPGRADE_MARKER_FILE)
+        if backup_path:
+            # Tells Rollback which saved binary is the version before this upgrade, and what this
+            # upgrade installed, so it can tell if something else changed MediaMTX later.
+            installed_now = mtx_binary_version()
+            _json_file_write(ROLLBACK_STATE_FILE, {
+                'backup': backup_path, 'from_version': previous_version,
+                'to_version': _fmt_version(installed_now) if installed_now else remote_version,
+                'time': time.time()})
 
         return jsonify({
             'success': True,
@@ -14976,10 +15244,13 @@ def upgrade_mediamtx():
             'backup_path': backup_path
         })
     except Exception as e:
-        # Try to restart MediaMTX in case it was stopped
+        # Try to restart MediaMTX in case it was stopped. The marker stays unless it is running,
+        # so the next editor start tries again.
         try:
             mtx_systemctl('start')
-        except:
+            if mtx_wait_active(timeout=10, settle=2)[0]:
+                _json_file_remove(UPGRADE_MARKER_FILE)
+        except Exception:
             pass
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -15218,22 +15489,13 @@ def rollback_mediamtx():
         import shutil
         import glob
         
-        # Find most recent binary backup
-        # Search both legacy in-place backups (root/helper mode) and the
-        # broker-mode backup dir; newest first regardless of location.
-        backups = sorted(
-            glob.glob(f'{MEDIAMTX_BINARY}.backup_*')
-            + glob.glob(os.path.join(MTX_BIN_BACKUP_DIR, 'mediamtx.backup_*')),
-            key=lambda p: os.path.basename(p), reverse=True)
-        
-        if not backups:
-            return jsonify({'success': False, 'error': 'No backup found to rollback to'}), 400
-        
-        latest_backup = backups[0]
-        
-        # Extract timestamp from backup filename to find matching YAML backup
-        backup_timestamp = latest_backup.split('backup_')[1] if 'backup_' in latest_backup else ''
-        yaml_backup = f'{CONFIG_FILE}.backup_{backup_timestamp}' if backup_timestamp else ''
+        # Pick the saved binary to go back to: the newest one that is OLDER than what is installed,
+        # and still the version before the last upgrade made here (ops #1316). This refuses a
+        # second click (the copy of the newer binary a Rollback leaves is not older) and a saved
+        # copy from further back than the operator expects.
+        latest_backup, why_not = find_rollback_target()
+        if not latest_backup:
+            return jsonify({'success': False, 'error': why_not}), 400
         
         # Get version of backup
         restored_version = ''
@@ -15267,10 +15529,9 @@ def rollback_mediamtx():
         newer_backup = mtx_install_binary(latest_backup)   # backup of the binary we are leaving
         print(f"ROLLBACK: Binary restored from {latest_backup}", flush=True)
         
-        # Restore YAML if backup exists
-        if yaml_backup and os.path.exists(yaml_backup):
-            mtx_copy_priv(yaml_backup, CONFIG_FILE)
-            print(f"ROLLBACK: YAML config restored from {yaml_backup}", flush=True)
+        # The config stays exactly as it is now. The copy taken when the upgrade ran is NOT put
+        # back: it would bring back a Stream Key or password the operator changed after the upgrade
+        # (ops #1316). Only a field the older MediaMTX refuses is taken out, below.
         
         # Try to start — if it fails, auto-fix unknown fields
         fields_removed = []
@@ -15340,12 +15601,11 @@ def rollback_mediamtx():
         # Clean up
         try:
             os.remove(latest_backup)
-            if yaml_backup and os.path.exists(yaml_backup):
-                os.remove(yaml_backup)
             if os.path.exists(pre_rollback_yaml):
                 os.remove(pre_rollback_yaml)
         except:
             pass
+        _json_file_remove(ROLLBACK_STATE_FILE)
         
         print(f"ROLLBACK: Successfully restored to {restored_version}", flush=True)
         
@@ -15353,6 +15613,7 @@ def rollback_mediamtx():
             'success': True,
             'restored_version': restored_version,
             'fields_removed': fields_removed,
+            'config_kept': True,
             'backup_used': latest_backup
         })
         
@@ -15369,19 +15630,9 @@ def rollback_mediamtx():
 def rollback_status():
     """Check if a rollback backup is available"""
     try:
-        import glob
-        
-        # Search both legacy in-place backups (root/helper mode) and the
-        # broker-mode backup dir; newest first regardless of location.
-        backups = sorted(
-            glob.glob(f'{MEDIAMTX_BINARY}.backup_*')
-            + glob.glob(os.path.join(MTX_BIN_BACKUP_DIR, 'mediamtx.backup_*')),
-            key=lambda p: os.path.basename(p), reverse=True)
-        
-        if not backups:
-            return jsonify({'available': False})
-        
-        latest_backup = backups[0]
+        latest_backup, why_not = find_rollback_target()
+        if not latest_backup:
+            return jsonify({'available': False, 'reason': why_not})
         
         # Parse date from filename: mediamtx.backup_20260212_193841
         backup_date = ''
@@ -15405,8 +15656,7 @@ def rollback_status():
             'available': True,
             'backup_version': backup_version,
             'backup_date': backup_date,
-            'backup_path': latest_backup,
-            'yaml_backup': os.path.exists(f'{CONFIG_FILE}.backup_{latest_backup.split("backup_")[1]}') if 'backup_' in latest_backup else False
+            'backup_path': latest_backup
         })
     except:
         return jsonify({'available': False})
@@ -17779,12 +18029,126 @@ def serve_vendored_hls_js():
     resp.headers['Cache-Control'] = 'public, max-age=86400'
     return resp
 
+# --- Startup auto-patches of mediamtx.yml (ops #1316) -----------------------------------
+# These run on every editor start, so they must touch only what WE wrote in an older version.
+# One that matched on a bare key (runOnReadyRestart: true) deleted the operator's own setting at
+# every restart, and one that added a key with no version check broke older MediaMTX binaries.
+LEGACY_LIVE_PATH_KEY = '~^live/(.+)$'
+LEGACY_LIVE_COMMAND = 'ffmpeg -i rtsp://localhost:8554/live/$G1'   # what our old installers wrote
+LEGACY_LIVE_FRAGMENT = 'rtsp://localhost:8554/$G1'                 # its second line, left behind by a bad removal
+RTSP_DEMUX_MIN_VERSION = (1, 17, 0)   # upstream mediamtx.yml first lists rtspDemuxMpegts at v1.17.0
+
+
+def parse_mtx_version(text):
+    """(major, minor, patch) from `mediamtx --version` output such as 'v1.16.1', or None."""
+    m = re.search(r'v?(\d+)\.(\d+)\.(\d+)', text or '')
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def mtx_binary_version(path=None):
+    """Version of the MediaMTX binary at `path` (the installed one by default) as a tuple, or None
+    when it cannot be run or says nothing we can read."""
+    try:
+        r = subprocess.run([path or MEDIAMTX_BINARY, '--version'], capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return None
+        return (parse_mtx_version(r.stdout) if isinstance(r.stdout, str) else None) \
+            or (parse_mtx_version(r.stderr) if isinstance(r.stderr, str) else None)
+    except Exception:
+        return None
+
+
+def strip_legacy_live_path(text):
+    """Remove our own old FFmpeg re-publish default from a mediamtx.yml text. Returns (text, changed).
+
+    Removed: the `~^live/(.+)$` path block, but only when it still holds the command our old
+    installers wrote, and the loose lines an older bad removal left behind (the second line of that
+    command, and a `runOnReadyRestart: true` right beside it). Not removed: a `runOnReadyRestart:
+    true` anywhere else, or a `~^live/(.+)$` path the operator wrote or changed."""
+    lines = text.splitlines(keepends=True)
+    changed = False
+
+    start = next((i for i, l in enumerate(lines)
+                  if LEGACY_LIVE_PATH_KEY in l and not l.lstrip().startswith('#')), None)
+    if start is not None:
+        base_indent = len(lines[start]) - len(lines[start].lstrip())
+        end = len(lines)
+        for i in range(start + 1, len(lines)):
+            if lines[i].strip() and (len(lines[i]) - len(lines[i].lstrip())) <= base_indent:
+                end = i
+                break
+        while end > start and end < len(lines) and lines[end - 1].strip() == '':
+            end -= 1
+        if LEGACY_LIVE_COMMAND in ''.join(lines[start:end]):
+            del lines[start:end]
+            changed = True
+
+    orphans = {i for i, l in enumerate(lines) if l.strip() == LEGACY_LIVE_FRAGMENT}
+    if orphans:
+        nonblank = [i for i, l in enumerate(lines) if l.strip()]
+        pos = {i: n for n, i in enumerate(nonblank)}
+        drop = set(orphans)
+        for i in nonblank:
+            if lines[i].strip() == 'runOnReadyRestart: true':
+                beside = {nonblank[pos[i] - 1] if pos[i] > 0 else None,
+                          nonblank[pos[i] + 1] if pos[i] + 1 < len(nonblank) else None}
+                if beside & orphans:
+                    drop.add(i)
+        lines = [l for i, l in enumerate(lines) if i not in drop]
+        changed = True
+    return ''.join(lines), changed
+
+
+def patch_legacy_live_path(config_file=None):
+    config_file = config_file or CONFIG_FILE
+    with open(config_file, 'r') as f:
+        text = f.read()
+    new_text, changed = strip_legacy_live_path(text)
+    if changed:
+        backup_config_file('removing the legacy FFmpeg live/ path')
+        with open(config_file, 'w') as f:
+            f.write(new_text)
+        print("✓ Removed legacy FFmpeg ~^live/(.+)$ path from mediamtx.yml (no longer needed with MPEG-TS demuxing)")
+
+
+def add_rtsp_demux_default(text, version):
+    """mediamtx.yml text with `rtspDemuxMpegts: true` under pathDefaults, when `version` (a tuple)
+    is a MediaMTX that knows the key and the config does not mention it. Else the text as it is."""
+    if 'rtspDemuxMpegts' in text or version is None or version < RTSP_DEMUX_MIN_VERSION:
+        return text
+    if 'pathDefaults:' in text:
+        return text.replace('pathDefaults:', 'pathDefaults:\n  rtspDemuxMpegts: true', 1)
+    if 'paths:' in text:
+        return text.replace('paths:', 'pathDefaults:\n  rtspDemuxMpegts: true\n\npaths:', 1)
+    return text
+
+
+def patch_rtsp_demux_default(config_file=None, version=None):
+    config_file = config_file or CONFIG_FILE
+    with open(config_file, 'r') as f:
+        text = f.read()
+    new_text = add_rtsp_demux_default(text, version or mtx_binary_version())
+    if new_text != text:
+        backup_config_file('the rtspDemuxMpegts auto-patch')
+        with open(config_file, 'w') as f:
+            f.write(new_text)
+        print("✓ Added rtspDemuxMpegts: true to pathDefaults (MPEG-TS unwrapping for RTSP sources)")
+
+
 if __name__ == '__main__':
     # Check if config file exists
     if not os.path.exists(CONFIG_FILE):
         print(f"Error: MediaMTX configuration file not found at {CONFIG_FILE}")
         print("Please install MediaMTX first using the installation script.")
         exit(1)
+
+    # An upgrade that was killed while MediaMTX was stopped: start it again before anything else (ops #1316)
+    try:
+        _recovered = recover_interrupted_upgrade()
+        if _recovered:
+            print(f"✓ Recovered: {_recovered}", flush=True)
+    except Exception as e:
+        print(f"Warning: could not check for an interrupted upgrade: {e}", flush=True)
     
     # Auto-patch: Ensure IPv6 loopback (::1) is in the localhost API user
     # Without this, the web editor's API calls fail auth on systems that connect via IPv6
@@ -17803,74 +18167,18 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"Warning: Could not auto-patch IPv6 loopback: {e}")
 
-    # Auto-patch: Remove legacy FFmpeg /live re-publish path and any leftover
-    # fragments from earlier incomplete removals.
+    # Auto-patch: remove our own old FFmpeg /live re-publish default and its leftovers (ops #1316:
+    # only that exact default; a path the operator wrote is left alone).
     try:
-        with open(CONFIG_FILE, 'r') as f:
-            lines = f.readlines()
-        changed = False
-
-        # Pass 1: Remove the full ~^live/(.+)$ block using indentation
-        ffmpeg_start = None
-        base_indent = 0
-        removed = False
-        for i, line in enumerate(lines):
-            if '~^live/(.+)$' in line:
-                ffmpeg_start = i
-                base_indent = len(line) - len(line.lstrip())
-                continue
-            if ffmpeg_start is not None and i > ffmpeg_start:
-                stripped = line.strip()
-                if stripped == '':
-                    continue
-                cur_indent = len(line) - len(line.lstrip())
-                if cur_indent <= base_indent:
-                    end = i
-                    while end > ffmpeg_start and lines[end - 1].strip() == '':
-                        end -= 1
-                    del lines[ffmpeg_start:end]
-                    changed = True
-                    removed = True
-                    break
-        # Block at end of file: no following line at base indent, so the
-        # loop above never fires — delete through EOF.
-        if ffmpeg_start is not None and not removed:
-            del lines[ffmpeg_start:]
-            changed = True
-
-        # Pass 2: Clean up orphaned fragments from previous bad removals
-        cleaned = []
-        for line in lines:
-            s = line.strip()
-            if s == 'rtsp://localhost:8554/$G1' or s == 'runOnReadyRestart: true':
-                changed = True
-                continue
-            cleaned.append(line)
-        lines = cleaned
-
-        if changed:
-            backup_config_file('removing the legacy FFmpeg live/ path')
-            with open(CONFIG_FILE, 'w') as f:
-                f.writelines(lines)
-            print("✓ Removed legacy FFmpeg ~^live/(.+)$ path from mediamtx.yml (no longer needed with MPEG-TS demuxing)")
+        patch_legacy_live_path()
     except Exception as e:
         print(f"Warning: Could not remove legacy FFmpeg path: {e}")
 
-    # Auto-patch: Ensure rtspDemuxMpegts is enabled under pathDefaults
-    # Without this, RTSP sources wrapping H264 in MPEG-TS (TAKICU, drones, ISR)
-    # show as "1 track (MPEG-TS)" and HLS playback fails.
+    # Auto-patch: enable rtspDemuxMpegts under pathDefaults, on MediaMTX versions that have the
+    # key (v1.17.0 and later). Without it, RTSP sources wrapping H264 in MPEG-TS show as
+    # "1 track (MPEG-TS)" and HLS playback fails.
     try:
-        with open(CONFIG_FILE, 'r') as f:
-            content = f.read()
-        if 'rtspDemuxMpegts' not in content:
-            if 'pathDefaults:' in content:
-                content = content.replace('pathDefaults:', 'pathDefaults:\n  rtspDemuxMpegts: true', 1)
-            elif 'paths:' in content:
-                content = content.replace('paths:', 'pathDefaults:\n  rtspDemuxMpegts: true\n\npaths:', 1)
-            backup_config_file('the rtspDemuxMpegts auto-patch')
-            with open(CONFIG_FILE, 'w') as f:
-                f.write(content)
-            print("✓ Added rtspDemuxMpegts: true to pathDefaults (MPEG-TS unwrapping for RTSP sources)")
+        patch_rtsp_demux_default()
     except Exception as e:
         print(f"Warning: Could not add rtspDemuxMpegts: {e}")
 

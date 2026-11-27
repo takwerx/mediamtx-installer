@@ -54,6 +54,7 @@ Where a doc and what we saw disagree, both are kept.
   `rtspDemuxMpegts`, `srtPublishPassphrase`, `webrtcICEUDPMuxAddress` all exist in v1.21.3 `api/openapi.yaml`.
 - Default listen ports upstream (`mediamtx.yml` v1.21.3): RTSP 8554, RTSPS 8322, RTMP 1935, RTMPS 1936, HLS 8888,
   WebRTC 8889 (media on UDP 8189), SRT 8890, API 9997. 📖 source-checked 2026-10-31.
+- 📖 source-checked 2026-11-26 (ops #1316): `rtspDemuxMpegts` is in upstream `mediamtx.yml` from **v1.17.0** (absent in v1.16.3, present in v1.17.0 to v1.21.3). A MediaMTX older than that refuses the key as an unknown field and does not start, so the editor adds or saves it only when the installed binary is v1.17.0 or newer.
 - MediaMTX hot-reloads its YAML, so config saves apply even when `systemctl restart` fails (infra-TAK boxes, see 3.2). 📝 from our notes.
 - Fresh Rocky installs: MediaMTX's own default config has the API off. Our installer turns it on at `127.0.0.1:9997`. 📝 v2.1.9 release notes.
 
