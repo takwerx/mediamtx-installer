@@ -112,6 +112,19 @@ class RerunMixin:
         self.assertEqual(binary_version(os.path.join(self.sb.bin_dir, kept[0])), 'v1.0.0')
         self.assertFalse(self.sb.backups(self.sb.binary + '.new'), 'no temporary binary is left')
 
+    def test_a_download_that_does_not_match_its_checksum_is_refused(self):
+        # checked and found safe (ops #1315): the box is left exactly as it was
+        self.box(config=OLD_CONFIG.replace('legacyKey: yes\n', ''))
+        self.release(fake_mediamtx('9.9.9'))
+        self.sb.write(os.path.join(self.sb.fixtures, 'checksums.sha256'),
+                      '%s  mediamtx_v9.9.9_linux_amd64.tar.gz\n' % ('0' * 64))
+        before = self.sb.read(self.sb.binary)
+        r = self.run_script()
+        self.assertNotEqual(r.returncode, 0, self.out(r))
+        self.assertIn('Checksum mismatch', self.out(r))
+        self.assertEqual(self.sb.read(self.sb.binary), before)
+        self.assertEqual(self.sb.backups(self.sb.binary + '.backup_'), [])
+
     # --- MoQ -----------------------------------------------------------------------------------------------
     def test_a_kept_config_without_a_moq_setting_gets_moq_no(self):
         self.box(config=OLD_CONFIG.replace('legacyKey: yes\n', ''))
