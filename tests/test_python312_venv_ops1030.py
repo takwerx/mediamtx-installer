@@ -91,7 +91,8 @@ class InstallPythonTest(unittest.TestCase):
 
     def test_venv_is_built_from_the_chosen_python(self):
         s = installer_text()
-        self.assertRegex(s, r'"\$VENV_PYTHON" -m venv --clear --system-site-packages "\$VENV_DIR"')
+        # built beside the running venv (venv.new) and swapped in when it imports everything (ops #1315)
+        self.assertRegex(s, r'"\$VENV_PYTHON" -m venv --system-site-packages "\$VENV_NEW"')
         self.assertNotRegex(s, r'(?m)^\s*(if ! )?python3 -m venv')
 
 
