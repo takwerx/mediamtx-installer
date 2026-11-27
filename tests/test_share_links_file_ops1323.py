@@ -149,6 +149,10 @@ class OddEntries(Base):
             self.assertEqual(self.client().get('/shared/' + tok).status_code, 404, tok)
             self.assertEqual(self.client().get('/shared-hls/%s/cam1/index.m3u8' % tok).status_code, 403, tok)
 
+    def test_the_webrtc_routes_refuse_odd_entries_with_403_not_500(self):
+        for path in ('/shared/_meta/whep', '/shared-whep/_meta', '/shared/listnull/whep'):
+            self.assertEqual(self.client().post(path, data='v=0').status_code, 403, path)
+
     def test_the_real_link_page_still_works(self):
         self.assertEqual(self.client().get('/shared/good').status_code, 200)
 
