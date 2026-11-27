@@ -665,8 +665,9 @@ def cap_never_ending_share_links(now=None):
                  ' (copy kept as %s)' % copy_name if copy_name else ''), flush=True)
         return None
     capped = 0
-    for info in links.values():
-        if isinstance(info, dict) and not info.get('expires') and 'limits_version' not in info:
+    for tok in links:
+        info = get_share_link(links, tok)  # only real links: other entries (a number, or an object with no stream) are left as they are
+        if info is not None and not info.get('expires') and 'limits_version' not in info:
             info['expires'] = now + SHARE_LINK_LEGACY_CAP_SECONDS
             info['ttl_label'] = '24 hours (set by the update)'
             capped += 1
@@ -17350,7 +17351,7 @@ def api_share_links_list():
     links = load_pruned_share_links()
     result = []
     for tok, info in links.items():
-        if not isinstance(info, dict):
+        if get_share_link(links, tok) is None:
             continue  # not a link (a newer version may keep other data in this file): skip it, leave it in the file
         result.append({
             'token': tok,

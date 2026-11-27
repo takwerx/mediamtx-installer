@@ -164,9 +164,18 @@ class OddEntries(Base):
 
     def test_a_meta_that_is_an_object_is_fine(self):
         self.write(json.dumps({'_meta': {'v': 3}, 'good': {'stream': 'cam1', 'expires': None}}))
-        self.assertEqual(self.client('admin').get('/api/share-links').status_code, 200)
+        r = self.client('admin').get('/api/share-links')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual([x['token'] for x in r.get_json()['links']], ['good'])  # an object with no stream is not a link
         self.assertEqual(self.client().get('/shared/_meta').status_code, 404)
         self.assertEqual(self.client().get('/shared/good').status_code, 200)
+
+    def test_cap_does_not_touch_an_object_entry_that_is_not_a_link(self):
+        self.write(json.dumps({'_future': {'schema': 3}, 'good': {'stream': 'cam1', 'expires': None}}))
+        self.assertEqual(self.mod.cap_never_ending_share_links(now=1700000000), 1)
+        saved = json.loads(self.read())
+        self.assertEqual(saved['_future'], {'schema': 3})
+        self.assertEqual(saved['good']['expires'], 1700000000 + 86400)
 
     def test_cap_skips_odd_entries_and_keeps_them(self):
         self.assertEqual(self.mod.cap_never_ending_share_links(now=1700000000), 1)
