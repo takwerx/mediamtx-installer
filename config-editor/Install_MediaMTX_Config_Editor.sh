@@ -33,6 +33,47 @@ if { ! command -v mediamtx &> /dev/null && [ ! -x /usr/local/bin/mediamtx ]; } |
     exit 1
 fi
 
+# >>> mtx_editor_version
+# Version compare for the check below. CURRENT_VERSION in the editor file reads v2.1.21 on a release and
+# v2.1.21-dev on the dev branch (which is OLDER than the release it is heading for).
+mtx_editor_version() {
+    sed -n -E "s/^CURRENT_VERSION[[:space:]]*=[[:space:]]*['\"]v?([0-9]+\.[0-9]+\.[0-9]+(-dev)?)['\"].*/\1/p" "$1" 2>/dev/null | head -n 1
+}
+mtx_version_key() {
+    local v=${1%-dev} dev=1 a b c
+    case $1 in *-dev) dev=0 ;; esac
+    IFS=. read -r a b c <<< "$v"
+    printf '%05d%05d%05d%d' "$((10#$a))" "$((10#$b))" "$((10#$c))" "$dev"
+}
+# 0 (true) when version $1 is older than version $2
+mtx_version_older() {
+    [ "$(mtx_version_key "$1")" -lt "$(mtx_version_key "$2")" ]
+}
+# <<< mtx_editor_version
+
+# Where the editor file to install is (the same two places Step 2 looks).
+EDITOR_SRC=""
+if [ -f "./config-editor/mediamtx_config_editor.py" ]; then
+    EDITOR_SRC="./config-editor/mediamtx_config_editor.py"
+elif [ -f "./mediamtx_config_editor.py" ]; then
+    EDITOR_SRC="./mediamtx_config_editor.py"
+fi
+
+# Re-running this script from an old copy of the repository must not turn a newer editor back into
+# an older one (ops #1315). The check runs before anything is changed.
+if [ -n "$EDITOR_SRC" ] && [ -f /opt/mediamtx-webeditor/mediamtx_config_editor.py ]; then
+    INSTALLED_EDITOR_VERSION=$(mtx_editor_version /opt/mediamtx-webeditor/mediamtx_config_editor.py)
+    THIS_EDITOR_VERSION=$(mtx_editor_version "$EDITOR_SRC")
+    if [ -n "$INSTALLED_EDITOR_VERSION" ] && [ -n "$THIS_EDITOR_VERSION" ] \
+        && mtx_version_older "$THIS_EDITOR_VERSION" "$INSTALLED_EDITOR_VERSION"; then
+        echo "ERROR: this copy of the web editor (v$THIS_EDITOR_VERSION) is older than the one installed (v$INSTALLED_EDITOR_VERSION)."
+        echo "Nothing was changed."
+        echo "Get the newest copy first (git pull, or download the newest release), then run this script again."
+        echo "To go back to an older version on purpose, use Rollback on the web editor's Versions tab."
+        exit 1
+    fi
+fi
+
 # ==========================================
 # Unattended-Upgrade Detection
 # ==========================================
@@ -110,18 +151,31 @@ echo "✓ Python and pip installed ($("$VENV_PYTHON" --version 2>&1))"
 # `pip3 install ... || true`, which swallowed that refusal, printed ✓ anyway,
 # and left the service crash-looping on `import flask`.
 # --system-site-packages lets the venv use apt's python3-psutil, so boards with
-# no psutil wheel (armv7) don't need a compiler. --clear rebuilds the venv on a
-# re-run, which also repairs one still pointing at the Python from before a
-# release upgrade.
+# no psutil wheel (armv7) don't need a compiler.
+# The new venv is built NEXT TO the running one (venv.new) and only replaces it when it imports
+# everything the editor needs. The old one is kept as venv.prev. It used to be rebuilt in place with
+# --clear, so a pip that failed halfway left the editor with no Flask at its next restart (ops #1315).
+# A rebuild on every run also repairs a venv still pointing at the Python from before a release upgrade.
 WEB_EDITOR_DIR="/opt/mediamtx-webeditor"
 VENV_DIR="$WEB_EDITOR_DIR/venv"
+VENV_NEW="$WEB_EDITOR_DIR/venv.new"
+VENV_PREV="$WEB_EDITOR_DIR/venv.prev"
 mkdir -p "$WEB_EDITOR_DIR"
-echo "Installing Flask and dependencies into $VENV_DIR..."
-if ! "$VENV_PYTHON" -m venv --clear --system-site-packages "$VENV_DIR"; then
+venv_failed() {
+    rm -rf "$VENV_NEW"
     echo ""
-    echo "ERROR: Could not create a Python virtual environment at $VENV_DIR"
-    echo "Install python3-venv (apt-get install python3-venv) and re-run this script."
+    echo "ERROR: $1"
+    if [ -d "$VENV_DIR" ]; then
+        echo "The web editor's current Python packages were not changed."
+    fi
+    echo "$2"
     exit 1
+}
+echo "Installing Flask and dependencies into a new venv ($VENV_NEW), next to the current one..."
+rm -rf "$VENV_NEW"
+if ! "$VENV_PYTHON" -m venv --system-site-packages "$VENV_NEW"; then
+    venv_failed "Could not create a Python virtual environment at $VENV_NEW" \
+        "Install python3-venv (apt-get install python3-venv) and re-run this script."
 fi
 # Exact versions with a SHA-256 for every file (requirements*.txt), so pip refuses a swapped or
 # tampered package (ops #623). They sit beside this script (the same place the editor file is
@@ -131,28 +185,37 @@ for d in "$(dirname "$0")" "./config-editor" "."; do
     if [ -f "$d/requirements.txt" ]; then REQ_DIR="$d"; break; fi
 done
 if [ -z "$REQ_DIR" ]; then
-    echo ""
-    echo "ERROR: requirements.txt (the pinned Python packages) was not found next to this script."
-    echo "Get the whole repository (git clone, or the release zip) and re-run this script."
-    exit 1
+    venv_failed "requirements.txt (the pinned Python packages) was not found next to this script." \
+        "Get the whole repository (git clone, or the release zip) and re-run this script."
 fi
-PIP_INSTALL=("$VENV_DIR/bin/pip" install --quiet --disable-pip-version-check --require-hashes)
+PIP_INSTALL=("$VENV_NEW/bin/python3" -m pip install --quiet --disable-pip-version-check --require-hashes)
 if ! "${PIP_INSTALL[@]}" -r "$REQ_DIR/requirements.txt"; then
-    echo ""
-    echo "ERROR: Could not install the web editor's Python packages (see pip's output above)."
-    echo "If pip reports a hash mismatch, do not work around it: the download does not match what we pinned."
-    echo "Fix that and re-run this script."
-    exit 1
+    venv_failed "Could not install the web editor's Python packages (see pip's output above)." \
+        "If pip reports a hash mismatch, do not work around it: the download does not match what we pinned. Fix that and re-run this script."
 fi
 # psutil: apt's python3-psutil is already visible in the venv on Ubuntu/Debian, so only pip-install
 # it when it is missing (Rocky). Keeps armv7 boards, which have no psutil wheel, working.
-if ! "$VENV_DIR/bin/python3" -c 'import psutil' > /dev/null 2>&1; then
+if ! "$VENV_NEW/bin/python3" -c 'import psutil' > /dev/null 2>&1; then
     if ! "${PIP_INSTALL[@]}" -r "$REQ_DIR/requirements-psutil.txt"; then
-        echo ""
-        echo "ERROR: Could not install psutil (see pip's output above)."
-        echo "Fix that and re-run this script."
-        exit 1
+        venv_failed "Could not install psutil (see pip's output above)." "Fix that and re-run this script."
     fi
+fi
+if ! "$VENV_NEW/bin/python3" -c 'import flask, ruamel.yaml, requests, psutil' > /dev/null 2>&1; then
+    venv_failed "The new Python environment cannot import what the web editor needs (flask, ruamel.yaml, requests, psutil)." \
+        "Re-run this script. If it happens again, see pip's output above."
+fi
+# A venv remembers its own folder name in pyvenv.cfg and in the first line of its scripts (pip, flask).
+# It was built as venv.new, so point those at venv before the folder is renamed.
+for f in "$VENV_NEW/pyvenv.cfg" "$VENV_NEW"/bin/*; do
+    if [ -f "$f" ] && [ ! -L "$f" ] && grep -Iq '/venv\.new' "$f" 2>/dev/null; then
+        sed -i 's#/venv\.new#/venv#g' "$f"
+    fi
+done
+rm -rf "$VENV_PREV"
+if [ -e "$VENV_DIR" ]; then mv "$VENV_DIR" "$VENV_PREV"; fi
+if ! mv "$VENV_NEW" "$VENV_DIR"; then
+    if [ -e "$VENV_PREV" ]; then mv "$VENV_PREV" "$VENV_DIR"; fi
+    venv_failed "Could not put the new Python environment in place." "Re-run this script."
 fi
 echo "✓ Python packages installed (Flask, ruamel.yaml, requests, psutil), versions and hashes pinned"
 
@@ -166,13 +229,16 @@ mkdir -p "$WEB_EDITOR_DIR/backups"
 mkdir -p "$WEB_EDITOR_DIR/recordings"
 mkdir -p "$WEB_EDITOR_DIR/test_videos"
 
-# Find the Python file
-if [ -f "./config-editor/mediamtx_config_editor.py" ]; then
-    cp ./config-editor/mediamtx_config_editor.py "$WEB_EDITOR_DIR/"
-    echo "✓ Web editor copied from config-editor/"
-elif [ -f "./mediamtx_config_editor.py" ]; then
-    cp ./mediamtx_config_editor.py "$WEB_EDITOR_DIR/"
-    echo "✓ Web editor copied from current directory"
+# Find the Python file (EDITOR_SRC was set at the top). The file it replaces is kept as
+# mediamtx_config_editor.py.backup_<time>, the name the editor's Versions tab lists for Rollback,
+# unless it is the same file (ops #1315).
+if [ -n "$EDITOR_SRC" ]; then
+    EDITOR_DEST="$WEB_EDITOR_DIR/mediamtx_config_editor.py"
+    if [ -f "$EDITOR_DEST" ] && ! cmp -s "$EDITOR_SRC" "$EDITOR_DEST"; then
+        cp -p "$EDITOR_DEST" "$EDITOR_DEST.backup_$(date +%Y%m%d_%H%M%S)"
+    fi
+    cp "$EDITOR_SRC" "$EDITOR_DEST.new" && mv -f "$EDITOR_DEST.new" "$EDITOR_DEST"
+    echo "✓ Web editor copied from $(dirname "$EDITOR_SRC")/"
 else
     echo ""
     echo "ERROR: mediamtx_config_editor.py not found!"
@@ -238,7 +304,13 @@ echo "=========================================="
 echo "Step 3: Creating systemd Service"
 echo "=========================================="
 
-cat > /etc/systemd/system/mediamtx-webeditor.service <<EOF
+# A box that already has the unit is a re-run. It may have been hardened by hand (another User=,
+# sandbox settings, port 5000 closed on purpose), and the installer keeps that (ops #1315).
+EDITOR_UNIT=/etc/systemd/system/mediamtx-webeditor.service
+RERUN=0
+if [ -s "$EDITOR_UNIT" ]; then RERUN=1; fi
+UNIT_TMP=$(mktemp)
+cat > "$UNIT_TMP" <<EOF
 [Unit]
 Description=MediaMTX Web Configuration Editor
 After=network.target mediamtx.service
@@ -255,6 +327,42 @@ User=root
 WantedBy=multi-user.target
 EOF
 
+# >>> mtx_write_unit
+# Writes a systemd unit but keeps what the operator changed in it (a hardened User=, Group=, sandbox
+# settings). Only the lines named in KEY... are set to the installer's value: the ones the installer
+# needs. A box with no unit gets the installer's unit as it is. The unit it replaces is kept as
+# UNIT.backup_<time> (systemd ignores that name) (ops #1315).
+# usage: mtx_write_unit UNIT_FILE INSTALLER_UNIT_FILE KEY...
+mtx_write_unit() {
+    local unit=$1 fresh=$2 key line have
+    shift 2
+    if [ ! -s "$unit" ] || ! grep -q '^\[Service\]' "$unit"; then
+        if [ -s "$unit" ]; then cp -p "$unit" "$unit.backup_$(date +%Y%m%d_%H%M%S)"; fi
+        cp "$fresh" "$unit.new" && mv -f "$unit.new" "$unit"
+        return 0
+    fi
+    cp -p "$unit" "$unit.new" || return 1
+    for key in "$@"; do
+        line=$(grep -m1 "^$key=" "$fresh") || continue
+        have=0
+        if grep -q "^$key=" "$unit.new"; then have=1; fi
+        awk -v key="$key" -v line="$line" -v have="$have" '
+            index($0, key "=") == 1 { if (!done) { print line; done = 1 }; next }
+            $0 == "[Service]" { print; if (!have) { print line; done = 1 }; next }
+            { print }
+        ' "$unit.new" > "$unit.new2" && mv -f "$unit.new2" "$unit.new"
+    done
+    if cmp -s "$unit" "$unit.new"; then
+        rm -f "$unit.new"
+    else
+        cp -p "$unit" "$unit.backup_$(date +%Y%m%d_%H%M%S)"
+        mv -f "$unit.new" "$unit"
+    fi
+}
+# <<< mtx_write_unit
+mtx_write_unit "$EDITOR_UNIT" "$UNIT_TMP" ExecStart WorkingDirectory
+rm -f "$UNIT_TMP"
+
 systemctl daemon-reload
 systemctl enable mediamtx-webeditor
 # restart, not start: on a re-run the editor is usually already running, and
@@ -270,7 +378,10 @@ echo "=========================================="
 
 # Open web editor port. Rocky/RHEL run firewalld, Ubuntu ufw; some boxes have
 # neither (e.g. cloud images that rely on a security group).
-if command -v firewall-cmd > /dev/null 2>&1 && firewall-cmd --state > /dev/null 2>&1; then
+# Only on the first install: a re-run leaves the firewall as the operator has it (ops #1315).
+if [ "$RERUN" = "1" ]; then
+    echo "ℹ  Re-run: the firewall was left as it is. If port 5000 should be open, open it yourself (ufw allow 5000/tcp, or firewall-cmd)."
+elif command -v firewall-cmd > /dev/null 2>&1 && firewall-cmd --state > /dev/null 2>&1; then
     # Runtime + permanent, no --reload (a reload kills local multicast senders).
     firewall-cmd --zone=public --add-port=5000/tcp > /dev/null
     firewall-cmd --zone=public --permanent --add-port=5000/tcp > /dev/null

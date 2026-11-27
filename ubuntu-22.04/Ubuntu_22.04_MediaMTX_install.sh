@@ -162,14 +162,34 @@ echo "=========================================="
 
 tar -xzf mediamtx.tar.gz
 
-# Move executable to /usr/local/bin
-mv mediamtx /usr/local/bin/
-chmod +x /usr/local/bin/mediamtx
+# >>> mtx_install_binary
+# Re-running this script is how people update MediaMTX. Keep the binary it replaces, next to it as
+# mediamtx.backup_<time> (the web editor's Rollback looks for that name), so a new version that will
+# not start can be taken out again (ops #1315). The new binary goes in under a temporary name and is
+# renamed, so a killed run never leaves half a binary at the real name.
+MTX_BIN=/usr/local/bin/mediamtx
+MTX_BIN_BACKUP=""
+mtx_install_binary() {
+    local new=$1 dest=$2
+    MTX_BIN_BACKUP=""
+    if [ -f "$dest" ]; then
+        MTX_BIN_BACKUP="$dest.backup_$(date +%Y%m%d_%H%M%S)"
+        cp -p "$dest" "$MTX_BIN_BACKUP" || return 1
+    fi
+    cp "$new" "$dest.new" && chmod 755 "$dest.new" && mv -f "$dest.new" "$dest" || return 1
+    # SELinux (Rocky/RHEL): the file keeps the label of the folder it came from until it is relabelled.
+    if command -v restorecon > /dev/null 2>&1; then restorecon "$dest" > /dev/null 2>&1 || true; fi
+}
+# <<< mtx_install_binary
+mtx_install_binary mediamtx "$MTX_BIN"
 
 # Create config directory
 mkdir -p /usr/local/etc
 
 echo "✓ MediaMTX binary installed to /usr/local/bin/"
+if [ -n "$MTX_BIN_BACKUP" ]; then
+    echo "  Previous binary kept: $MTX_BIN_BACKUP"
+fi
 
 echo ""
 echo "=========================================="
@@ -181,6 +201,10 @@ echo "=========================================="
 # backed up into the web editor's backup folder (shows up under Restore) and
 # kept as-is. To start over from the template, move the file away and re-run.
 CONFIG_FILE=/usr/local/etc/mediamtx.yml
+# The template is written to this name and renamed into place when it is complete, so a run that
+# is killed half way never leaves a half-written mediamtx.yml for the next run to keep (ops #1315).
+CONFIG_TMP="$CONFIG_FILE.new"
+rm -f "$CONFIG_TMP"
 KEEP_CONFIG=0
 if [ -s "$CONFIG_FILE" ]; then
     KEEP_CONFIG=1
@@ -190,16 +214,66 @@ if [ -s "$CONFIG_FILE" ]; then
     cp -p "$CONFIG_FILE" "$CONFIG_BACKUP"
 fi
 
+# >>> mtx_moq
+# Small edits to a configuration that is kept. Each one writes a copy and renames it over the
+# original, so the file is never half written. They return 1 and change nothing when there is
+# nothing to do.
+#
+# MoQ: MediaMTX turns MoQ on when the key is missing, which opens port 8892. A config that has the
+# key (yes or no) is the operator's choice and is left alone; one that lacks it gets moq: no.
+mtx_ensure_moq_off() {
+    local cfg=$1
+    if grep -qE '^moq[[:space:]]*:' "$cfg"; then
+        return 1
+    fi
+    cp -p "$cfg" "$cfg.new" || return 1
+    if ! printf '\n# Added by the MediaMTX installer: newer MediaMTX turns MoQ on when this key is missing,\n# which opens port 8892. Set it to yes if you want MoQ.\nmoq: no\n' >> "$cfg.new"; then
+        rm -f "$cfg.new"
+        return 1
+    fi
+    mv -f "$cfg.new" "$cfg"
+}
+# <<< mtx_moq
+# >>> mtx_hls_placeholder
+# The installer's template carries the HLS viewer password "changeme" until the next step puts a
+# random one there. A run that stopped between the two leaves the placeholder behind. Replace it,
+# in the hlsviewer entry only (another user may really use that word).
+mtx_replace_hls_placeholder() {
+    local cfg=$1 pw=$2
+    cp -p "$cfg" "$cfg.new" || return 1
+    awk -v pw="$pw" '
+        /^- user:[[:space:]]*hlsviewer[[:space:]]*$/ { inhls = 1; print; next }
+        /^- user:/ { inhls = 0 }
+        inhls && !done && /^[[:space:]]+pass:[[:space:]]*changeme[[:space:]]*$/ { sub(/changeme/, pw); done = 1 }
+        { print }
+    ' "$cfg" > "$cfg.new" || { rm -f "$cfg.new"; return 1; }
+    if cmp -s "$cfg" "$cfg.new"; then
+        rm -f "$cfg.new"
+        return 1
+    fi
+    mv -f "$cfg.new" "$cfg"
+}
+# <<< mtx_hls_placeholder
+
+HLS_PASS_RESET=""
 if [ "$KEEP_CONFIG" = "1" ]; then
     echo "✓ Existing configuration kept: $CONFIG_FILE"
     echo "  Backup: $CONFIG_BACKUP"
+    if mtx_ensure_moq_off "$CONFIG_FILE"; then
+        echo "  Added 'moq: no' (this configuration had no MoQ setting; MediaMTX would turn MoQ on and open port 8892)"
+    fi
+    HLS_PASS_NEW=$(openssl rand -base64 16 | tr -d '/+=\n' | head -c 16)
+    if mtx_replace_hls_placeholder "$CONFIG_FILE" "$HLS_PASS_NEW"; then
+        HLS_PASS_RESET="$HLS_PASS_NEW"
+        echo "  The HLS viewer password was still the placeholder 'changeme' (an earlier run stopped early). It is now a random one."
+    fi
 else
 
 # Generate random 16-character HLS viewer password
 HLS_PASS=$(openssl rand -base64 16 | tr -d '/+=\n' | head -c 16)
 
 # Write the custom configuration
-cat > "$CONFIG_FILE" << 'CONFIGEOF'
+cat > "$CONFIG_TMP" << 'CONFIGEOF'
 ###############################################
 # Global settings
 
@@ -947,7 +1021,16 @@ paths:
 CONFIGEOF
 
 # Replace HLS viewer password with random generated one
-sed -i "s/pass: changeme/pass: $HLS_PASS/" /usr/local/etc/mediamtx.yml
+sed -i "s/pass: changeme/pass: $HLS_PASS/" "$CONFIG_TMP"
+
+# Only a finished file gets the real name (ops #1315)
+if ! grep -qxF -- "  pass: $HLS_PASS" "$CONFIG_TMP" || grep -q 'pass: changeme' "$CONFIG_TMP"; then
+    rm -f "$CONFIG_TMP"
+    echo "ERROR: could not set the HLS viewer password in the new configuration. Nothing was installed."
+    exit 1
+fi
+sync
+mv -f "$CONFIG_TMP" "$CONFIG_FILE"
 
 echo "✓ Custom configuration installed"
 echo "  - FFmpeg localhost user (internal, no auth)"
@@ -964,7 +1047,7 @@ echo "=========================================="
 echo "Step 6: Creating systemd Service"
 echo "=========================================="
 
-cat > /etc/systemd/system/mediamtx.service <<EOF
+cat > "$TMP_DIR/mediamtx.service" <<EOF
 [Unit]
 Description=MediaMTX RTSP Server
 After=network.target
@@ -980,11 +1063,105 @@ User=root
 WantedBy=multi-user.target
 EOF
 
+# >>> mtx_write_unit
+# Writes a systemd unit but keeps what the operator changed in it (a hardened User=, Group=, sandbox
+# settings). Only the lines named in KEY... are set to the installer's value: the ones the installer
+# needs. A box with no unit gets the installer's unit as it is. The unit it replaces is kept as
+# UNIT.backup_<time> (systemd ignores that name) (ops #1315).
+# usage: mtx_write_unit UNIT_FILE INSTALLER_UNIT_FILE KEY...
+mtx_write_unit() {
+    local unit=$1 fresh=$2 key line have
+    shift 2
+    if [ ! -s "$unit" ] || ! grep -q '^\[Service\]' "$unit"; then
+        if [ -s "$unit" ]; then cp -p "$unit" "$unit.backup_$(date +%Y%m%d_%H%M%S)"; fi
+        cp "$fresh" "$unit.new" && mv -f "$unit.new" "$unit"
+        return 0
+    fi
+    cp -p "$unit" "$unit.new" || return 1
+    for key in "$@"; do
+        line=$(grep -m1 "^$key=" "$fresh") || continue
+        have=0
+        if grep -q "^$key=" "$unit.new"; then have=1; fi
+        awk -v key="$key" -v line="$line" -v have="$have" '
+            index($0, key "=") == 1 { if (!done) { print line; done = 1 }; next }
+            $0 == "[Service]" { print; if (!have) { print line; done = 1 }; next }
+            { print }
+        ' "$unit.new" > "$unit.new2" && mv -f "$unit.new2" "$unit.new"
+    done
+    if cmp -s "$unit" "$unit.new"; then
+        rm -f "$unit.new"
+    else
+        cp -p "$unit" "$unit.backup_$(date +%Y%m%d_%H%M%S)"
+        mv -f "$unit.new" "$unit"
+    fi
+}
+# <<< mtx_write_unit
+mtx_write_unit /etc/systemd/system/mediamtx.service "$TMP_DIR/mediamtx.service" ExecStart
+
+# >>> mtx_health
+# systemctl restart returns as soon as the process is started, so "restart worked" says nothing about
+# a MediaMTX that exits one second later (a kept config with a key the new version does not know:
+# "unknown field"). Systemd then retries every 5 seconds and the service flips between "activating" and
+# "active". Count it healthy only after it has been active for several checks in a row (ops #1315).
+mtx_wait_active() {
+    local limit=${MTX_HEALTH_SECONDS:-25} stable=${MTX_HEALTH_STABLE:-6} step=${MTX_HEALTH_STEP:-1} i=0 ok=0
+    while [ "$i" -lt "$limit" ]; do
+        if systemctl is-active --quiet mediamtx; then
+            ok=$((ok + 1))
+            if [ "$ok" -ge "$stable" ]; then return 0; fi
+        else
+            ok=0
+        fi
+        sleep "$step"
+        i=$((i + 1))
+    done
+    return 1
+}
+# The last error line MediaMTX wrote, for the message to the operator.
+mtx_last_error() {
+    journalctl -u mediamtx -n 30 --no-pager -o cat 2>/dev/null | grep -iE 'ERR|fatal|invalid|unknown' | tail -n 1 || true
+}
+# The new MediaMTX did not stay up. Put the previous binary and the previous configuration back,
+# start it, say so in plain words, and stop the install with an error.
+# Needs: MTX_BIN, MTX_BIN_BACKUP, KEEP_CONFIG, CONFIG_FILE, CONFIG_BACKUP (set by this script).
+mtx_start_failed() {
+    local version=$1 reason
+    reason=$(mtx_last_error)
+    echo ""
+    echo "ERROR: MediaMTX v$version did not stay running."
+    if [ -n "$reason" ]; then echo "  What MediaMTX said: $reason"; fi
+    if [ -n "$MTX_BIN_BACKUP" ] && [ -f "$MTX_BIN_BACKUP" ]; then
+        echo "  Putting your previous MediaMTX back..."
+        cp -p "$MTX_BIN_BACKUP" "$MTX_BIN.new" && mv -f "$MTX_BIN.new" "$MTX_BIN"
+        if command -v restorecon > /dev/null 2>&1; then restorecon "$MTX_BIN" > /dev/null 2>&1 || true; fi
+        if [ "$KEEP_CONFIG" = "1" ] && [ -f "$CONFIG_BACKUP" ]; then
+            cp -p "$CONFIG_BACKUP" "$CONFIG_FILE"
+        fi
+        systemctl restart mediamtx || true
+        if mtx_wait_active; then
+            echo "  Your previous MediaMTX is back and running. Your settings are as they were."
+            echo "  The new version did not run with your current settings or on this system. Nothing else was changed."
+            echo "  Read what MediaMTX said above, fix that (settings are in $CONFIG_FILE), then run this script again."
+        else
+            echo "  The previous MediaMTX does not stay running either. Your settings are as they were."
+            echo "  Look at the log: journalctl -u mediamtx -n 50"
+        fi
+    else
+        echo "  There was no earlier MediaMTX to go back to."
+        echo "  Look at the log: journalctl -u mediamtx -n 50"
+    fi
+    exit 1
+}
+# <<< mtx_health
+
 systemctl daemon-reload
 systemctl enable mediamtx
 # restart, not start: on a re-run MediaMTX is already running, and `start` would
 # leave the old binary serving.
-systemctl restart mediamtx
+systemctl restart mediamtx || true
+if ! mtx_wait_active; then
+    mtx_start_failed "$LATEST_VERSION"
+fi
 
 echo "✓ MediaMTX service created and started"
 
@@ -1025,6 +1202,11 @@ echo "  Config: /usr/local/etc/mediamtx.yml"
 echo ""
 if [ "$KEEP_CONFIG" = "1" ]; then
     echo "  Your existing configuration was kept (backup: $CONFIG_BACKUP)"
+    if [ -n "$HLS_PASS_RESET" ]; then
+        echo "  HLS Viewer Credentials (the old password was a placeholder, this one is new):"
+        echo "    Username: hlsviewer"
+        echo "    Password: $HLS_PASS_RESET"
+    fi
 else
     echo "  HLS Viewer Credentials:"
     echo "    Username: hlsviewer"
